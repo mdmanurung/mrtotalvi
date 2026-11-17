@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import warnings
+from typing import Literal
 
 import numpy as np
+import pandas as pd
 import torch
 import xarray as xr
 from scipy.special import logsumexp
@@ -103,6 +105,81 @@ def get_aggregated_posterior(
     return MixtureSameFamily(Categorical(probs=weights), Independent(Normal(loc, scale), 1))
 
 
+def _knn_sample_counts(
+    u: np.ndarray,
+    sample_codes: np.ndarray,
+    n_samples: int,
+    k: int,
+    omit_original_sample: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Count reference cells per sample among each query cell's ``k`` nearest neighbours.
+
+    ``sample_codes`` holds the column index of each cell's sample in the analysed sample
+    list, or ``-1`` for cells of samples outside the analysis (queried but never reference).
+    The reference of query cell ``i`` is every analysed cell except ``i`` itself, and, when
+    ``omit_original_sample`` is true, except every cell of ``i``'s own sample.
+
+    Returns ``counts`` and ``n_ref``, both ``(n_cells, n_samples)``. ``counts[i, s]`` is
+    the number of the ``k`` neighbours from sample ``s``; ``n_ref[i, s]`` is the number of
+    reference cells of sample ``s`` available to cell ``i`` (0 for its own sample when
+    omitted).
+    """
+    from sklearn.neighbors import NearestNeighbors
+
+    n_cells = u.shape[0]
+    in_ref = sample_codes >= 0
+    ref_idx = np.flatnonzero(in_ref)
+    sizes = np.bincount(sample_codes[in_ref], minlength=n_samples)
+    counts = np.zeros((n_cells, n_samples), dtype=np.int64)
+    n_ref = np.tile(sizes, (n_cells, 1))
+    own = np.flatnonzero(in_ref)
+    if omit_original_sample:
+        n_ref[own, sample_codes[own]] = 0
+    else:
+        n_ref[own, sample_codes[own]] -= 1  # the cell itself is not its own neighbour
+
+    def _count(query: np.ndarray, ref: np.ndarray, drop_self: bool) -> None:
+        if ref.size < k + int(drop_self):
+            raise ValueError(
+                f"density_estimator='knn' needs at least knn_k={k} reference cells for "
+                f"every query cell; found {ref.size}. Lower knn_k."
+            )
+        nn = NearestNeighbors(n_neighbors=k + int(drop_self)).fit(u[ref])
+        nbr = ref[nn.kneighbors(u[query], return_distance=False)]
+        if drop_self:
+            is_self = nbr == query[:, None]
+            # a query cell outside the reference, or a tie that pushed it out, loses its
+            # farthest neighbour instead
+            is_self[~is_self.any(axis=1), -1] = True
+            keep = ~is_self
+            nbr = nbr[keep].reshape(len(query), k)
+        codes = sample_codes[nbr]
+        for sample in range(n_samples):
+            counts[query, sample] = (codes == sample).sum(axis=1)
+
+    if omit_original_sample:
+        for sample in range(n_samples):
+            query = np.flatnonzero(sample_codes == sample)
+            if query.size:
+                _count(query, ref_idx[sample_codes[ref_idx] != sample], drop_self=False)
+        query = np.flatnonzero(~in_ref)
+        if query.size:
+            _count(query, ref_idx, drop_self=False)
+    else:
+        _count(np.flatnonzero(in_ref), ref_idx, drop_self=True)
+        query = np.flatnonzero(~in_ref)
+        if query.size:
+            _count(query, ref_idx, drop_self=False)
+    return counts, n_ref
+
+
+def _knn_log_density(counts: np.ndarray, n_ref: np.ndarray) -> np.ndarray:
+    """``log(count + 0.5) - log(n_ref)``; NaN where the group has no reference cells."""
+    with np.errstate(divide="ignore"):
+        out = np.log(counts + 0.5) - np.log(n_ref)
+    return np.where(n_ref > 0, out, np.nan)
+
+
 def differential_abundance(
     model,
     *,
@@ -116,11 +193,61 @@ def differential_abundance(
     batch_size: int = 128,
     n_mc_samples: int = 1,
     validated_sample_order: list | None = None,
+    density_estimator: Literal["posterior", "knn", "scale_floor"] = "posterior",
+    knn_k: int = 50,
+    scale_floor: float | None = None,
 ) -> xr.Dataset:
     """Compute MrVI-style differential abundance log probabilities over ``u``.
 
     Parameters
     ----------
+    density_estimator
+        How per-sample densities over ``u`` are estimated.
+
+        ``"posterior"`` (default) is the MrVI aggregated posterior: one Normal kernel per
+        cell, using that cell's posterior scale. It reproduces earlier outputs exactly.
+        Per-cell posterior scales are often far smaller than the spacing between
+        neighbouring cells, which makes the estimate noise-dominated: pairs of samples with
+        no real abundance change can score tens of nats apart.
+
+        ``"scale_floor"`` is the same aggregated posterior with every kernel scale raised to
+        ``max(scale, scale_floor)``. It needs ``scale_floor`` (a positive float; about 0.4
+        calibrated a planted-effect test). ``log_probs`` stay true log densities, now of a
+        smoothed mixture, and every other output keeps its meaning. ``n_mc_samples`` and
+        ``donor_key`` work as for ``"posterior"``.
+
+        ``"knn"`` replaces kernels with neighbour counts in the point-estimate ``u``
+        (``n_mc_samples`` must be 1). For each query cell, take its ``knn_k`` nearest
+        reference cells, where the reference is every cell of an analysed sample except the
+        cell itself, and also except the cell's own sample when
+        ``omit_original_sample=True``. With ``k_g`` of those neighbours in group ``g`` and
+        ``n_g`` reference cells in ``g``, the group score is
+        ``log(k_g + 0.5) - log(n_g)``. It is a log density of ``g`` at the cell up to an
+        additive term, ``-log(volume of the neighbourhood)``, that is the same for every
+        group. Consequences for the outputs:
+
+        - ``{key}_log_probs`` and the log-enrichments are exactly this score and its
+          differences. Enrichment of ``g`` against the rest is
+          ``log(k_g + 0.5) - log(k_rest + 0.5) - log(n_g / n_rest)``, the neighbour-count
+          ratio with pseudocount and sample-size correction.
+        - Per-sample ``log_probs`` use the same score with ``g`` a single sample. They are
+          comparable across samples for one cell and are **not** comparable with
+          ``"posterior"`` values or across cells, because the neighbourhood volume
+          differs per cell. Use differences (the enrichments) across cells.
+        - A group with no reference cells for a cell (its own sample under
+          ``omit_original_sample=True``) scores NaN, where ``"posterior"`` gives ``-inf``.
+        - Group scores are sample-size corrected by cell counts (pooled cells), not by the
+          equal-sample ``logmeanexp`` that ``"posterior"`` uses. Samples with more cells
+          weigh more in a group.
+        - ``donor_key`` is not supported (the centering acts on densities, not counts).
+        - Reference cells are those of ``sample_subset`` samples when given.
+
+    knn_k
+        Neighbours per query cell for ``"knn"``; ignored otherwise. Must be at least 1 and
+        not exceed the reference size.
+    scale_floor
+        Minimum per-dimension kernel scale for ``"scale_floor"``. Must be ``None`` for the
+        other estimators.
     n_mc_samples
         Number of Monte-Carlo draws from ``q(u|x)`` used to estimate the
         per-cell log-probability under each sample's aggregated posterior.
@@ -146,6 +273,23 @@ def differential_abundance(
 
     if n_mc_samples < 1:
         raise ValueError("n_mc_samples must be >= 1.")
+    if density_estimator not in ("posterior", "knn", "scale_floor"):
+        raise ValueError(
+            "density_estimator must be 'posterior', 'knn' or 'scale_floor'; "
+            f"got {density_estimator!r}."
+        )
+    if density_estimator == "scale_floor":
+        if scale_floor is None or not scale_floor > 0:
+            raise ValueError("density_estimator='scale_floor' needs scale_floor > 0.")
+    elif scale_floor is not None:
+        raise ValueError("scale_floor is only used with density_estimator='scale_floor'.")
+    if int(knn_k) != knn_k or knn_k < 1:
+        raise ValueError("knn_k must be an integer >= 1.")
+    if density_estimator == "knn":
+        if n_mc_samples != 1:
+            raise ValueError("density_estimator='knn' uses the posterior mean; set n_mc_samples=1.")
+        if donor_key is not None:
+            raise ValueError("donor_key is not supported with density_estimator='knn'.")
 
     if sample_cov_keys:
         _validate_sample_level_covariates(adata.obs, sample_key, list(sample_cov_keys))
@@ -220,13 +364,29 @@ def differential_abundance(
         ]
 
     log_probs = []
+    knn_counts = knn_n_ref = None
     n_splits = max(int(np.ceil(adata.n_obs / batch_size)), 1)
-    for sample_name in tqdm(sample_values, desc="Aggregated posterior log probabilities"):
+    if density_estimator == "knn":
+        sample_codes = pd.Index(sample_values).get_indexer(adata.obs[sample_key].to_numpy())
+        knn_counts, knn_n_ref = _knn_sample_counts(
+            us_list[0], sample_codes, len(sample_values), int(knn_k), omit_original_sample
+        )
+        sample_sequence = []
+        log_probs = [_knn_log_density(knn_counts, knn_n_ref)]
+    else:
+        sample_sequence = sample_values
+    for sample_name in tqdm(sample_sequence, desc="Aggregated posterior log probabilities"):
         ap = model.get_aggregated_posterior(
             adata=adata,
             sample=sample_name,
             batch_size=batch_size,
         )
+        if density_estimator == "scale_floor":
+            base = ap.component_distribution.base_dist
+            ap = MixtureSameFamily(
+                ap.mixture_distribution,
+                Independent(Normal(base.loc, base.scale.clamp(min=scale_floor)), 1),
+            )
         _dtype = ap.component_distribution.base_dist.loc.dtype
         _device = ap.component_distribution.base_dist.loc.device
         draw_log_probs = []
@@ -242,7 +402,7 @@ def differential_abundance(
             cell_lp = logsumexp(np.stack(draw_log_probs, axis=0), axis=0) - np.log(n_mc_samples)
         log_probs.append(cell_lp[:, None])
 
-    log_probs = np.concatenate(log_probs, axis=1)
+    log_probs = log_probs[0] if density_estimator == "knn" else np.concatenate(log_probs, axis=1)
 
     # Scores used for covariate aggregation. ``log_probs`` stays uncentered in the output.
     agg_log_probs = log_probs
@@ -278,6 +438,11 @@ def differential_abundance(
     )
 
     def aggregate(samples: np.ndarray) -> np.ndarray:
+        if density_estimator == "knn":
+            cols = pd.Index(sample_values).get_indexer(samples)
+            return _knn_log_density(
+                knn_counts[:, cols].sum(axis=1), knn_n_ref[:, cols].sum(axis=1)
+            )
         sample_log_probs = agg_ds.loc[{"sample": samples}].values
         if omit_original_sample:
             sample_one_hot = np.zeros((adata.n_obs, len(samples)))

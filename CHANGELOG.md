@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `differential_abundance(density_estimator=..., knn_k=50, scale_floor=None)`: opt-in calibrated
+  density estimators. `"knn"` scores cells by neighbour counts in `u` (pseudocount 0.5,
+  sample-size corrected, a cell never counts itself or, with `omit_original_sample=True`, its own
+  sample). `"scale_floor"` floors the aggregated-posterior kernel scales. The default
+  `"posterior"` and its outputs are unchanged. Non-default runs set
+  `attrs["density_estimator"]`.
+
 ## 0.1.0.dev0 (2026-11-17): extraction from the `mdmanurung/scvi-tools` fork
 
 MrTotalVI moved from `scvi.external.mrtotalvi` in the fork to the standalone package `mrtotalvi`,
