@@ -132,6 +132,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         kl_z_weight: float = 1.0,
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
+        u_invariance_weight: float = 0.0,
         **kwargs,
     ) -> None:
         if kwargs.get("latent_distribution", "normal") != "normal":
@@ -189,6 +190,17 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # A separate per-term annealing schedule would require training-plan changes.
         self.kl_u_weight = float(kl_u_weight)
         self.kl_z_weight = float(kl_z_weight)
+        # Counterfactual u-invariance penalty (see u_invariance_penalty); 0 disables it.
+        self.u_invariance_weight = float(u_invariance_weight)
+        if self.u_invariance_weight < 0:
+            raise ValueError("u_invariance_weight must be >= 0.")
+        if self.u_invariance_weight > 0 and (
+            hierarchy_mode != "legacy" or u_encoder_mode != "sample_blind"
+        ):
+            raise ValueError(
+                "u_invariance_weight > 0 needs hierarchy_mode='legacy' and "
+                "u_encoder_mode='sample_blind'."
+            )
         self.n_continuous_cov = int(n_continuous_cov)
         self.n_cats_per_cov = list(n_cats_per_cov or [])
         self.qu_encode_covariates = bool(qu_encode_covariates)
@@ -1016,6 +1028,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 + kl_weight * kl_local["kl_div_back_pro"]
             ).mean()
 
+        if self.u_invariance_weight > 0 and self.training:
+            u_pen = self.u_invariance_penalty(tensors, inference_outputs)
+            loss = loss + self.u_invariance_weight * u_pen
+            loss_out.extra_metrics["u_invariance"] = u_pen.detach()
+
         penalty = self.sample_embedding_penalty()
         if penalty is None:
             return LossOutput(
@@ -1038,6 +1055,62 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             kl_global=penalty,
             extra_metrics=loss_out.extra_metrics,
         )
+
+    def u_invariance_penalty(
+        self,
+        tensors: dict[str, torch.Tensor],
+        inference_outputs: dict[str, torch.Tensor | dict],
+    ) -> torch.Tensor:
+        r"""Counterfactual re-encoding penalty that makes ``u`` sample-invariant.
+
+        Under the generative model ``x = f(z_base(u) + eps(u, s))``, ``u`` does not depend on the
+        sample, so two decodes of the same ``u`` under different samples should map back to the
+        same ``u``. For each cell, with ``s`` its own sample and ``s'`` drawn uniformly,
+
+        .. math::
+            P = \operatorname{mean}_i \lVert \mu_u(\bar x(u_i, s'_i)) - \mu_u(\bar x(u_i, s_i))\rVert^2
+
+        where :math:`\bar x` are the deterministic RNA and protein means. Both decodes run
+        without gradients, so only the (sample-blind) ``u`` encoder is trained by ``P``; ``eps``
+        cannot shrink to satisfy it. Comparing two decoded means avoids a noisy-count versus
+        denoised-mean input mismatch.
+        """
+        u = inference_outputs["u"]
+        if u.ndim != 2:
+            raise ValueError("u_invariance_penalty supports a single posterior draw only.")
+        x = tensors[REGISTRY_KEYS.X_KEY]
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        sample_index = tensors[REGISTRY_KEYS.SAMPLE_KEY].to(torch.int64)
+        cont_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY)
+        cat_covs = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY)
+        library = x.sum(dim=-1, keepdim=True)
+        cf_sample = torch.randint(
+            0, int(self._n_sample), sample_index.shape, device=sample_index.device
+        )
+        u_detached = u.detach()
+        decoded = []
+        for s in (sample_index, cf_sample):
+            with torch.no_grad():
+                z_base, eps, _ = self.qz(u_detached, s)
+            dec = self._deterministic_decoder_parameters(
+                z_base + eps, library, batch_index, cont_covs=cont_covs, cat_covs=cat_covs
+            )
+            # Clone out of inference mode so the encoder pass below can be differentiated.
+            decoded.append((dec["rna_rate"].clone(), dec["protein_total_mean"].clone()))
+        qu_batch_index = batch_index if self.qu_encode_covariates else None
+        means = [
+            self.qu(
+                rna,
+                protein,
+                sample_index,
+                batch_index=qu_batch_index,
+                cont_covs=cont_covs if self.qu_encode_covariates else None,
+                cat_covs=cat_covs if self.qu_encode_covariates else None,
+                batch_rep=self._batch_representation_for(qu_batch_index),
+            ).loc
+            for rna, protein in decoded
+        ]
+        return (means[1] - means[0]).square().sum(dim=-1).mean()
 
     @torch.inference_mode()
     def _deterministic_decoder_parameters(
