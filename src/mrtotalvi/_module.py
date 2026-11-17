@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -200,6 +201,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 "pseudo-inputs have no covariate values to feed qu. Use "
                 "u_prior='mog' or 'standard', or encode_covariates=False."
             )
+
+        # Opt-in shrinkage priors on per-sample embedding tables (None = off).
+        self.sample_embedding_prior_scale: float | None = None
+        self.u_encoder_sample_embedding_prior_scale: float | None = None
+        self._n_obs_total: float | None = None
 
         self.batch_representation = batch_representation
         self._batch_dim: int | None = None
@@ -419,6 +425,91 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             self.register_buffer("n_obs_per_sample", n_obs_per_sample.float(), persistent=True)
         else:
             self.n_obs_per_sample = None
+
+    # ------------------------------------------------------------------
+    # Opt-in shrinkage prior on per-sample embedding tables
+    # ------------------------------------------------------------------
+
+    def _set_sample_embedding_prior(
+        self,
+        sample_embedding_prior_scale: float | None,
+        u_encoder_sample_embedding_prior_scale: float | None,
+        n_obs_total: float | None,
+    ) -> None:
+        """Validate and store the shrinkage settings (``None`` switches a prior off)."""
+        for name, value in (
+            ("sample_embedding_prior_scale", sample_embedding_prior_scale),
+            ("u_encoder_sample_embedding_prior_scale", u_encoder_sample_embedding_prior_scale),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not np.isfinite(float(value))
+                or float(value) <= 0.0
+            ):
+                raise ValueError(f"{name} must be None or a finite positive float.")
+        if u_encoder_sample_embedding_prior_scale is not None and (
+            self.u_encoder_mode != "sample_conditioned"
+        ):
+            raise ValueError(
+                "u_encoder_sample_embedding_prior_scale requires "
+                "u_encoder_mode='sample_conditioned'; the sample_blind u encoder has "
+                "no sample tables."
+            )
+        active = (
+            sample_embedding_prior_scale is not None
+            or u_encoder_sample_embedding_prior_scale is not None
+        )
+        if active and (n_obs_total is None or float(n_obs_total) <= 0.0):
+            raise ValueError("A sample-embedding prior needs n_obs_total > 0.")
+        self.sample_embedding_prior_scale = (
+            None if sample_embedding_prior_scale is None else float(sample_embedding_prior_scale)
+        )
+        self.u_encoder_sample_embedding_prior_scale = (
+            None
+            if u_encoder_sample_embedding_prior_scale is None
+            else float(u_encoder_sample_embedding_prior_scale)
+        )
+        self._n_obs_total = None if n_obs_total is None else float(n_obs_total)
+
+    @staticmethod
+    def _centered_sq_norm(table: torch.Tensor) -> torch.Tensor:
+        """``sum_s ||e_s - mean_s e_s||^2`` for a ``(n_sample, dim)`` table."""
+        return ((table - table.mean(dim=0, keepdim=True)) ** 2).sum()
+
+    def sample_embedding_penalty(self) -> torch.Tensor | None:
+        r"""Gaussian shrinkage log-prior penalty on per-sample tables, or ``None`` if off.
+
+        .. math::
+            \sum_{T} \sum_s \lVert e_{T,s} - \bar e_T \rVert^2 / (2\sigma^2)
+
+        The tables ``T`` are the eps attention embedding ``qz.embedding`` (scale
+        ``sample_embedding_prior_scale``) and, when the second scale is set and the
+        u encoder is sample-conditioned, ``qu.sample_embed`` plus the gamma/beta tables of
+        both conditional normalisations (scale ``u_encoder_sample_embedding_prior_scale``).
+        Centring on the across-sample mean leaves a shared offset unpenalised. This is the
+        full-data negative log prior (constants dropped); the loss divides it by the number
+        of cells.
+        """
+        terms = []
+        if self.sample_embedding_prior_scale is not None:
+            sigma = self.sample_embedding_prior_scale
+            terms.append(self._centered_sq_norm(self.qz.embedding.weight) / (2.0 * sigma**2))
+        if (
+            self.u_encoder_sample_embedding_prior_scale is not None
+            and self.u_encoder_mode == "sample_conditioned"
+        ):
+            sigma = self.u_encoder_sample_embedding_prior_scale
+            tables = [
+                self.qu.sample_embed.weight,
+                self.qu.cond_norm1.gamma_embedding.weight,
+                self.qu.cond_norm1.beta_embedding.weight,
+                self.qu.cond_norm2.gamma_embedding.weight,
+                self.qu.cond_norm2.beta_embedding.weight,
+            ]
+            terms.append(sum(self._centered_sq_norm(t) for t in tables) / (2.0 * sigma**2))
+        if not terms:
+            return None
+        return sum(terms)
 
     def _vamp_component_dist(self) -> Normal:
         """Run VampPrior pseudoinputs through qu to get K component distributions.
@@ -925,10 +1016,26 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 + kl_weight * kl_local["kl_div_back_pro"]
             ).mean()
 
+        penalty = self.sample_embedding_penalty()
+        if penalty is None:
+            return LossOutput(
+                loss=loss,
+                reconstruction_loss=loss_out.reconstruction_loss,
+                kl_local=kl_local,
+                extra_metrics=loss_out.extra_metrics,
+            )
+        # ``loss`` is a per-cell mean, so the full-data objective is N * loss. The
+        # penalty is a global term (independent of the minibatch) added once to the
+        # full-data objective, hence ``loss + penalty / N`` with N the number of cells,
+        # not the minibatch size. It is not scaled by ``kl_weight``: the warm-up exists to
+        # stop local latents collapsing, and this prior should act from the first step.
+        # Passing the sum as ``kl_global`` lets the training plan report it as
+        # ``kl_global / n_obs_training``, the scvi-tools convention for global terms.
         return LossOutput(
-            loss=loss,
+            loss=loss + penalty / self._n_obs_total,
             reconstruction_loss=loss_out.reconstruction_loss,
             kl_local=kl_local,
+            kl_global=penalty,
             extra_metrics=loss_out.extra_metrics,
         )
 

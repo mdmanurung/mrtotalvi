@@ -111,6 +111,20 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``"sample_conditioned"`` preserves the historical encoder.
         ``"sample_blind"`` bypasses conditional-normalization affine embeddings
         and the explicit sample embedding without changing checkpoint topology.
+    sample_embedding_prior_scale
+        ``None`` (default) is off and leaves loss and parameters unchanged. A positive
+        ``sigma`` adds the Gaussian shrinkage log-prior
+        ``sum_s ||e_s - mean_s e_s||^2 / (2 sigma^2)`` on the per-sample embedding table
+        that feeds ``eps`` (``module.qz.embedding``), so ``eps`` cannot fit arbitrary
+        per-sample offsets without data support. Centring on the across-sample mean leaves a
+        shared offset unpenalised. The sum is a global term: the loss (a per-cell mean) gains
+        ``penalty / n_cells``, with ``n_cells`` the number of cells in the registered AnnData,
+        so the penalty is not multiplied by the batch size and is not annealed by
+        ``kl_weight``.
+    u_encoder_sample_embedding_prior_scale
+        Same prior with its own ``sigma`` on the u-encoder sample tables (``qu.sample_embed``
+        and the gamma/beta tables of both conditional normalisations). Requires
+        ``u_encoder_mode="sample_conditioned"``. ``None`` (default) is off.
     kl_u_weight
         Static scalar weight applied to ``KL(q_u ‖ p_u)`` before the global
         ``kl_weight`` annealing.  Default ``1.0`` preserves prior behaviour.
@@ -193,6 +207,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         hierarchy_mode: Literal["legacy", "centered_v2"] = "legacy",
         u_encoder_mode: Literal["sample_conditioned", "sample_blind"] = "sample_conditioned",
         scale_observations: bool = False,
+        sample_embedding_prior_scale: float | None = None,
+        u_encoder_sample_embedding_prior_scale: float | None = None,
         kl_u_weight: float = 1.0,
         kl_z_weight: float = 1.0,
         init_prior_from_data: bool = False,
@@ -316,6 +332,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_labels=self.summary_stats.get("n_labels", 0),
             prior_centroids=None,
             freeze_prior_after_init=False,
+        )
+
+        self.module._set_sample_embedding_prior(
+            sample_embedding_prior_scale,
+            u_encoder_sample_embedding_prior_scale,
+            float(n_obs_per_sample.sum()),
         )
 
         registered_sample_key = (

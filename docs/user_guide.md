@@ -301,6 +301,40 @@ model.differential_expression(sample_cov_keys=["condition"])
 # RuntimeError (abbreviated): use donor-pseudobulk PyDESeq2, edgeR, or dreamlet.
 ```
 
+## Sample-embedding shrinkage (opt-in)
+
+`eps` is read from a learned per-sample embedding table (`module.qz.embedding`). Nothing ties
+the rows together except an sd-1 prior on `eps` itself, so `eps` can fit an arbitrary offset
+per sample. In a planted-effect test, `z` separated two random halves of one sample (null AUC
+0.62 to 0.86; stock TOTALVI gave 0.51). The MrVI paper has the same structure.
+
+`sample_embedding_prior_scale=sigma` (default `None`, off) adds a hierarchical Gaussian
+log-prior on that table:
+
+```python
+model = MrTotalVI(adata, sample_key="sample", sample_embedding_prior_scale=0.5)
+```
+
+The penalty is `sum_s ||e_s - mean_s e_s||^2 / (2 sigma^2)`. It centres on the across-sample
+mean, so a shared offset costs nothing. A smaller `sigma` shrinks harder. The value is yours to
+choose: no sigma has been calibrated, and the default stays off.
+
+`u_encoder_sample_embedding_prior_scale` applies the same penalty, with its own sigma, to the
+u-encoder tables when `u_encoder_mode="sample_conditioned"`: `qu.sample_embed` and the gamma and
+beta tables of both conditional normalisations. It raises under `sample_blind`.
+
+Scaling: the training loss is a per-cell mean, so the full-data objective is `n_cells * loss`.
+The penalty is a global term in that objective, so the loss gains `penalty / n_cells` once per
+step, where `n_cells` is the cell count of the AnnData passed to `MrTotalVI`. It is not
+multiplied by the batch size, and `kl_weight` warm-up does not scale it. The penalty is also
+reported as `kl_global`, which the training plan divides by `n_obs_training`. With a
+`train_size` below 1, the penalty is relative to all cells, not the training split.
+
+Caveats. The table passes through a LayerNorm before attention, and the shared mean is not
+penalised. A model can therefore grow the mean to make the shrunk differences matter less after
+normalisation. Check the spread of the embeddings after training before relying on the setting.
+`get_aggregated_posterior`-based abundance scores are separate and not changed by this option.
+
 ## Inherited training defaults
 
 `MrTotalVI.train()` keeps the TOTALVI schedule. Two defaults act on the `u`/`eps` hierarchy, and
