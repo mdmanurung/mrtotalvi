@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mrtotalvi"
+version = "0.1.0.dev0"
+description = "TOTALVI with an MrVI-style sample-aware hierarchical latent space for CITE-seq."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "scvi-tools>=1.5.2",
+    "xarray",
+    "zarr",
+    "dask",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "h5py"]
+lamin = ["lamindb"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mrtotalvi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 99
+src = ["src"]

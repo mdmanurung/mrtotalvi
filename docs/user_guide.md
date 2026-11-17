@@ -1,0 +1,367 @@
+# MrTotalVI user guide
+
+`MrTotalVI` extends TotalVI with the MrVI hierarchical sample latent:
+
+1. `u` is the base representation used for integration and aggregated posterior
+   statistics. It is sample-conditioned by default.
+2. `z = z_base(u) + eps` is the sample-aware representation used for local
+   counterfactual donor queries.
+
+The model keeps the stock TotalVI decoder unchanged. The hierarchy changes the encoder and
+latent prior, not the RNA/protein likelihood definitions.
+
+Engineering coverage does not promote a prior, representation claim, DA/DE inference, streaming,
+or new-sample inference.
+
+```python
+from mrtotalvi import MrTotalVI
+```
+
+## Setup
+
+Register a `sample_key` for the donor or sample axis. RNA (the registered layer or `X`) and protein
+(`obsm`) inputs must be finite, non-negative, integer-like **raw counts**. Setup exhaustively checks
+all values before mutating AnnData state.
+
+`labels_key` records annotations but does not change the default unsupervised objective. To opt into
+label supervision, set `u_prior_supervision="labels"` and a finite positive
+`u_prior_label_weight`; disclose that choice in every comparison.
+
+```python
+MrTotalVI.setup_anndata(
+    adata,
+    protein_expression_obsm_key="protein_expression",
+    sample_key="donor",
+    batch_key="batch",
+    labels_key="cell_type",
+)
+
+model = MrTotalVI(
+    adata,
+    sample_key="donor",
+    n_latent=20,
+    n_latent_u=10,
+    u_prior_supervision="none",  # default even when labels_key is registered
+)
+```
+
+The historical behavior remains the default. Opt into the package-only v2
+semantics explicitly:
+
+```python
+model_v2 = MrTotalVI(
+    adata,
+    sample_key="donor",
+    n_latent=20,
+    n_latent_u=10,
+    hierarchy_mode="centered_v2",
+    u_encoder_mode="sample_blind",
+    use_map=True,
+    z_u_prior=True,
+)
+```
+
+`centered_v2` requires `use_map=True` and `z_u_prior=True`. The
+`sample_blind` encoder bypasses biological sample embeddings while retaining
+explicitly registered technical covariates. It does not change parameter names
+or shapes.
+
+## Prior Options
+
+New MrTotalVI calls resolve `u_prior` to exactly `"standard"`, `"mog"`, or `"vamp"`; the default
+is `"mog"` for continuity, not because it is scientifically preferred.
+
+- `n_latent_u=None` preserves the original isomorphic hierarchy, so `u` and `z` have the same
+  dimensionality.
+- `n_latent_u < n_latent` learns a lower-dimensional `u` and projects it into `z`.
+- `u_prior="mog"` uses learned mixture logits, means, and scales.
+- `u_prior="standard"` uses an analytic Gaussian prior over `u`.
+- `u_prior="vamp"` uses pseudoinputs; data initialization is restricted to frozen training indices
+  and records its seed and ordered-index digest.
+- `u_prior_supervision="labels"` is the only label-conditioned mode and requires registered labels
+  plus a finite positive weight. The default is `"none"` with weight `0.0`.
+- `z_u_prior=False` omits the residual `eps` prior penalty while keeping the `u` prior.
+
+Behaviour of the prior options that is easy to miss, all unchanged package defaults:
+
+- **Vamp pseudo-inputs are encoded as donor 0.** In `u_encoder_mode="sample_conditioned"`
+  the pseudo-inputs pass through the sample-conditioned `qu` with sample index 0, so the prior
+  sits in donor 0's frame and the KL sends gradient to donor 0's conditioning parameters.
+  `sample_blind` mode is unaffected. MrTotalVI also feeds batch 0 when `encode_covariates=True`.
+  In MrTotalVI, `u_prior="vamp"` with `encode_covariates=True` and registered covariates raises,
+  because the pseudo-inputs have no covariate values.
+- **Vamp data initialization clusters raw counts.** `init_prior_from_data=True` runs k-means on
+  the concatenated, untransformed RNA and protein counts of a random subsample of at most 10,000
+  training cells, so centroids are likely dominated by library size and by the higher-count
+  modality.
+- **Label supervision does not match components to labels at initialization.** With
+  `u_prior_supervision="labels"` and Vamp data initialization, k-means cluster `k` is assigned to
+  label `k` without checking that the cluster contains that label's cells. An "Unknown" or
+  "unassigned" label is treated as one more class and gets its own supervised component, because
+  `labels_key` has no `unlabeled_category`. Supervision also replaces `u_prior_mixture_k` by the
+  number of labels.
+
+The deprecated `u_prior_mixture` boolean is accepted only for exact historical migration
+combinations; contradictory combinations fail before module
+construction.
+
+`latent_distribution="ln"` is rejected because the additive `u -> z` hierarchy is Euclidean.
+
+### Choosing a prior: unsettled
+
+No prior is generally recommended. The analysis historically used to justify MoG is unrecoverable
+and used non-authoritative geometry. One-dataset Vamp results are insufficient for promotion.
+Prespecify prior choice, include MoG/Vamp sensitivity where relevant, and do not choose after seeing
+the biological outcome. The following is an experimental sensitivity arm, not a preferred recipe.
+
+The two flags are not gated the same way. `init_prior_from_data` applies only to `u_prior="vamp"`.
+When enabled, initialization uses only the frozen training indices and persists the seed and
+ordered-index digest; validation/test cells cannot influence pseudoinputs. `freeze_prior_after_init`
+also exists for historical sensitivity work, but no combination of these flags is a recommended
+scientific default.
+
+```python
+model = MrTotalVI(
+    adata,
+    sample_key="donor",
+    u_prior="vamp",
+    u_prior_mixture_k=20,
+    init_prior_from_data=True,
+    freeze_prior_after_init=True,
+    use_batch_norm="none",
+    use_layer_norm="both",
+)
+```
+
+This code block is therefore an explicitly prespecified sensitivity arm. It is not evidence that
+Vamp is preferable to MoG or standard Gaussian on a new dataset.
+
+## Representations
+
+Use `give_z=False` for the `u` representation and `give_z=True` for the donor-aware `z`
+representation.
+
+```python
+u = model.get_latent_representation(give_z=False)
+z = model.get_latent_representation(give_z=True)
+local_z = model.get_local_sample_representation()
+local_d = model.get_local_sample_distances()
+```
+
+The default `u` encoder is sample-conditioned, so do not describe legacy `u` as
+sample-unaware or donor-neutral. `u_encoder_mode="sample_blind"` removes the
+implemented sample-conditioning paths, but this software property alone does
+not establish biological disentanglement. Use `z` for registered-sample model
+transformations and local sample distances.
+
+## Batch representation
+
+By default the batch covariate is one-hot encoded, so every batch adds a column to the
+u-encoder input and to each decoder layer. With many batches that becomes the dominant
+input width. `batch_representation="embedding"` replaces the one-hot code with a single
+learned embedding table shared by the u-encoder and the decoder:
+
+```python
+model = MrTotalVI(
+    adata,
+    sample_key="donor",
+    encode_covariates=True,             # required for batch to reach the u-encoder
+    batch_representation="embedding",
+    batch_embedding_kwargs={"embedding_dim": 5},
+)
+model.train()
+batch_vectors = model.get_batch_representation()   # (n_cells, embedding_dim); embedding mode only
+```
+
+The input width then grows by `embedding_dim` instead of by `n_batch`. Note
+`encode_covariates` defaults to `False` on this model, and batch only enters the
+u-encoder when it is `True`; the decoder uses the representation either way.
+
+Per-batch *parameter tables* stay one-hot indexed in both modes — gene and protein
+dispersion, `log_per_batch_efficiency`, the protein background prior and the library-size
+priors. Those are lookup tables rather than network inputs, matching {class}`~scvi.module.VAE`.
+
+`"one-hot"` remains the default and is bit-for-bit unchanged, so existing checkpoints are
+unaffected. `"embedding"` changes the architecture, so a model trained with it cannot be
+reloaded as `"one-hot"`.
+
+## Opt-in centered counterfactual datasets
+
+The v2 APIs are available only when `hierarchy_mode="centered_v2"`.
+Residuals are evaluated for every registered sample, centered over that full
+registry, and only then subset to requested targets.
+
+```python
+latent = model_v2.get_counterfactual_latent(
+    indices=query_indices,
+    target_samples=["donor_a", "donor_b"],
+    inference_mode="posterior_mc",
+    n_draws=32,
+    random_state=0,
+)
+
+expression = model_v2.get_counterfactual_expression(
+    indices=query_indices,
+    target_samples=["donor_a", "donor_b"],
+    gene_list=["IL7R", "LST1"],
+    protein_list=["CD3", "CD14"],
+    batch_policy="observed",
+    panel_policy="observed",
+    library_policy="observed",
+)
+```
+
+The latent dataset names `u`, `z_base`, `eps_raw`, `eps_centered`, and `z`.
+The expression dataset names RNA scale/rate and deterministic protein mixture
+components, contributions, totals, batch efficiency, and panel availability.
+Posterior Monte Carlo output retains raw `draw` values and adds posterior means
+and quantiles.
+
+Technical contexts are explicit:
+
+- `observed` holds each query cell's factual batch, panel, extra covariates,
+  and effective library fixed across targets. The effective library is the
+  registered size factor when present, otherwise the observed RNA total under
+  the default TotalVI setting, or the posterior log-normal mean when
+  `use_observed_lib_size=False`.
+- `specified` requires registered batch/panel labels and a positive library
+  scalar or cell-aligned vector.
+- `sample_balanced_marginal` weights biological samples equally and empirical
+  joint batch/panel contexts within each sample. Batch and panel cannot be
+  marginalized separately.
+
+In-memory output has a hard 512 MiB estimate including summaries and overhead. Requests above that
+limit must be reduced through explicit cell, target, or feature subsetting. Public `zarr_path` /
+`zarr_chunks` streaming is quarantined and fails before filesystem access.
+
+All targets are limited to registered samples. These datasets are model-based,
+non-causal transformations. Centering defines the reported decomposition; it
+does not prove identifiability, biological neutrality, or superiority over the
+legacy model.
+
+For descriptive local densities:
+
+```python
+enrichment = model_v2.local_sample_enrichment(
+    group_key="condition",
+    contrast=("treated", "control"),
+    donor_key="patient",
+)
+```
+
+`donor_key` must name a column that groups the samples of one patient, with exactly one
+`treated` and one `control` sample per patient. It cannot be the model's own `sample_key`
+(`"donor"` above), because each registered sample then belongs to its own group and the
+pairing check raises.
+
+Group densities use equal-sample `logmeanexp`; only a query cell's factual
+reference mixture excludes that cell. These outputs and grouped
+`differential_abundance()` results are descriptive and non-inferential.
+
+## Statistical APIs
+
+MrTotalVI exposes aggregated-posterior and outlier utilities and descriptive DA:
+
+```python
+ap = model.get_aggregated_posterior()
+da = model.differential_abundance(sample_cov_keys=["condition"])
+outliers = model.get_outlier_cell_sample_pairs()
+```
+
+`MrTotalVI.differential_abundance()` is descriptive and non-inferential. Its public
+`differential_expression()` fails closed for both legacy and centered-v2 models. For biological
+DE, aggregate raw counts at the donor-by-condition level and use a replicate-aware method such as
+PyDESeq2, edgeR, or dreamlet:
+
+```python
+model.differential_expression(sample_cov_keys=["condition"])
+# RuntimeError (abbreviated): use donor-pseudobulk PyDESeq2, edgeR, or dreamlet.
+```
+
+## Inherited training defaults
+
+`MrTotalVI.train()` keeps the TOTALVI schedule. Two defaults act on the `u`/`eps` hierarchy, and
+`train()` warns when either applies.
+
+- **KL warm-up.** `n_steps_kl_warmup` defaults to `0.75 * n_obs` steps, while the default
+  `max_epochs` shrinks as `8e6 / n_obs` above 20,000 cells. Above roughly 40,000 cells (about 37,500 at the default batch size of 256 and train
+  fraction of 0.9) the schedule cannot finish, so `kl_weight` stops below 1 and the protein likelihood, `kl_u`,
+  `kl_z` and the background KL are down-weighted for the whole run. Pass `max_epochs`,
+  `n_steps_kl_warmup` or `n_epochs_kl_warmup` to make it finish. Pass these (and `lr`) to
+  `train()` directly: `train()` overwrites the same keys inside `plan_kwargs` with its own
+  defaults, so `plan_kwargs={"n_epochs_kl_warmup": 40}` has no effect.
+- **Adversarial batch classifier.** It is on whenever a protein has all-zero counts in some batch
+  and `override_missing_proteins=False`. It acts on `z = u + eps`, not on the sample-free `u`, so
+  it can penalise donor information in `eps` when donors are nested in batches. With the legacy
+  `scale_observations=True` and `hierarchy_mode="legacy"` the per-cell ELBO is divided by the
+  sample's cell count while the adversarial loss is not, so the adversary carries a much larger relative weight (inferred from the code, not measured). Pass
+  `adversarial_classifier=False` to turn it off.
+
+Other inherited TOTALVI methods are not re-derived for `u`/`eps`: `get_marginal_ll` raises, and
+`get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell's
+own donor `eps` (use the counterfactual APIs to change the donor).
+
+## v1 Limitations
+
+These limitations are intentional cuts documented in ADR-0005.
+
+**Differential expression:**
+- MrTotalVI accepts only `use_vmap=False`; `use_vmap=True` raises before inference/statistics.
+
+**Differential expression — empirical validation note (eps-space limitation):**
+The LFC values returned by `store_lfc=True` are decoded from the `eps = z − u` residual, which
+captures the *donor-specific* deviation from the sample-conditioned base `u`. Because the `u` encoder
+absorbs cell-state variation (including treatment-induced states such as IFN activation) as part of
+cell identity, `eps` carries minimal cell-state treatment signal. On one CITE-seq dataset
+(schistosomiasis, n=10 donors, 12 cell types), eps-space LFC from MRVI, MrTotalVI and MrMultiVI was **anti-concordant** with pseudobulk DE gold standard (PyDESeq2,
+Spearman rho −0.24 to +0.04 across all cell types). This limitation is architectural and
+cell-type-universal: no cell type showed positive concordance between model LFC and pseudobulk
+direction. These historical internals remain private for reproduction; the public MrTotalVI method
+does not return p-values or decoded LFC. Use donor-pseudobulk for biological inference.
+
+**Differential abundance — sample-count sensitivity:**
+`MrTotalVI.differential_abundance` is unreliable when `sample_key` maps to many samples relative
+to the prior capacity. In one experiment with 38 donor-timepoint samples (schistosomiasis DTP
+cohort, 3 seeds), MrTotalVI DA varied from −9.0 to +9.7 across seeds (per-seed: s0 = +2.74,
+s1 = −9.04, s2 = +9.67; std 9.46 >> mean 1.12). Those fits stopped before KL warm-up finished
+(`kl_weight` 0.23–0.42). Refits with a completed 40-epoch warm-up and the current unsupervised
+default prior gave +0.80, +0.68, +0.40 (mean +0.63 ± 0.20), so most of that instability came from
+the incomplete warm-up; the two changes were not separated. If using
+`differential_abundance` with a `sample_key` that expands the sample count significantly (e.g.
+`sample_key="donor_timepoint"`), do not interpret the package output as inferential evidence.
+Use an independently validated, replicate-aware compositional method for biological DA.
+
+**ArchesMixin / scArches surgery:**
+MrTotalVI does not support reference-query surgery or the `ArchesMixin` protocol.
+
+**Streaming and new-sample inference:**
+`MrTotalVIBatchDataModule` is not a stable public training API, and this package does not claim end-to-end
+streaming training or inference for biological samples absent from the registered training set.
+
+**Objective (methods note):**
+The default training objective (`use_map=True`) is a MAP/cross-entropy penalty on the residual
+`eps`, not a strict ELBO. For the legacy hierarchy, the analytic ELBO — including the `q(eps)`
+entropy term — is available via `use_map=False` at model construction. Centered v2 requires
+`use_map=True`.
+```python
+model = MrTotalVI(adata, sample_key="donor", use_map=False)
+```
+
+The `kl_u` term uses a single-sample Monte-Carlo estimate of `KL(q(u)‖p(u))` (unbiased, higher
+variance than analytic).
+
+`differential_abundance` computes no test. The Wald statistic in `differential_expression` (private; the public method refuses) is compared with a Chi²
+distribution whose degrees of freedom equal the number of admissible samples per cell, as in the
+MrVI reference. That choice has not been calibrated here and is not shown to be conservative: the
+statistic sums squared standardized coefficients over the `n_latent` dimensions, so with fewer
+samples than latent dimensions the p-values can be anti-conservative. Treat the p-values as
+descriptive until a null simulation supports them.
+
+The design matrix (`_construct_design_matrix`) has no intercept. The response `eps` is mean-centred
+per cell across samples before regression, but the design columns are not centred. A constant term
+is therefore not unidentifiable. Instead, each coefficient estimates the contrast against the mean
+of all samples, not against a reference group: for one binary covariate with `n0` samples at the
+reference level and `n1` at the other, beta is `n0/n` times the group difference, so it is half of
+the difference in a balanced design and changes with the choice of reference level. This matches
+the MrVI reference and is unchanged. The effect sizes, decoded LFCs and Wald statistics inherit
+that scale.
