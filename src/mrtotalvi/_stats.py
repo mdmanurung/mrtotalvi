@@ -283,9 +283,9 @@ def differential_abundance(
             raise ValueError("density_estimator='scale_floor' needs scale_floor > 0.")
     elif scale_floor is not None:
         raise ValueError("scale_floor is only used with density_estimator='scale_floor'.")
+    if int(knn_k) != knn_k or knn_k < 1:
+        raise ValueError("knn_k must be an integer >= 1.")
     if density_estimator == "knn":
-        if int(knn_k) != knn_k or knn_k < 1:
-            raise ValueError("knn_k must be an integer >= 1.")
         if n_mc_samples != 1:
             raise ValueError("density_estimator='knn' uses the posterior mean; set n_mc_samples=1.")
         if donor_key is not None:

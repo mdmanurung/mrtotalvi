@@ -165,6 +165,7 @@ def test_default_equals_explicit_posterior_on_trained_model():
         ({"density_estimator": "scale_floor", "scale_floor": -1.0}, "needs scale_floor > 0"),
         ({"density_estimator": "posterior", "scale_floor": 0.4}, "only used with"),
         ({"density_estimator": "knn", "knn_k": 0}, "knn_k must be"),
+        ({"density_estimator": "posterior", "knn_k": -3}, "knn_k must be"),
         ({"density_estimator": "knn", "n_mc_samples": 2}, "n_mc_samples=1"),
         (
             {"density_estimator": "knn", "donor_key": "sample", "omit_original_sample": False},

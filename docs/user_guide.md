@@ -283,8 +283,10 @@ model.differential_abundance(sample_cov_keys=["condition"], compute_log_enrichme
 
 `"scale_floor"` raises every kernel scale to `max(scale, scale_floor)`. `"knn"` counts, among
 each cell's `knn_k` nearest reference cells in `u`, the cells of each sample or group; the score
-is `log(k + 0.5) - log(n_reference)`. Both recovered a planted depletion and kept untouched pairs
-within about 0.3 of 0 in the test above (`knn_k=50`, floor about 0.4). Under `"knn"` the per-sample
+is `log(k + 0.5) - log(n_reference)`. In a synthetic 2-D check
+(`tests/test_da_density_estimator.py`) both recovered a planted depletion, with a per-cell null sd
+of about 0.2-0.3 (`knn_k=50`, floor 0.4); the posterior estimator's null sd there was about 10.
+Under `"knn"` the per-sample
 `log_probs` are comparable across samples within a cell but not across cells or with `"posterior"`
 values, so read the enrichments. `donor_key` is not available with `"knn"`. Both remain
 descriptive. See the `differential_abundance` docstring for the full mapping.
