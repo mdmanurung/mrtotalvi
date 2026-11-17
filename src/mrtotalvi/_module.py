@@ -132,6 +132,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         kl_z_weight: float = 1.0,
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
+        sample_embedding_prior_post_ln: bool = False,
         **kwargs,
     ) -> None:
         if kwargs.get("latent_distribution", "normal") != "normal":
@@ -189,6 +190,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # A separate per-term annealing schedule would require training-plan changes.
         self.kl_u_weight = float(kl_u_weight)
         self.kl_z_weight = float(kl_z_weight)
+        # Apply the eps sample-embedding prior after layer_norm_embed (closes the LayerNorm
+        # loophole: a raw-table prior can be undone by shrinking the free across-sample mean).
+        self.sample_embedding_prior_post_ln = bool(sample_embedding_prior_post_ln)
         self.n_continuous_cov = int(n_continuous_cov)
         self.n_cats_per_cov = list(n_cats_per_cov or [])
         self.qu_encode_covariates = bool(qu_encode_covariates)
@@ -493,7 +497,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         terms = []
         if self.sample_embedding_prior_scale is not None:
             sigma = self.sample_embedding_prior_scale
-            terms.append(self._centered_sq_norm(self.qz.embedding.weight) / (2.0 * sigma**2))
+            table = self.qz.embedding.weight
+            if self.sample_embedding_prior_post_ln:
+                table = self.qz.layer_norm_embed(table)
+            terms.append(self._centered_sq_norm(table) / (2.0 * sigma**2))
         if (
             self.u_encoder_sample_embedding_prior_scale is not None
             and self.u_encoder_mode == "sample_conditioned"
