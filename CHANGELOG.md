@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Opt-in `sample_embedding_prior_scale` and `u_encoder_sample_embedding_prior_scale` on
+  `MrTotalVI`: a Gaussian shrinkage log-prior `sum_s ||e_s - mean_s e_s||^2 / (2 sigma^2)` on
+  the per-sample embedding tables that feed `eps` (and, separately, the sample-conditioned
+  u-encoder). Both default to `None` (off); loss and parameters are unchanged then. The term
+  enters the loss as `penalty / n_cells`. See `docs/user_guide.md`.
+
 ## 0.1.0.dev0 (2026-11-17): extraction from the `mdmanurung/scvi-tools` fork
 
 MrTotalVI moved from `scvi.external.mrtotalvi` in the fork to the standalone package `mrtotalvi`,
