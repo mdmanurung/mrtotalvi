@@ -268,6 +268,27 @@ da = model.differential_abundance(sample_cov_keys=["condition"])
 outliers = model.get_outlier_cell_sample_pairs()
 ```
 
+`differential_abundance()` takes an opt-in `density_estimator`. The default `"posterior"` is the
+MrVI aggregated posterior and its output is unchanged. Per-cell posterior scales (about 0.06 per
+dimension in one planted-effect test) can be far below the spacing between neighbouring cells
+(about 0.5), and then the log densities are noise-dominated: sample pairs with no abundance
+change scored between -3.8 and +19.7 nats. Two calibrated alternatives:
+
+```python
+model.differential_abundance(sample_cov_keys=["condition"], compute_log_enrichment=True,
+                             density_estimator="knn", knn_k=50)
+model.differential_abundance(sample_cov_keys=["condition"], compute_log_enrichment=True,
+                             density_estimator="scale_floor", scale_floor=0.4)
+```
+
+`"scale_floor"` raises every kernel scale to `max(scale, scale_floor)`. `"knn"` counts, among
+each cell's `knn_k` nearest reference cells in `u`, the cells of each sample or group; the score
+is `log(k + 0.5) - log(n_reference)`. Both recovered a planted depletion and kept untouched pairs
+within about 0.3 of 0 in the test above (`knn_k=50`, floor about 0.4). Under `"knn"` the per-sample
+`log_probs` are comparable across samples within a cell but not across cells or with `"posterior"`
+values, so read the enrichments. `donor_key` is not available with `"knn"`. Both remain
+descriptive. See the `differential_abundance` docstring for the full mapping.
+
 `MrTotalVI.differential_abundance()` is descriptive and non-inferential. Its public
 `differential_expression()` fails closed for both legacy and centered-v2 models. For biological
 DE, aggregate raw counts at the donor-by-condition level and use a replicate-aware method such as

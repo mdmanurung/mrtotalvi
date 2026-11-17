@@ -836,6 +836,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         donor_key: str | None = None,
         batch_size: int = 128,
         n_mc_samples: int = 1,
+        density_estimator: Literal["posterior", "knn", "scale_floor"] = "posterior",
+        knn_k: int = 50,
+        scale_floor: float | None = None,
     ) -> xr.Dataset:
         """Compute descriptive MrVI-style abundance scores over ``u``.
 
@@ -865,6 +868,18 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             MC draws from ``q(u|x)`` for Jensen-gap bias correction.
             See :func:`~mrtotalvi._stats.differential_abundance`
             for full semantics.  Default ``1`` preserves deterministic behavior.
+        density_estimator
+            ``"posterior"`` (default, unchanged MrVI aggregated posterior), ``"knn"``
+            (neighbour-count density ratio in ``u``) or ``"scale_floor"`` (aggregated
+            posterior with kernel scales raised to ``scale_floor``). The non-default
+            estimators are opt-in calibrations for the noise of per-cell posterior
+            scales; see :func:`~mrtotalvi._stats.differential_abundance` for how each
+            maps onto ``log_probs`` and the covariate outputs.
+        knn_k
+            Neighbours per query cell for ``"knn"``.
+        scale_floor
+            Minimum kernel scale for ``"scale_floor"`` (about 0.4 calibrated a
+            planted-effect test); ``None`` for the other estimators.
         """
         adata = self._validate_anndata(adata)
         selected_samples, _ = validate_sample_metadata(
@@ -894,7 +909,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             batch_size=batch_size,
             n_mc_samples=n_mc_samples,
             validated_sample_order=selected_samples,
+            density_estimator=density_estimator,
+            knn_k=knn_k,
+            scale_floor=scale_floor,
         )
+        if density_estimator != "posterior":
+            result.attrs["density_estimator"] = density_estimator
         result.attrs.update(
             {
                 "interpretation": "descriptive_non_inferential",
