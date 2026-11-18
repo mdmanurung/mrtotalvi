@@ -59,7 +59,7 @@ def test_user_kwargs_override_per_key(adata):
     )
     assert model.module.qz.dropout_rate == 0.0
     assert model.module.qz.stop_gradients_mlp is True  # default key kept
-    assert model.module.qu_kwargs == {"n_hidden": 16}
+    assert model.module.qu_kwargs == {"n_layers": 2, "n_hidden": 16}  # default key kept
     assert MrTotalVI(adata, sample_key="sample", n_latent_u=None).module.qz.fc is None
 
 
@@ -106,7 +106,7 @@ def test_checkpoint_with_new_defaults_round_trips(adata, tmp_path):
     loaded = MrTotalVI.load(tmp_path / "new", adata=adata, accelerator="cpu")
     assert (loaded.module.n_latent, loaded.module.n_latent_u) == (30, 10)
     assert loaded.module.qz.dropout_rate == 0.03 and loaded.module.qz.stop_gradients_mlp
-    assert "n_layers" not in (loaded.module.qu_kwargs or {})
+    assert loaded.module.qu_kwargs["n_layers"] == 2
 
 
 def _parameter_shift(scale_observations, plan_kwargs):
@@ -151,13 +151,6 @@ def test_checkpoint_saved_with_one_layer_qu_default_loads_one_layer(adata, tmp_p
     assert loaded.module.qu_kwargs.get("n_layers", 1) == 1
     for name, tensor in old.module.state_dict().items():
         assert torch.equal(tensor.cpu(), loaded.module.state_dict()[name].cpu()), name
-
-
-def test_new_checkpoint_round_trips_two_layer_qu(adata, tmp_path):
-    model = MrTotalVI(adata, sample_key="sample", n_latent=6)
-    model.save(tmp_path / "p05", overwrite=True, save_anndata=False)
-    loaded = MrTotalVI.load(tmp_path / "p05", adata=adata, accelerator="cpu")
-    assert loaded.module.qu_kwargs["n_layers"] == 2
 
 
 def test_load_with_positional_prefix(adata, tmp_path):
