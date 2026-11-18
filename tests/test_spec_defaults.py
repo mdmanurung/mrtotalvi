@@ -134,3 +134,13 @@ def test_scale_observations_trains_under_new_eps():
     plain_old = _parameter_shift(False, {"eps": 0.01})
     scaled_old = _parameter_shift(True, {"eps": 0.01})
     assert scaled_old / plain_old < 0.7  # measured 0.47
+
+
+def test_load_with_positional_prefix(adata, tmp_path):
+    # load() used to read model.pt itself before scvi did, taking ``prefix`` from keyword
+    # arguments only, so a positional prefix raised FileNotFoundError.
+    model = MrTotalVI(adata, sample_key="sample", n_latent=6)
+    model.save(tmp_path / "m", prefix="run1_", overwrite=True, save_anndata=False)
+    loaded = MrTotalVI.load(tmp_path / "m", adata, "cpu", "auto", "run1_")
+    assert loaded.init_params_["non_kwargs"]["spec_defaults"] is True
+    assert loaded.module.qz.dropout_rate == 0.03

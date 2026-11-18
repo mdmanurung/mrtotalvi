@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import warnings
-from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -59,19 +57,6 @@ if TYPE_CHECKING:
 # schedule are not defaults (candidate p03 chosen over p05, user 2026-11-18).
 DEFAULT_QZ_KWARGS: dict = {"stop_gradients_mlp": True, "dropout_rate": 0.03}
 DEFAULT_PLAN_KWARGS: dict = {"eps": 1e-8, "weight_decay": 1e-8}
-
-# True only while ``MrTotalVI.load`` rebuilds a checkpoint saved before ``spec_defaults``.
-_LEGACY_DEFAULTS_LOAD: ContextVar[bool] = ContextVar("_LEGACY_DEFAULTS_LOAD", default=False)
-
-
-def _checkpoint_lacks_spec_defaults(dir_path, load_kwargs) -> bool:
-    """Return True when the saved ``init_params_`` has no ``spec_defaults`` entry."""
-    prefix = load_kwargs.get("prefix") or ""
-    saved = torch.load(
-        os.path.join(dir_path, f"{prefix}model.pt"), map_location="cpu", weights_only=False
-    )
-    non_kwargs = saved["attr_dict"]["init_params_"]["non_kwargs"]
-    return "spec_defaults" not in non_kwargs
 
 
 class MrTotalVI(EmbeddingMixin, TOTALVI):
@@ -157,10 +142,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         so the penalty is not multiplied by the batch size and is not annealed by
         ``kl_weight``. With the legacy ``scale_observations=True`` each cell's data term is
         also divided by its donor's cell count while the penalty is not, so one ``sigma``
-        shrinks more weakly than without it (``hierarchy_mode="centered_v2"`` weights average
+        shrinks relatively more strongly, by about the donor's cell count, than without it (``hierarchy_mode="centered_v2"`` weights average
         to 1 and are unaffected). The validation metric ``elbo_validation`` reports the
         penalty as ``kl_global / n_obs_validation`` (the scvi-tools convention), about
-        ``n_obs_training / n_obs_validation`` times its per-cell size in the loss, and
+        ``n_cells / n_obs_validation`` times its per-cell size in the loss, and
         :meth:`get_elbo` leaves it out.
     u_encoder_sample_embedding_prior_scale
         Same prior with its own ``sigma`` on the u-encoder sample tables (``qu.sample_embed``
@@ -192,7 +177,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         default; MrVI uses ``n_layers=2``).
     spec_defaults
         ``None`` (default) applies the ``qz_kwargs`` defaults above. ``False`` skips them
-        and reproduces the ``qz`` built before 0.2 (no stop-gradient or dropout). The resolved value is saved
+        and reproduces the ``qz`` built before ``spec_defaults`` existed (no stop-gradient or dropout). The resolved value is saved
         with the model; checkpoints that lack it load with ``False``.
     kl_z_weight
         Static scalar weight applied to ``KL(q_z ‖ p_z)`` before the global
@@ -289,10 +274,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         spec_defaults: bool | None = None,
         **model_kwargs,
     ) -> None:
-        # MrVI-matching encoder defaults. ``None`` means "on", except while loading a
-        # checkpoint that predates the flag, which must rebuild its old architecture.
+        # MrVI-matching encoder defaults. New models save the resolved True/False, so
+        # ``None`` during ``load`` means a checkpoint that predates the flag: rebuild the old
+        # architecture. Outside ``load``, ``None`` means "on".
         if spec_defaults is None:
-            spec_defaults = not _LEGACY_DEFAULTS_LOAD.get()
+            spec_defaults = not MrTotalVI._loading_checkpoint
         spec_defaults = bool(spec_defaults)
         if spec_defaults:
             qz_kwargs = {**DEFAULT_QZ_KWARGS, **(qz_kwargs or {})}
@@ -646,15 +632,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "{None, 'sample_conditioned', 'sample_blind'}."
             )
 
-        # Checkpoints saved before ``spec_defaults`` existed have no flag and were built
-        # with the old encoder defaults (qz without stop-gradient/dropout).
-        token = _LEGACY_DEFAULTS_LOAD.set(_checkpoint_lacks_spec_defaults(dir_path, kwargs))
         MrTotalVI._loading_checkpoint = True
         try:
             model = super().load(dir_path, *args, **kwargs)
         finally:
             MrTotalVI._loading_checkpoint = False
-            _LEGACY_DEFAULTS_LOAD.reset(token)
         module = model.module
         if (
             module.sample_embedding_prior_scale is not None
