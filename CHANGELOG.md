@@ -7,15 +7,14 @@
 - `MrTotalVI` defaults: `n_latent=30` (was 20) and `n_latent_u=10` (was `None`, isomorphic `u`).
   `n_latent_u=None` still gives the isomorphic hierarchy.
 - `qz_kwargs` default merges `stop_gradients_mlp=True` and `dropout_rate=0.03` (MrVI's
-  `DEFAULT_QZ_ATTENTION_KWARGS`); `qu_kwargs` default merges `n_layers=2`. Keys you pass override
-  per key. New `spec_defaults` argument: `False` restores the old encoders.
-- `MrTotalVI.train()` defaults: `lr=2e-3` (was 4e-3), `reduce_lr_on_plateau=False` (was True),
-  and Adam `eps=1e-8` and `weight_decay=1e-8` (TOTALVI: 0.01 and 1e-6) through `plan_kwargs`
+  `DEFAULT_QZ_ATTENTION_KWARGS`). Keys you pass override per key. New `spec_defaults` argument:
+  `False` restores the old `qz`. The `u` encoder keeps one layer (MrVI uses two).
+- `MrTotalVI.train()` defaults: Adam `eps=1e-8` and `weight_decay=1e-8` (TOTALVI: 0.01 and 1e-6) through `plan_kwargs`
   (your `plan_kwargs` keys win). This also lets the legacy `scale_observations=True` loss train;
   with `eps=0.01` its gradients (divided by cells per sample) fell below Adam's `eps`.
 - Old checkpoints load with the values they were saved with: models without `spec_defaults` in
-  their saved `init_params_` rebuild the one-layer `qu` and the old `qz` settings. Not changed:
-  KL warm-up, early stopping, batch size, gradient clipping, label supervision.
+  their saved `init_params_` rebuild the old `qz` settings. Not changed: `lr=4e-3`,
+  the plateau schedule, the one-layer `qu`, KL warm-up, early stopping, batch size, gradient clipping, label supervision.
 - Class docstring now documents `n_latent_u`, `z_u_prior`, `u_prior_scale`,
   `u_prior_mixture_k`, `use_map`, `scale_observations`, `qz_kwargs` and `qu_kwargs`.
 

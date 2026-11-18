@@ -45,7 +45,7 @@ def test_new_default_architecture(adata):
     assert module.qz_kwargs["stop_gradients_mlp"] is True
     assert module.qz_kwargs["dropout_rate"] == 0.03
     assert module.qz.stop_gradients_mlp is True and module.qz.dropout_rate == 0.03
-    assert module.qu_kwargs["n_layers"] == 2
+    assert "n_layers" not in (module.qu_kwargs or {})  # one-layer qu (p03)
     assert model.init_params_["non_kwargs"]["spec_defaults"] is True
 
 
@@ -58,7 +58,7 @@ def test_user_kwargs_override_per_key(adata):
     )
     assert model.module.qz.dropout_rate == 0.0
     assert model.module.qz.stop_gradients_mlp is True  # default key kept
-    assert model.module.qu_kwargs == {"n_layers": 2, "n_hidden": 16}
+    assert model.module.qu_kwargs == {"n_hidden": 16}
     assert MrTotalVI(adata, sample_key="sample", n_latent_u=None).module.qz.fc is None
 
 
@@ -66,8 +66,8 @@ def test_train_default_optimiser_and_user_override(adata):
     model = MrTotalVI(adata, sample_key="sample", n_latent=6)
     model.train(max_epochs=1, accelerator="cpu", check_val_every_n_epoch=1)
     defaults = model.trainer.optimizers[0].defaults
-    assert (defaults["lr"], defaults["eps"], defaults["weight_decay"]) == (2e-3, 1e-8, 1e-8)
-    assert model.trainer.lr_scheduler_configs == []  # no plateau schedule
+    assert (defaults["lr"], defaults["eps"], defaults["weight_decay"]) == (4e-3, 1e-8, 1e-8)
+    assert len(model.trainer.lr_scheduler_configs) == 1  # TOTALVI plateau schedule
 
     model.train(
         max_epochs=1,
@@ -80,7 +80,7 @@ def test_train_default_optimiser_and_user_override(adata):
 
 
 def test_checkpoint_saved_with_old_defaults_loads_old_values(adata, tmp_path):
-    # Old build: one-layer qu, qz without stop-gradient or dropout, isomorphic u.
+    # Old build: qz without stop-gradient or dropout, isomorphic u.
     old = MrTotalVI(adata, sample_key="sample", n_latent=6, n_latent_u=None, spec_defaults=False)
     old.save(tmp_path / "old", overwrite=True, save_anndata=False)
     # Files written before this change have no ``spec_defaults`` entry; remove it.
@@ -105,7 +105,7 @@ def test_checkpoint_with_new_defaults_round_trips(adata, tmp_path):
     loaded = MrTotalVI.load(tmp_path / "new", adata=adata, accelerator="cpu")
     assert (loaded.module.n_latent, loaded.module.n_latent_u) == (30, 10)
     assert loaded.module.qz.dropout_rate == 0.03 and loaded.module.qz.stop_gradients_mlp
-    assert loaded.module.qu_kwargs["n_layers"] == 2
+    assert "n_layers" not in (loaded.module.qu_kwargs or {})
 
 
 def _parameter_shift(scale_observations, plan_kwargs):

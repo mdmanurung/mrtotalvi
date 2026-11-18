@@ -75,10 +75,10 @@ is `"mog"` for continuity, not because it is scientifically preferred.
   is projected into `z`.
 - `n_latent_u=None` gives the isomorphic hierarchy (`u` and `z` have the same dimensionality, no
   projection). Checkpoints saved with `None` keep it.
-- The encoders also follow MrVI: the `u` encoder has two layers (`qu_kwargs={"n_layers": 2}`) and
-  the residual network uses `qz_kwargs={"stop_gradients_mlp": True, "dropout_rate": 0.03}`.
+- The residual network follows MrVI: `qz_kwargs={"stop_gradients_mlp": True, "dropout_rate": 0.03}`.
   Keys you pass in `qz_kwargs` or `qu_kwargs` override these per key. `spec_defaults=False`
-  restores the pre-0.2 encoders.
+  restores the pre-0.2 `qz`. The `u` encoder keeps one layer; MrVI uses two
+  (`qu_kwargs={"n_layers": 2}`).
 - `u_prior="mog"` uses learned mixture logits, means, and scales.
 - `u_prior="standard"` uses an analytic Gaussian prior over `u`.
 - `u_prior="vamp"` uses pseudoinputs; data initialization is restricted to frozen training indices
@@ -342,8 +342,8 @@ normalisation. Check the spread of the embeddings after training before relying 
 
 ## Inherited training defaults
 
-`MrTotalVI.train()` uses MrVI's optimiser settings (`lr=2e-3`, Adam `eps=1e-8`,
-`weight_decay=1e-8`, `reduce_lr_on_plateau=False`) and keeps the rest of the TOTALVI schedule.
+`MrTotalVI.train()` uses MrVI's Adam `eps=1e-8` and `weight_decay=1e-8`, and keeps the rest of
+the TOTALVI schedule (`lr=4e-3`, `reduce_lr_on_plateau=True`; MrVI uses `lr=2e-3` and no schedule).
 Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
 `reduce_lr_on_plateau` to `train()`. The small `eps` matters for the legacy
 `scale_observations=True` loss, whose gradients are divided by the cells per sample. Two defaults act on the `u`/`eps` hierarchy, and
