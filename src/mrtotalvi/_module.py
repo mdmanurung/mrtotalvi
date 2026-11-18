@@ -860,6 +860,16 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             + kl_div_l_gene
             + kl_weight * kl_div_back_pro
         )
+        # Average the Monte-Carlo dimension so every per-cell term is (batch,).
+        # Otherwise LossOutput reads n_samples as n_obs_minibatch, and compute_elbo
+        # cannot stack terms of different shapes. The mean over (mc, batch) equals the
+        # mean over batch of the MC mean, so the scalar loss is unchanged.
+        if reconst_loss_gene.ndim > 1:
+            reconst_loss_gene = reconst_loss_gene.mean(dim=0)
+        if reconst_loss_protein.ndim > 1:
+            reconst_loss_protein = reconst_loss_protein.mean(dim=0)
+        if kl_div_back_pro.ndim > 1:
+            kl_div_back_pro = kl_div_back_pro.mean(dim=0)
         reconst_losses = {
             "reconst_loss_gene": reconst_loss_gene,
             "reconst_loss_protein": reconst_loss_protein,
@@ -883,7 +893,36 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             reconstruction_loss=reconst_losses,
             kl_local=kl_local,
             extra_metrics=extra_metrics,
+            n_obs_minibatch=x.shape[0],
         )
+
+    @torch.inference_mode()
+    def sample(self, tensors, n_samples=1):
+        """Sample counts from the generative model, with the protein efficiency applied.
+
+        The loss fits protein counts with means ``per_batch_efficiency * rate_back`` and
+        ``per_batch_efficiency * rate_fore``. The inherited TOTALVAE.sample drops the
+        factor, so its protein samples sit on a different scale from the fitted
+        distribution (stock TOTALVI shares this). This override uses the fitted means.
+        """
+        from scvi.distributions import NegativeBinomial, NegativeBinomialMixture
+
+        _, generative_outputs = self.forward(
+            tensors,
+            inference_kwargs={"n_samples": n_samples},
+            compute_loss=False,
+        )
+        px_ = generative_outputs["px_"]
+        py_ = generative_outputs["py_"]
+        efficiency = generative_outputs["per_batch_efficiency"]
+        rna_dist = NegativeBinomial(mu=px_["rate"], theta=px_["r"])
+        protein_dist = NegativeBinomialMixture(
+            mu1=efficiency * py_["rate_back"],
+            mu2=efficiency * py_["rate_fore"],
+            theta1=py_["r"],
+            mixture_logits=py_["mixing"],
+        )
+        return rna_dist.sample().cpu(), protein_dist.sample().cpu()
 
     def marginal_ll(self, *args, **kwargs):
         """Not defined for MrTotalVAE.

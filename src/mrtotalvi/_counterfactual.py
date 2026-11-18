@@ -978,7 +978,15 @@ def get_counterfactual_latent(
     zarr_path=None,
     zarr_chunks=None,
 ) -> xr.Dataset:
-    """Build the registered-sample centered latent dataset."""
+    """Build the registered-sample centered latent dataset.
+
+    The ``admissible`` flag uses one threshold per target sample: the ``support_quantile``
+    of leave-one-out scores of that sample's own cells. It is not the ``is_admissible`` of
+    :func:`~mrtotalvi._stats.get_outlier_cell_sample_pairs`, which pools all samples under
+    one global quantile. The two rules can disagree for a cell-sample pair. In both, a
+    cell's own sample is scored leave-one-out, so about ``support_quantile`` of a sample's
+    own cells fail by design.
+    """
     _preflight_zarr_path(zarr_path)
     if model.hierarchy_mode != "centered_v2":
         raise RuntimeError(

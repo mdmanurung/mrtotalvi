@@ -96,6 +96,7 @@ class _InMemoryProteinMappedDataset(Dataset):
         protein_names_uns_key: str | None = None,
         continuous_keys: list[str] | None = None,
         require_protein_names: bool = False,
+        encoders: dict[str, dict] | None = None,
     ):
         if len(adatas) == 0:
             raise ValueError("`adatas` must contain at least one AnnData object.")
@@ -165,6 +166,19 @@ class _InMemoryProteinMappedDataset(Dataset):
         self.encoders: dict[str, dict] = {}
         for key in self._categorical_obs_keys:
             raw = np.concatenate([np.asarray(a.obs[key].to_numpy()) for a in self._adatas])
+            if encoders is not None:
+                # A validation set reuses the training codes: a category absent from
+                # this set keeps its training code, and an unseen one fails here.
+                reference = encoders[key]
+                unseen = sorted({str(v) for v in raw if v not in reference})
+                if unseen:
+                    raise ValueError(
+                        f"obs column {key!r} has categories {unseen} that the training "
+                        "collection does not have."
+                    )
+                self.categories[key] = np.asarray(list(reference))
+                self.encoders[key] = dict(reference)
+                continue
             categories = pd.Series(raw).astype("category").cat.categories.to_numpy(copy=True)
             self.categories[key] = categories
             self.encoders[key] = {cls: i for i, cls in enumerate(categories)}
@@ -365,6 +379,7 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
                 collection_val,
                 self._obs_keys,
                 require_protein_names=True,
+                encoders=self._dataset.encoders,
                 **kwargs,
             )
             if collection_val is not None
@@ -406,6 +421,7 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
         obs_keys: list[str],
         *,
         require_protein_names: bool = False,
+        encoders: dict[str, dict] | None = None,
         **kwargs,
     ):
         if collection is None:
@@ -428,6 +444,7 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
             protein_names_uns_key=self._protein_names_uns_key,
             continuous_keys=self._continuous_covariate_keys,
             require_protein_names=require_protein_names,
+            encoders=encoders,
         )
 
     @dependencies("lamindb")

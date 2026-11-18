@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -46,6 +47,28 @@ def combine_mrtotalvi_seed_results(
     template = datasets[0]
     if "draw" not in template.dims:
         raise ValueError("Every seed result must retain a draw dimension.")
+    if len(seeds) < 2:
+        warnings.warn(
+            "Only one training seed was given, so every between-seed SD is NaN.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if template.sizes["draw"] < 2:
+        warnings.warn(
+            "Each seed result has fewer than 2 draws, so every within-seed SD is NaN.",
+            UserWarning,
+            stacklevel=2,
+        )
+    for i, first in enumerate(datasets):
+        for j in range(i + 1, len(datasets)):
+            if first.equals(datasets[j]):
+                warnings.warn(
+                    f"Seed results for training seeds {seeds[i]} and {seeds[j]} are "
+                    "identical. The same model under two keys gives a between-seed SD of 0, "
+                    "which is not a measure of training variation.",
+                    UserWarning,
+                    stacklevel=2,
+                )
     for dataset in datasets[1:]:
         if set(dataset.data_vars) != set(template.data_vars):
             raise ValueError("Seed results must contain identical data variables.")
