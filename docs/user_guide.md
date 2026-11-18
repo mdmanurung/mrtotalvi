@@ -390,6 +390,10 @@ Use an independently validated, replicate-aware compositional method for biologi
 
 **ArchesMixin / scArches surgery:**
 MrTotalVI does not support reference-query surgery or the `ArchesMixin` protocol.
+`MrTotalVI.load_query_data` and `MrTotalVI.minify_adata` raise `NotImplementedError`
+(the inherited versions left new samples with random, frozen embeddings, or failed with
+a `KeyError`). `gene_dispersion="gene-label"` is rejected at construction with a
+`ValueError`; use `"gene"`, `"gene-batch"` or `"gene-cell"`.
 
 **Streaming and new-sample inference:**
 `MrTotalVIBatchDataModule` is not a stable public training API, and this package does not claim end-to-end

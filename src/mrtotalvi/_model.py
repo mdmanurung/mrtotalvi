@@ -270,6 +270,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "hierarchy is mathematically invalid."
             )
         model_kwargs["latent_distribution"] = "normal"
+        if model_kwargs.get("gene_dispersion", "gene") == "gene-label":
+            raise ValueError(
+                "gene_dispersion='gene-label' is not supported: TOTALVI builds the "
+                "model but training fails because the label tensor is not passed to "
+                "the generative step. Use 'gene', 'gene-batch' or 'gene-cell'."
+            )
 
         # Call TOTALVI.__init__. n_sample / n_latent_sample / z_u_prior_scale /
         # learn_z_u_prior_scale are explicit kwargs here but are absent from
@@ -489,6 +495,28 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self.vamp_training_indices_sha256_ = digest
         self.vamp_initialization_seed_ = self.u_prior_init_seed
         self._refresh_model_summary()
+
+    @classmethod
+    def load_query_data(cls, *args, **kwargs):
+        """Not supported: reference-query surgery.
+
+        The inherited scArches path freezes the per-sample embedding tables, so
+        samples new to the query keep random, untrained embeddings. See
+        ``docs/user_guide.md`` (ArchesMixin / scArches surgery).
+        """
+        raise NotImplementedError(
+            "MrTotalVI does not support reference-query surgery (load_query_data): "
+            "new samples would keep random, frozen embeddings. "
+            "See docs/user_guide.md (ArchesMixin / scArches surgery)."
+        )
+
+    def minify_adata(self, *args, **kwargs):
+        """Not supported: minified AnnData needs latent keys MrTotalVI does not store."""
+        raise NotImplementedError(
+            "MrTotalVI does not support minify_adata: the minified-data path needs "
+            "the TOTALVI latent posterior keys, which MrTotalVI does not store. "
+            "See docs/user_guide.md (ArchesMixin / scArches surgery)."
+        )
 
     @classmethod
     def load(

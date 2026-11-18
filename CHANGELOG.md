@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- `MrTotalVI.load_query_data` and `MrTotalVI.minify_adata` now raise `NotImplementedError`
+  pointing to `docs/user_guide.md`. The inherited `load_query_data` loaded a query with new
+  samples, froze the sample tables and left the new samples with random embeddings while
+  the model reported `is_trained=True`. `minify_adata` failed with `KeyError: 'X_latent_qzm'`.
+- `gene_dispersion="gene-label"` is rejected in `MrTotalVI.__init__` with a `ValueError`.
+  It used to build and then fail in training with an `AttributeError`.
+
 ### Added
 
 - `differential_abundance(density_estimator=..., knn_k=50, scale_floor=None)`: opt-in calibrated
