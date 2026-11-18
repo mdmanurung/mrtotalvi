@@ -903,7 +903,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         compute_log_enrichment
             If ``True``, also compute log enrichment vs. the complementary group.
         omit_original_sample
-            Exclude a cell's own sample when computing the aggregated log-prob.
+            Exclude a cell's own sample when computing the aggregated log-prob. With
+            ``False`` each cell is scored leave-one-cell-out: its own component is removed
+            from its own sample's density (a deliberate departure from upstream MrVI). A
+            group with no reference sample for a cell scores NaN, with a warning.
         donor_key
             Column in ``adata.obs`` identifying the donor.  When set, per-donor
             log_probs are mean-centred before covariate aggregation, blocking the

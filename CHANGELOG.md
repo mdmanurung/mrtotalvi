@@ -10,6 +10,20 @@
   the model reported `is_trained=True`. `minify_adata` failed with `KeyError: 'X_latent_qzm'`.
 - `gene_dispersion="gene-label"` is rejected in `MrTotalVI.__init__` with a `ValueError`.
   It used to build and then fail in training with an `AttributeError`.
+- `differential_abundance(omit_original_sample=False)` (also `donor_key` and
+  `density_estimator="scale_floor"`) now removes each query cell's own Normal component from its
+  own sample's aggregated posterior (log space, renormalised by `n_s - 1`), as
+  `local_sample_enrichment` and `get_outlier_cell_sample_pairs` already do. Before, every cell
+  scored as enriched for its own group: on a 10-D null stub the mean own-group enrichment was
+  +89.4 nats (`"posterior"`), +12.3 (`scale_floor=0.4`) and +51.7 (`donor_key`); it is now
+  near 0. **This is a deliberate departure from upstream MrVI** on a non-default path. The
+  default `omit_original_sample=True` outputs are unchanged (pinned by a golden-file test).
+  A one-cell own sample has no leave-one-out density: its per-sample `log_probs` for that cell
+  are NaN and it carries no weight in group aggregates.
+- `differential_abundance` returns NaN, not `-inf`/`inf`, for group log probabilities and
+  enrichments when a cell's group has no reference sample (a group made only of the cell's own
+  sample under `omit_original_sample=True`, as `"knn"` already did), and warns once with the
+  number of affected cells.
 
 ### Added
 
@@ -54,7 +68,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 
 ### Known open issues (from the 2026-11-17 Fable and Opus reviews; not fixed)
 
-- Paired DA (`donor_key`) keeps each cell's own component in its own sample's density.
 - `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
 - The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
 - MrVI's residual-network defaults (`stop_gradients_mlp=True`, `dropout_rate=0.03`) are not applied.
