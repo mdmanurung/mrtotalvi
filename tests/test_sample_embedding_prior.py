@@ -66,7 +66,13 @@ ONE_STEP_SCRIPT = textwrap.dedent(
     adata.obs["sample"] = [f"s{i % 4}" for i in range(adata.n_obs)]
     MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein_expression",
                             sample_key="sample", batch_key="batch")
-    model = MrTotalVI(adata, sample_key="sample", n_latent=10)
+    # Old defaults, passed explicitly: this test compares against the pre-change commit,
+    # whose defaults differ from the current MrVI-matching ones.
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=10, n_latent_u=None,
+        qu_kwargs={"n_layers": 1},
+        qz_kwargs={"stop_gradients_mlp": False, "dropout_rate": 0.0},
+    )
     tensors = next(iter(model._make_data_loader(adata, batch_size=64, shuffle=False)))
     model.module.train()
     opt = torch.optim.Adam(model.module.parameters(), lr=1e-3)

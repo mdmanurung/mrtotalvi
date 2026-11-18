@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import warnings
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -52,6 +54,26 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     from anndata import AnnData
 
+# Defaults taken from released MrVI (scvi.external.mrvi: DEFAULT_QZ_ATTENTION_KWARGS and
+# the encoder_n_layers=2 / Adam eps=1e-8, weight_decay=1e-8 training setup).
+DEFAULT_QZ_KWARGS: dict = {"stop_gradients_mlp": True, "dropout_rate": 0.03}
+DEFAULT_QU_KWARGS: dict = {"n_layers": 2}
+DEFAULT_PLAN_KWARGS: dict = {"eps": 1e-8, "weight_decay": 1e-8}
+
+# True only while ``MrTotalVI.load`` rebuilds a checkpoint saved before ``spec_defaults``.
+_LEGACY_DEFAULTS_LOAD: ContextVar[bool] = ContextVar("_LEGACY_DEFAULTS_LOAD", default=False)
+
+
+def _checkpoint_lacks_spec_defaults(dir_path, load_kwargs) -> bool:
+    """Return True when the saved ``init_params_`` has no ``spec_defaults`` entry."""
+    prefix = load_kwargs.get("prefix") or ""
+    saved = torch.load(
+        os.path.join(dir_path, f"{prefix}model.pt"), map_location="cpu", weights_only=False
+    )
+    non_kwargs = saved["attr_dict"]["init_params_"]["non_kwargs"]
+    return "spec_defaults" not in non_kwargs
+
+
 class MrTotalVI(EmbeddingMixin, TOTALVI):
     """TotalVI with an MrVI-style hierarchical donor latent space.
 
@@ -81,9 +103,17 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     sample_key
         Key in ``adata.obs`` identifying the donor/sample for each cell.
     n_latent
-        Dimensionality of the latent space (same as TotalVI).
+        Dimensionality of ``z``, the decoder input. Default ``30`` (released MrVI).
+    n_latent_u
+        Dimensionality of ``u``. Default ``10`` (released MrVI): ``u`` is projected to
+        ``n_latent`` by a linear layer inside :class:`~._components.EncoderUZ`. ``None``
+        makes ``u`` and ``z`` isomorphic (``n_latent_u = n_latent``, no projection),
+        the setting used by checkpoints saved with ``n_latent_u=None``.
     n_latent_sample
         Dimension of the per-donor embedding in :class:`~._components.EncoderUZ`.
+    z_u_prior
+        Whether the ``eps`` residual has a prior term in the KL. Required by
+        ``hierarchy_mode="centered_v2"``.
     z_u_prior_scale
         Log-scale of the prior on ``eps`` (the donor residual).
         ``0.0`` → ``p(eps) = N(0, 1)``.
@@ -128,6 +158,32 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     kl_u_weight
         Static scalar weight applied to ``KL(q_u ‖ p_u)`` before the global
         ``kl_weight`` annealing.  Default ``1.0`` preserves prior behaviour.
+    u_prior_scale
+        Log-scale of the ``u`` prior. ``0.0`` gives a unit-scale prior.
+    u_prior_mixture_k
+        Number of mixture components when ``u_prior="mog"`` (default ``20``).
+    use_map
+        If ``True`` (default), ``eps`` is a deterministic (MAP) output of
+        :class:`~._components.EncoderUZ`; if ``False`` it is sampled from a learned
+        Normal. ``hierarchy_mode="centered_v2"`` requires ``True``.
+    scale_observations
+        Legacy MrVI option, default ``False``. If ``True``, each cell's loss is divided
+        by the number of cells of its sample. This shrinks gradients by about that
+        count, so it trains properly only with a small Adam ``eps``; the
+        :meth:`train` default ``eps=1e-8`` is chosen for this. ``centered_v2``
+        uses its own normalised sample weights.
+    qz_kwargs
+        Keyword arguments for :class:`~._components.EncoderUZ`, merged over
+        ``DEFAULT_QZ_KWARGS`` (``stop_gradients_mlp=True``, ``dropout_rate=0.03``, the
+        values of upstream MrVI's ``DEFAULT_QZ_ATTENTION_KWARGS``). Keys you pass win.
+    qu_kwargs
+        Keyword arguments for :class:`~._components.EncoderXU_TotalVI`, merged over
+        ``DEFAULT_QU_KWARGS`` (``n_layers=2``, as in MrVI). Keys you pass win.
+    spec_defaults
+        ``None`` (default) applies the ``qz_kwargs`` and ``qu_kwargs`` defaults above.
+        ``False`` skips them and reproduces the encoders built before 0.2 (one-layer
+        ``qu``; ``qz`` without stop-gradient or dropout). The resolved value is saved
+        with the model; checkpoints that lack it load with ``False``.
     kl_z_weight
         Static scalar weight applied to ``KL(q_z ‖ p_z)`` before the global
         ``kl_weight`` annealing.  Default ``1.0`` preserves prior behaviour.
@@ -188,9 +244,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self,
         adata: AnnData,
         sample_key: str,
-        n_latent: int = 20,
+        n_latent: int = 30,
         n_latent_sample: int = 16,
-        n_latent_u: int | None = None,
+        n_latent_u: int | None = 10,
         z_u_prior: bool = True,
         z_u_prior_scale: float = 0.0,
         u_prior_scale: float = 0.0,
@@ -217,8 +273,17 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
         batch_embedding_kwargs: dict | None = None,
+        spec_defaults: bool | None = None,
         **model_kwargs,
     ) -> None:
+        # MrVI-matching encoder defaults. ``None`` means "on", except while loading a
+        # checkpoint that predates the flag, which must rebuild its old architecture.
+        if spec_defaults is None:
+            spec_defaults = not _LEGACY_DEFAULTS_LOAD.get()
+        spec_defaults = bool(spec_defaults)
+        if spec_defaults:
+            qz_kwargs = {**DEFAULT_QZ_KWARGS, **(qz_kwargs or {})}
+            qu_kwargs = {**DEFAULT_QU_KWARGS, **(qu_kwargs or {})}
         resolved_u_prior, resolved_u_prior_mixture = resolve_u_prior(
             u_prior,
             u_prior_mixture,
@@ -522,7 +587,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "{None, 'sample_conditioned', 'sample_blind'}."
             )
 
-        model = super().load(dir_path, *args, **kwargs)
+        # Checkpoints saved before ``spec_defaults`` existed have no flag and were built
+        # with the old encoder defaults (one-layer qu, qz without stop-gradient/dropout).
+        token = _LEGACY_DEFAULTS_LOAD.set(_checkpoint_lacks_spec_defaults(dir_path, kwargs))
+        try:
+            model = super().load(dir_path, *args, **kwargs)
+        finally:
+            _LEGACY_DEFAULTS_LOAD.reset(token)
         loaded_hierarchy_mode = model.hierarchy_mode
         loaded_u_encoder_mode = model.u_encoder_mode
         resolved_hierarchy_mode = (
@@ -584,7 +655,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     def train(
         self,
         max_epochs: int | None = None,
-        lr: float = 4e-3,
+        lr: float = 2e-3,
         accelerator: str = "auto",
         devices: int | list[int] | str = "auto",
         train_size: float | None = None,
@@ -593,7 +664,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size: int = 256,
         early_stopping: bool = True,
         check_val_every_n_epoch: int | None = None,
-        reduce_lr_on_plateau: bool = True,
+        reduce_lr_on_plateau: bool = False,
         n_steps_kl_warmup: int | None = None,
         n_epochs_kl_warmup: int | None = None,
         adversarial_classifier: bool | None = None,
@@ -603,6 +674,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         **kwargs,
     ) -> None:
         """Train MrTotalVI after freezing any data-derived prior boundary.
+
+        Optimiser defaults follow released MrVI: ``lr=2e-3``, Adam ``eps=1e-8`` and
+        ``weight_decay=1e-8``, no plateau schedule. TOTALVI's values (``lr=4e-3``,
+        ``eps=0.01``, ``weight_decay=1e-6``, plateau schedule on) are reachable by
+        passing them. ``eps`` and ``weight_decay`` are set through ``plan_kwargs``
+        (keys you pass there win); ``lr`` and ``reduce_lr_on_plateau`` are arguments
+        of this method and overwrite the same keys in ``plan_kwargs``. KL warm-up,
+        early stopping, batch size and clipping keep their TOTALVI defaults.
 
         Data-initialized Vamp pseudo-inputs are resolved from the exact training
         indices before the first optimizer step. Pass ``accelerator='cpu'``
@@ -648,6 +727,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_epochs_kl_warmup=n_epochs_kl_warmup,
             adversarial_classifier=adversarial_classifier,
         )
+
+        plan_kwargs = {**DEFAULT_PLAN_KWARGS, **(plan_kwargs or {})}
 
         return super().train(
             max_epochs=max_epochs,
