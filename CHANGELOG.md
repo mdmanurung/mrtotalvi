@@ -27,17 +27,22 @@
 
 ### Changed (defaults now follow released MrVI in part)
 
+- Defaults switched from candidate p03 to p05 (user, 2026-11-18): the `u` encoder has two layers
+  (`DEFAULT_QU_KWARGS = {"n_layers": 2}`, MrVI's `encoder_n_layers`), and `train()` uses
+  `lr=2e-3` with `reduce_lr_on_plateau=False`, as MrVI. Benchmark run mrtotalvi-uz-r1: both pass
+  all 3 gates; the p03/p05 score gap (3.734 vs 3.721, 6 seeds) is within seed noise. New models
+  save the resolved `qu_kwargs`; checkpoints saved with the one-layer default (`qu_kwargs=None`)
+  load with one layer. `spec_defaults=False` also skips the two-layer default.
 - `MrTotalVI` defaults: `n_latent=30` (was 20) and `n_latent_u=10` (was `None`, isomorphic `u`).
   `n_latent_u=None` still gives the isomorphic hierarchy.
 - `qz_kwargs` default merges `stop_gradients_mlp=True` and `dropout_rate=0.03` (MrVI's
   `DEFAULT_QZ_ATTENTION_KWARGS`). Keys you pass override per key. New `spec_defaults` argument:
-  `False` restores the old `qz`. The `u` encoder keeps one layer (MrVI uses two).
+  `False` restores the old `qz` (and the one-layer `qu`).
 - `MrTotalVI.train()` defaults: Adam `eps=1e-8` and `weight_decay=1e-8` (TOTALVI: 0.01 and 1e-6) through `plan_kwargs`
   (your `plan_kwargs` keys win). This also lets the legacy `scale_observations=True` loss train;
   with `eps=0.01` its gradients (divided by cells per sample) fell below Adam's `eps`.
 - Old checkpoints load with the values they were saved with: models without `spec_defaults` in
-  their saved `init_params_` rebuild the old `qz` settings. Not changed: `lr=4e-3`,
-  the plateau schedule, the one-layer `qu`, KL warm-up, early stopping, batch size, gradient clipping, label supervision.
+  their saved `init_params_` rebuild the old `qz` settings. Not changed: KL warm-up, early stopping, batch size, gradient clipping, label supervision.
 - Class docstring now documents `n_latent_u`, `z_u_prior`, `u_prior_scale`,
   `u_prior_mixture_k`, `use_map`, `scale_observations`, `qz_kwargs` and `qu_kwargs`.
 

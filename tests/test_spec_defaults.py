@@ -45,7 +45,8 @@ def test_new_default_architecture(adata):
     assert module.qz_kwargs["stop_gradients_mlp"] is True
     assert module.qz_kwargs["dropout_rate"] == 0.03
     assert module.qz.stop_gradients_mlp is True and module.qz.dropout_rate == 0.03
-    assert "n_layers" not in (module.qu_kwargs or {})  # one-layer qu (p03)
+    assert module.qu_kwargs["n_layers"] == 2  # MrVI two-layer qu (p05)
+    assert model.init_params_["non_kwargs"]["qu_kwargs"] == {"n_layers": 2}  # saved resolved
     assert model.init_params_["non_kwargs"]["spec_defaults"] is True
 
 
@@ -66,8 +67,8 @@ def test_train_default_optimiser_and_user_override(adata):
     model = MrTotalVI(adata, sample_key="sample", n_latent=6)
     model.train(max_epochs=1, accelerator="cpu", check_val_every_n_epoch=1)
     defaults = model.trainer.optimizers[0].defaults
-    assert (defaults["lr"], defaults["eps"], defaults["weight_decay"]) == (4e-3, 1e-8, 1e-8)
-    assert len(model.trainer.lr_scheduler_configs) == 1  # TOTALVI plateau schedule
+    assert (defaults["lr"], defaults["eps"], defaults["weight_decay"]) == (2e-3, 1e-8, 1e-8)
+    assert len(model.trainer.lr_scheduler_configs) == 0  # MrVI: no plateau schedule
 
     model.train(
         max_epochs=1,
@@ -134,6 +135,29 @@ def test_scale_observations_trains_under_new_eps():
     plain_old = _parameter_shift(False, {"eps": 0.01})
     scaled_old = _parameter_shift(True, {"eps": 0.01})
     assert scaled_old / plain_old < 0.7  # measured 0.47
+
+
+def test_checkpoint_saved_with_one_layer_qu_default_loads_one_layer(adata, tmp_path):
+    # Files saved while the qu default was one layer hold spec_defaults=True and qu_kwargs=None.
+    old = MrTotalVI(adata, sample_key="sample", n_latent=6, qu_kwargs={"n_layers": 1})
+    old.save(tmp_path / "p03", overwrite=True, save_anndata=False)
+    path = tmp_path / "p03" / "model.pt"
+    saved = torch.load(path, weights_only=False)
+    saved["attr_dict"]["init_params_"]["non_kwargs"]["qu_kwargs"] = None
+    torch.save(saved, path)
+
+    loaded = MrTotalVI.load(tmp_path / "p03", adata=adata, accelerator="cpu")
+    assert loaded.init_params_["non_kwargs"]["spec_defaults"] is True
+    assert loaded.module.qu_kwargs.get("n_layers", 1) == 1
+    for name, tensor in old.module.state_dict().items():
+        assert torch.equal(tensor.cpu(), loaded.module.state_dict()[name].cpu()), name
+
+
+def test_new_checkpoint_round_trips_two_layer_qu(adata, tmp_path):
+    model = MrTotalVI(adata, sample_key="sample", n_latent=6)
+    model.save(tmp_path / "p05", overwrite=True, save_anndata=False)
+    loaded = MrTotalVI.load(tmp_path / "p05", adata=adata, accelerator="cpu")
+    assert loaded.module.qu_kwargs["n_layers"] == 2
 
 
 def test_load_with_positional_prefix(adata, tmp_path):

@@ -53,9 +53,10 @@ if TYPE_CHECKING:
     from anndata import AnnData
 
 # Defaults taken from released MrVI (scvi.external.mrvi: DEFAULT_QZ_ATTENTION_KWARGS and
-# Adam eps=1e-8, weight_decay=1e-8). MrVI's two-layer u encoder, lr=2e-3 and no plateau
-# schedule are not defaults (candidate p03 chosen over p05, user 2026-11-18).
+# Adam eps=1e-8, weight_decay=1e-8), plus MrVI's two-layer u encoder (encoder_n_layers=2),
+# lr=2e-3 and no plateau schedule (candidate p05, user 2026-11-18).
 DEFAULT_QZ_KWARGS: dict = {"stop_gradients_mlp": True, "dropout_rate": 0.03}
+DEFAULT_QU_KWARGS: dict = {"n_layers": 2}
 DEFAULT_PLAN_KWARGS: dict = {"eps": 1e-8, "weight_decay": 1e-8}
 
 
@@ -173,10 +174,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``DEFAULT_QZ_KWARGS`` (``stop_gradients_mlp=True``, ``dropout_rate=0.03``, the
         values of upstream MrVI's ``DEFAULT_QZ_ATTENTION_KWARGS``). Keys you pass win.
     qu_kwargs
-        Keyword arguments for :class:`~._components.EncoderXU_TotalVI` (one layer by
-        default; MrVI uses ``n_layers=2``).
+        Keyword arguments for :class:`~._components.EncoderXU_TotalVI`, merged over
+        ``DEFAULT_QU_KWARGS`` (``n_layers=2``, as upstream MrVI's ``encoder_n_layers``).
+        Keys you pass win. Checkpoints saved before this default load with their
+        one-layer ``qu``.
     spec_defaults
-        ``None`` (default) applies the ``qz_kwargs`` defaults above. ``False`` skips them
+        ``None`` (default) applies the ``qz_kwargs`` and ``qu_kwargs`` defaults above. ``False`` skips them
         and reproduces the ``qz`` built before ``spec_defaults`` existed (no stop-gradient or dropout). The resolved value is saved
         with the model; checkpoints that lack it load with ``False``.
     kl_z_weight
@@ -282,6 +285,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         spec_defaults = bool(spec_defaults)
         if spec_defaults:
             qz_kwargs = {**DEFAULT_QZ_KWARGS, **(qz_kwargs or {})}
+            # New models save the resolved qu_kwargs. During load, take the saved value as is:
+            # checkpoints from before the two-layer default saved None (one layer).
+            if not MrTotalVI._loading_checkpoint:
+                qu_kwargs = {**DEFAULT_QU_KWARGS, **(qu_kwargs or {})}
         resolved_u_prior, resolved_u_prior_mixture = resolve_u_prior(
             u_prior,
             u_prior_mixture,
@@ -735,7 +742,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     def train(
         self,
         max_epochs: int | None = None,
-        lr: float = 4e-3,
+        lr: float = 2e-3,
         accelerator: str = "auto",
         devices: int | list[int] | str = "auto",
         train_size: float | None = None,
@@ -744,7 +751,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size: int = 256,
         early_stopping: bool = True,
         check_val_every_n_epoch: int | None = None,
-        reduce_lr_on_plateau: bool = True,
+        reduce_lr_on_plateau: bool = False,
         n_steps_kl_warmup: int | None = None,
         n_epochs_kl_warmup: int | None = None,
         adversarial_classifier: bool | None = None,
@@ -756,8 +763,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         """Train MrTotalVI after freezing any data-derived prior boundary.
 
         Adam ``eps=1e-8`` and ``weight_decay=1e-8`` follow released MrVI (TOTALVI: 0.01
-        and 1e-6); set them through ``plan_kwargs`` (keys you pass there win). ``lr=4e-3``
-        and the plateau schedule keep TOTALVI's values (MrVI: ``lr=2e-3``, no schedule);
+        and 1e-6); set them through ``plan_kwargs`` (keys you pass there win). ``lr=2e-3``
+        and no plateau schedule also follow MrVI (TOTALVI: ``lr=4e-3`` with a schedule);
         both are arguments of this method and overwrite the same keys in ``plan_kwargs``. KL warm-up,
         early stopping, batch size and clipping keep their TOTALVI defaults.
 
