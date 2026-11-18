@@ -133,6 +133,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
+        u_invariance_mode: str = "counterfactual",
         **kwargs,
     ) -> None:
         if kwargs.get("latent_distribution", "normal") != "normal":
@@ -194,6 +195,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.u_invariance_weight = float(u_invariance_weight)
         if self.u_invariance_weight < 0:
             raise ValueError("u_invariance_weight must be >= 0.")
+        if u_invariance_mode not in {"counterfactual", "dropout_consistency"}:
+            raise ValueError(
+                "u_invariance_mode must be 'counterfactual' or 'dropout_consistency'."
+            )
+        self.u_invariance_mode = u_invariance_mode
         if self.u_invariance_weight > 0 and (
             hierarchy_mode != "legacy" or u_encoder_mode != "sample_blind"
         ):
@@ -1084,19 +1090,37 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         cont_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY)
         cat_covs = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY)
         library = x.sum(dim=-1, keepdim=True)
-        cf_sample = torch.randint(
-            0, int(self._n_sample), sample_index.shape, device=sample_index.device
-        )
+        n_sample = int(self._n_sample)
+        if self.u_invariance_mode == "dropout_consistency":
+            # Ablation: same sample twice, decoder and eps net in train mode, so the penalty
+            # is pure dropout-noise consistency (the behaviour of the first prototype).
+            cf_sample = sample_index
+            eval_decodes = False
+        else:
+            # Another sample for every cell (never the own one), deterministic decodes.
+            offset = torch.randint(1, max(n_sample, 2), sample_index.shape, device=sample_index.device)
+            cf_sample = (sample_index + offset) % n_sample
+            eval_decodes = True
         u_detached = u.detach()
-        decoded = []
-        for s in (sample_index, cf_sample):
-            with torch.no_grad():
-                z_base, eps, _ = self.qz(u_detached, s)
-            dec = self._deterministic_decoder_parameters(
-                z_base + eps, library, batch_index, cont_covs=cont_covs, cat_covs=cat_covs
-            )
-            # Clone out of inference mode so the encoder pass below can be differentiated.
-            decoded.append((dec["rna_rate"].clone(), dec["protein_total_mean"].clone()))
+        nets = (self.decoder, self.qz)
+        was_training = [net.training for net in nets]
+        if eval_decodes:
+            # Eval mode: no dropout masks and no BatchNorm running-stat updates.
+            for net in nets:
+                net.eval()
+        try:
+            decoded = []
+            for s in (sample_index, cf_sample):
+                with torch.no_grad():
+                    z_base, eps, _ = self.qz(u_detached, s)
+                dec = self._deterministic_decoder_parameters(
+                    z_base + eps, library, batch_index, cont_covs=cont_covs, cat_covs=cat_covs
+                )
+                # Clone out of inference mode so the encoder pass below can be differentiated.
+                decoded.append((dec["rna_rate"].clone(), dec["protein_total_mean"].clone()))
+        finally:
+            for net, flag in zip(nets, was_training):
+                net.train(flag)
         qu_batch_index = batch_index if self.qu_encode_covariates else None
         means = [
             self.qu(
