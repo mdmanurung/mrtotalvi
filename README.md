@@ -41,7 +41,10 @@ MrTotalVI.setup_anndata(
     sample_key="donor_timepoint",
     batch_key="batch",
 )
+# Defaults follow released MrVI: n_latent=30, n_latent_u=10,
+# residual network with stop_gradients_mlp=True and dropout_rate=0.03.
 model = MrTotalVI(adata, sample_key="donor_timepoint")
+# train() defaults: Adam eps=1e-8, weight_decay=1e-8 (MrVI); lr=4e-3 with plateau schedule (TOTALVI).
 model.train(n_epochs_kl_warmup=40)  # pass warm-up to train(); plan_kwargs values are overwritten
 u = model.get_latent_representation(give_z=False)
 z = model.get_latent_representation(give_z=True)

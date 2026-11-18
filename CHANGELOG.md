@@ -25,6 +25,22 @@
   sample under `omit_original_sample=True`, as `"knn"` already did), and warns once with the
   number of affected cells.
 
+### Changed (defaults now match released MrVI)
+
+- `MrTotalVI` defaults: `n_latent=30` (was 20) and `n_latent_u=10` (was `None`, isomorphic `u`).
+  `n_latent_u=None` still gives the isomorphic hierarchy.
+- `qz_kwargs` default merges `stop_gradients_mlp=True` and `dropout_rate=0.03` (MrVI's
+  `DEFAULT_QZ_ATTENTION_KWARGS`). Keys you pass override per key. New `spec_defaults` argument:
+  `False` restores the old `qz`. The `u` encoder keeps one layer (MrVI uses two).
+- `MrTotalVI.train()` defaults: Adam `eps=1e-8` and `weight_decay=1e-8` (TOTALVI: 0.01 and 1e-6) through `plan_kwargs`
+  (your `plan_kwargs` keys win). This also lets the legacy `scale_observations=True` loss train;
+  with `eps=0.01` its gradients (divided by cells per sample) fell below Adam's `eps`.
+- Old checkpoints load with the values they were saved with: models without `spec_defaults` in
+  their saved `init_params_` rebuild the old `qz` settings. Not changed: `lr=4e-3`,
+  the plateau schedule, the one-layer `qu`, KL warm-up, early stopping, batch size, gradient clipping, label supervision.
+- Class docstring now documents `n_latent_u`, `z_u_prior`, `u_prior_scale`,
+  `u_prior_mixture_k`, `use_map`, `scale_observations`, `qz_kwargs` and `qu_kwargs`.
+
 ### Added
 
 - `differential_abundance(density_estimator=..., knn_k=50, scale_floor=None)`: opt-in calibrated
@@ -70,7 +86,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 
 - `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
 - The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
-- MrVI's residual-network defaults (`stop_gradients_mlp=True`, `dropout_rate=0.03`) are not applied.
 - `train()` overwrites `lr` and KL warm-up passed through `plan_kwargs`; pass them to `train()`.
 - Local sample distances are not masked for sample support.
 - Outputs assume dataloader row order equals `indices` order; backed AnnData can break this.

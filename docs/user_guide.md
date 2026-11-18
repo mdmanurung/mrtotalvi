@@ -39,7 +39,7 @@ MrTotalVI.setup_anndata(
 model = MrTotalVI(
     adata,
     sample_key="donor",
-    n_latent=20,
+    n_latent=30,  # package defaults, shown explicitly
     n_latent_u=10,
     u_prior_supervision="none",  # default even when labels_key is registered
 )
@@ -52,7 +52,7 @@ semantics explicitly:
 model_v2 = MrTotalVI(
     adata,
     sample_key="donor",
-    n_latent=20,
+    n_latent=30,
     n_latent_u=10,
     hierarchy_mode="centered_v2",
     u_encoder_mode="sample_blind",
@@ -71,9 +71,14 @@ or shapes.
 New MrTotalVI calls resolve `u_prior` to exactly `"standard"`, `"mog"`, or `"vamp"`; the default
 is `"mog"` for continuity, not because it is scientifically preferred.
 
-- `n_latent_u=None` preserves the original isomorphic hierarchy, so `u` and `z` have the same
-  dimensionality.
-- `n_latent_u < n_latent` learns a lower-dimensional `u` and projects it into `z`.
+- The defaults are `n_latent=30` and `n_latent_u=10`, as in released MrVI: a lower-dimensional `u`
+  is projected into `z`.
+- `n_latent_u=None` gives the isomorphic hierarchy (`u` and `z` have the same dimensionality, no
+  projection). Checkpoints saved with `None` keep it.
+- The residual network follows MrVI: `qz_kwargs={"stop_gradients_mlp": True, "dropout_rate": 0.03}`.
+  Keys you pass in `qz_kwargs` or `qu_kwargs` override these per key. `spec_defaults=False`
+  restores the pre-0.2 `qz`. The `u` encoder keeps one layer; MrVI uses two
+  (`qu_kwargs={"n_layers": 2}`).
 - `u_prior="mog"` uses learned mixture logits, means, and scales.
 - `u_prior="standard"` uses an analytic Gaussian prior over `u`.
 - `u_prior="vamp"` uses pseudoinputs; data initialization is restricted to frozen training indices
@@ -343,7 +348,11 @@ normalisation. Check the spread of the embeddings after training before relying 
 
 ## Inherited training defaults
 
-`MrTotalVI.train()` keeps the TOTALVI schedule. Two defaults act on the `u`/`eps` hierarchy, and
+`MrTotalVI.train()` uses MrVI's Adam `eps=1e-8` and `weight_decay=1e-8`, and keeps the rest of
+the TOTALVI schedule (`lr=4e-3`, `reduce_lr_on_plateau=True`; MrVI uses `lr=2e-3` and no schedule).
+Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
+`reduce_lr_on_plateau` to `train()`. The small `eps` matters for the legacy
+`scale_observations=True` loss, whose gradients are divided by the cells per sample. Two defaults act on the `u`/`eps` hierarchy, and
 `train()` warns when either applies.
 
 - **KL warm-up.** `n_steps_kl_warmup` defaults to `0.75 * n_obs` steps, while the default
