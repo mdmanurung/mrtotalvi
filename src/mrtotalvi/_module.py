@@ -134,6 +134,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
         u_invariance_mode: str = "counterfactual",
+        sample_embedding_prior_post_ln: bool = False,
         **kwargs,
     ) -> None:
         if kwargs.get("latent_distribution", "normal") != "normal":
@@ -207,6 +208,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 "u_invariance_weight > 0 needs hierarchy_mode='legacy' and "
                 "u_encoder_mode='sample_blind'."
             )
+        # Apply the eps sample-embedding prior after layer_norm_embed (closes the LayerNorm
+        # loophole: a raw-table prior can be undone by shrinking the free across-sample mean).
+        self.sample_embedding_prior_post_ln = bool(sample_embedding_prior_post_ln)
         self.n_continuous_cov = int(n_continuous_cov)
         self.n_cats_per_cov = list(n_cats_per_cov or [])
         self.qu_encode_covariates = bool(qu_encode_covariates)
@@ -511,7 +515,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         terms = []
         if self.sample_embedding_prior_scale is not None:
             sigma = self.sample_embedding_prior_scale
-            terms.append(self._centered_sq_norm(self.qz.embedding.weight) / (2.0 * sigma**2))
+            table = self.qz.embedding.weight
+            if self.sample_embedding_prior_post_ln:
+                table = self.qz.layer_norm_embed(table)
+            terms.append(self._centered_sq_norm(table) / (2.0 * sigma**2))
         if (
             self.u_encoder_sample_embedding_prior_scale is not None
             and self.u_encoder_mode == "sample_conditioned"
