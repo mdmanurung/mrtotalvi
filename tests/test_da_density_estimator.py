@@ -187,8 +187,13 @@ def test_argument_validation(kwargs, match):
 DEFAULT_GOLDEN = Path(__file__).parent / "data" / "da_default_golden.npz"
 
 
-def test_default_outputs_are_byte_identical_to_pre_fix_golden():
-    """Golden outputs were written by the code before the leave-one-cell-out change."""
+def test_default_outputs_match_pre_fix_golden():
+    """Golden outputs were written by the code before the leave-one-cell-out change.
+
+    Compared at float32 rounding level, not bit for bit: the file was written on one CPU
+    and differs in the last bits on another (SLURM node). The leave-one-cell-out change
+    moves values by nats, far above this tolerance.
+    """
     model, adata, _ = _stub_data(depleted=True, n_per_sample=60)
     golden = np.load(DEFAULT_GOLDEN)
     n_checked = 0
@@ -204,7 +209,9 @@ def test_default_outputs_are_byte_identical_to_pre_fix_golden():
             **kw,
         )
         for name in da.data_vars:
-            assert np.array_equal(da[name].values, golden[f"{est}__{name}"], equal_nan=True)
+            np.testing.assert_allclose(
+                da[name].values, golden[f"{est}__{name}"], rtol=1e-5, atol=1e-6, equal_nan=True
+            )
             n_checked += 1
     assert n_checked == len(golden.files)
 
