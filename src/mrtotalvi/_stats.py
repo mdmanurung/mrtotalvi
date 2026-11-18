@@ -173,6 +173,27 @@ def _knn_sample_counts(
     return counts, n_ref
 
 
+def _sqrtm_batch(xtmx: torch.Tensor) -> torch.Tensor:
+    """Matrix square root of each ``(n_cov, n_cov)`` matrix in a batch.
+
+    A singular ``X^T M X`` (a cell with too few admissible samples) makes
+    ``scipy.linalg.sqrtm`` return inf or NaN, which would turn the Wald statistic into NaN
+    and make the Chi2 CDF raise. Non-finite entries are set to 0, as in the MrVI reference,
+    so such a cell gets a zero statistic instead of aborting the run.
+    """
+    import scipy.linalg
+
+    root = torch.stack(
+        [
+            torch.from_numpy(
+                scipy.linalg.sqrtm(m.cpu().numpy()).real.astype(np.float32)
+            )
+            for m in xtmx
+        ]
+    ).to(xtmx.device)
+    return torch.nan_to_num(root, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _knn_log_density(counts: np.ndarray, n_ref: np.ndarray) -> np.ndarray:
     """``log(count + 0.5) - log(n_ref)``; NaN where the group has no reference cells."""
     with np.errstate(divide="ignore"):
@@ -249,6 +270,15 @@ def differential_abundance(
         neighbouring cells, which makes the estimate noise-dominated: pairs of samples with
         no real abundance change can score tens of nats apart.
 
+        The same noise has a directional effect. ``logmeanexp`` over noise-dominated
+        per-sample log densities behaves like a maximum, so a group of more samples scores
+        higher, and ``omit_original_sample=True`` removes one sample from a cell's own
+        group, which pushes cells away from their own group. With unequal group sizes the
+        sign of the default log-enrichment can track samples per group (null stub, A with 2
+        samples against B with 8: mean about -18.7 nats for A against B, ``scale_floor=0.4``
+        gave -1.6 and ``"knn"`` gave 0.0). This matches the MrVI formula. Use ``"knn"`` or
+        ``"scale_floor"`` for unbalanced designs.
+
         ``"scale_floor"`` is the same aggregated posterior with every kernel scale raised to
         ``max(scale, scale_floor)``. It needs ``scale_floor`` (a positive float; about 0.4
         calibrated a planted-effect test). ``log_probs`` stay true log densities, now of a
@@ -270,9 +300,14 @@ def differential_abundance(
           ``log(k_g + 0.5) - log(k_rest + 0.5) - log(n_g / n_rest)``, the neighbour-count
           ratio with pseudocount and sample-size correction.
         - Per-sample ``log_probs`` use the same score with ``g`` a single sample. They are
-          comparable across samples for one cell and are **not** comparable with
-          ``"posterior"`` values or across cells, because the neighbourhood volume
-          differs per cell. Use differences (the enrichments) across cells.
+          **not** comparable with ``"posterior"`` values or across cells, because the
+          neighbourhood volume differs per cell. Use differences (the enrichments) across
+          cells. Within one cell they are comparable across samples of similar size only:
+          the pseudocount 0.5 is fixed while the expected neighbour count of sample ``g``
+          is ``knn_k * n_g / N`` (``N`` the reference size). Where that is below about 1, the
+          score tends to ``log(0.5 / n_g)``, which favours the smaller sample (null stub with
+          samples of 2000, 2000, 2000 and 30 cells and ``knn_k=50``: the 30-cell sample
+          ranked first for every cell). Group scores, which pool counts, are not affected.
         - A group with no reference cells for a cell (its own sample under
           ``omit_original_sample=True``) scores NaN, where ``"posterior"`` gives ``-inf``.
         - Group scores are sample-size corrected by cell counts (pooled cells), not by the
@@ -297,9 +332,13 @@ def differential_abundance(
 
         When ``n_mc_samples > 1``, ``K`` draws ``u_k ~ q(u|x)`` are taken and
         the estimate is ``log(1/K * Σ_k p(u_k | sample))``, i.e.
-        ``logsumexp(log_probs_k) - log(K)``.  This corrects the Jensen-gap
-        bias of the plug-in estimator (``log p(E[u]) ≤ log E[p(u)]``) at the
-        cost of ``K`` forward passes and inference-time stochasticity.
+        ``logsumexp(log_probs_k) - log(K)``.  This scores the cell's posterior
+        ``q(u|x)`` against each sample mixture: the log of the expected density under
+        ``q(u|x)``, a smoothed and stochastic alternative to the plug-in value
+        ``log p(E[u])``. It is not a debiased version of the plug-in (the Jensen
+        inequality is ``E[log p(u)] ≤ log E[p(u)]``, which does not relate the two), so
+        outputs from ``n_mc_samples=1`` and ``> 1`` sit on different scales and should not
+        be mixed. It costs ``K`` forward passes.
 
         **Important:** ``n_mc_samples > 1`` does *not* reduce cross-training-
         seed variance in DA results.  The seed variance originates from
@@ -731,7 +770,6 @@ def _differential_expression(
     **filter_samples_kwargs
         Forwarded to :func:`get_outlier_cell_sample_pairs`.
     """
-    import scipy.linalg
     import torch.distributions as tdist
     from scipy.stats import false_discovery_control
 
@@ -817,16 +855,6 @@ def _differential_expression(
     n_covariates = Xmat.shape[1]
     device = model.device
     Xmat = Xmat.to(device)
-
-    def _sqrtm_batch(xtmx: torch.Tensor) -> torch.Tensor:
-        return torch.stack(
-            [
-                torch.from_numpy(
-                    scipy.linalg.sqrtm(m.cpu().numpy()).real.astype(np.float32)
-                ).to(device)
-                for m in xtmx
-            ]
-        )
 
     scdl = model._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
 
@@ -1113,6 +1141,13 @@ def get_outlier_cell_sample_pairs(
     random_state: int | None = None,
 ) -> xr.Dataset:
     """Compute admissible cell-sample pairs using aggregated posteriors over ``u``.
+
+    One global threshold is used: the ``quantile_threshold`` quantile of leave-one-out
+    scores pooled over all samples. A cell scored against its own sample excludes its own
+    component, so about ``quantile_threshold`` of own-sample pairs fail by design (0.95
+    admissible at the default). The private DE filter therefore drops about that share of
+    cells from their own sample. ``get_counterfactual_latent`` uses a different rule (one
+    threshold per target sample), so its ``admissible`` flag is a different quantity.
 
     ``random_state`` seeds the per-sample subsample; ``None`` uses
     :attr:`scvi.settings.seed` when set, otherwise the subsample is not reproducible.

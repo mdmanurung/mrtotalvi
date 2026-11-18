@@ -153,6 +153,21 @@ local_z = model.get_local_sample_representation()
 local_d = model.get_local_sample_distances()
 ```
 
+`get_local_sample_distances` returns an `(n_cell, n_sample, n_sample)` array. Both local methods
+check the output size first and raise above `max_gb=4.0` GiB (100,000 cells and 100 samples need
+4 GB for the distances; 500,000 cells and 200 samples need 80 GB). To avoid the per-cell array,
+pass `groupby` (an `adata.obs` column or a list of columns, as in `MRVI.get_local_sample_distances`)
+with `keep_cell=False`. Distances are then computed per minibatch and only the group means are
+kept, as `<column>_distances`:
+
+```python
+by_cluster = model.get_local_sample_distances(groupby="cluster", keep_cell=False)
+by_cluster["cluster_distances"].sel(cluster="B")  # (sample_x, sample_y)
+```
+
+`model.sample_info` has one row per registered sample, in `sample_order` (the embedding row
+order); use `sample_order` when you need the labels.
+
 The default `u` encoder is sample-conditioned, so do not describe legacy `u` as
 sample-unaware or donor-neutral. `u_encoder_mode="sample_blind"` removes the
 implemented sample-conditioning paths, but this software property alone does
@@ -341,6 +356,17 @@ multiplied by the batch size, and `kl_weight` warm-up does not scale it. The pen
 reported as `kl_global`, which the training plan divides by `n_obs_training`. With a
 `train_size` below 1, the penalty is relative to all cells, not the training split.
 
+Three reporting details. First, with the legacy `scale_observations=True` each cell's data term
+is divided by its sample's cell count while the penalty is not, so one sigma shrinks more weakly
+(the gradient ratio on `qz.embedding.weight` rose by the sample's cell count in a toy run).
+`centered_v2` weights average to 1 and are unaffected. Second, `elbo_validation` reports the
+penalty as `kl_global / n_obs_validation`, about `n_obs_training / n_obs_validation` times its
+size in the loss (0.035 against 0.0035 nats in a toy run), and `get_elbo` leaves the penalty out.
+Third, `MrTotalVI.load` rebuilds the model on the AnnData you pass, so `n_cells` is that
+AnnData's size. A load on a different cell set changes the penalty strength for continued
+training, and a `UserWarning` says so when the checkpoint stores the training count (models with
+`scale_observations=True`).
+
 Caveats. The table passes through a LayerNorm before attention, and the shared mean is not
 penalised. A model can therefore grow the mean to make the shrunk differences matter less after
 normalisation. Check the spread of the embeddings after training before relying on the setting.
@@ -363,11 +389,17 @@ Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
   `train()` directly: `train()` overwrites the same keys inside `plan_kwargs` with its own
   defaults, so `plan_kwargs={"n_epochs_kl_warmup": 40}` has no effect.
 - **Adversarial batch classifier.** It is on whenever a protein has all-zero counts in some batch
-  and `override_missing_proteins=False`. It acts on `z = u + eps`, not on the sample-free `u`, so
+  and `override_missing_proteins=False`. It acts on `z = u + eps`, not on `u` alone, so
   it can penalise donor information in `eps` when donors are nested in batches. With the legacy
   `scale_observations=True` and `hierarchy_mode="legacy"` the per-cell ELBO is divided by the
   sample's cell count while the adversarial loss is not, so the adversary carries a much larger relative weight (inferred from the code, not measured). Pass
   `adversarial_classifier=False` to turn it off.
+
+Protein scale in inherited methods. The loss fits protein counts with means
+`per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that
+efficiency (stock TOTALVI does not, and its protein samples are about `1/efficiency` too large).
+`get_normalized_expression` still returns upstream's normalised scale, without the efficiency,
+so its protein values sit on a different scale from `get_counterfactual_expression`.
 
 Other inherited TOTALVI methods are not re-derived for `u`/`eps`: `get_marginal_ll` raises, and
 `get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell's
@@ -411,8 +443,27 @@ a `KeyError`). `gene_dispersion="gene-label"` is rejected at construction with a
 `ValueError`; use `"gene"`, `"gene-batch"` or `"gene-cell"`.
 
 **Streaming and new-sample inference:**
-`MrTotalVIBatchDataModule` is not a stable public training API, and this package does not claim end-to-end
+No data-module class is shipped. The private `_MrTotalVIRegistryAdapter` (`mrtotalvi._datamodule`) is not a
+stable public training API, and this package does not claim end-to-end
 streaming training or inference for biological samples absent from the registered training set.
+
+**Differential abundance with unequal groups (methods note):**
+The default `"posterior"` estimator is noise-dominated (see the `differential_abundance`
+docstring), and its group scores use a `logmeanexp` that behaves like a maximum, so a group of
+more samples scores higher. With unequal group sizes the sign of the default log-enrichment can
+track the number of samples per group (null stub, 2 against 8 samples: mean about -18.7 nats).
+This matches the MrVI formula. Use `density_estimator="knn"` or `"scale_floor"` for unbalanced
+designs. The `"knn"` per-sample scores are comparable across samples of similar size only
+(fixed pseudocount 0.5, see the docstring). With `n_mc_samples > 1` the score is the log expected
+density under `q(u|x)`, a smoothed quantity on a different scale from the `n_mc_samples=1`
+plug-in; do not mix the two.
+
+**Admissibility (methods note):**
+`get_outlier_cell_sample_pairs` (`is_admissible`) uses one global quantile over pooled
+leave-one-out scores. `get_counterfactual_latent` (`admissible`) uses one quantile per target
+sample. They are different quantities. In both, a cell's own sample is scored leave-one-out, so
+about `quantile_threshold` (default 5%) of own-sample pairs fail by design, and the private DE
+filter drops that share of cells from their own sample.
 
 **Objective (methods note):**
 The default training objective (`use_map=True`) is a MAP/cross-entropy penalty on the residual
@@ -422,6 +473,12 @@ entropy term — is available via `use_map=False` at model construction. Centere
 ```python
 model = MrTotalVI(adata, sample_key="donor", use_map=False)
 ```
+
+`get_elbo` is comparable only within one configuration (`use_map`, `hierarchy_mode`, prior
+scales and KL weights): with `use_map=True` the `eps` term is `-log p(eps)` at a point and can be
+negative. The loss clamps the `eps` prior log-scale below at `-4.0`
+(`pz_scale.clamp(min=-4.0)`). A `z_u_prior_scale` under `-4` therefore acts as `-4`, and with
+`learn_z_u_prior_scale=True` a scale that reaches `-4` receives no gradient.
 
 The `kl_u` term uses a single-sample Monte-Carlo estimate of `KL(q(u)‖p(u))` (unbiased, higher
 variance than analytic).

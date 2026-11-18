@@ -333,9 +333,12 @@ def test_mrtotalvi_mc_samples_with_size_factor_and_protein_batch_mask(adata_basi
     loss_out = module.loss(tensors, inf_out, gen_out)
 
     batch_size = tensors[scvi.REGISTRY_KEYS.X_KEY].shape[0]
+    # The MC dimension is averaged, so every per-cell term has shape (batch,); the old
+    # (n_samples, batch) shape made LossOutput read n_samples as n_obs_minibatch.
     assert loss_out.reconstruction_loss["reconst_loss_protein"].shape == torch.Size(
-        [2, batch_size]
+        [batch_size]
     )
+    assert loss_out.n_obs_minibatch == batch_size
     assert loss_out.kl_local["kl_div_z"].shape == torch.Size([batch_size])
     assert torch.isfinite(loss_out.loss)
 

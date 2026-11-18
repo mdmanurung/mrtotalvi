@@ -55,6 +55,51 @@
   u-encoder). Both default to `None` (off); loss and parameters are unchanged then. The term
   enters the loss as `penalty / n_cells`. See `docs/user_guide.md`.
 
+### Fixed
+
+- `get_local_sample_distances` and `get_local_sample_representation` check the output size before
+  encoding and raise above `max_gb=4.0` GiB (`max_gb=None` turns the check off). Distances are
+  computed per minibatch. New `groupby` and `keep_cell` arguments return group-mean matrices
+  (`<column>_distances`) without the per-cell array.
+- `MrTotalVAE.sample` (used by `posterior_predictive_sample`) applies `per_batch_efficiency`, as the
+  loss does. Protein samples were about `1/efficiency` too large.
+- The Wald-statistic matrix square root maps non-finite entries to 0, so a cell with a singular
+  `X^T M X` no longer aborts the private DE run with a `ValueError` from the Chi2 CDF.
+- `module.loss` with Monte-Carlo samples (`n_samples > 1`) returns per-cell terms of shape
+  `(batch,)` and `n_obs_minibatch=batch`. The scalar loss is unchanged; `compute_elbo` no longer fails
+  on stacked terms of different shapes.
+- `MrTotalVI.load(..., u_encoder_mode_override="sample_blind")` switches the u-encoder shrinkage
+  penalty off with a warning, in the module and in `init_params_`. A re-saved checkpoint failed to
+  load.
+- `MrTotalVI.load` accepts an AnnData that lacks some registered donors (inference works). A fresh
+  model with an empty donor raises at construction only with `scale_observations=True`, and
+  otherwise at `train()`. The message no longer tells users to edit `sample_key`.
+- `MrTotalVI.load` warns when the sample-embedding penalty is active and the loaded AnnData has a
+  different cell count from the training run, because `penalty / n_cells` changes.
+- `model.sample_info` follows `sample_order`, as in MrVI, instead of the order of first appearance.
+- `combine_mrtotalvi_seed_results` warns on a single seed, fewer than two draws, or identical results
+  under two seed keys (a between-seed SD of 0).
+- The private registry adapter gives validation datasets the training categories' codes and raises
+  on unseen categories. Validation codes used to be re-derived from the validation set alone.
+
+### Changed
+
+- The adversarial-classifier warning and the user guide say the classifier acts on `z = u + eps`,
+  "not on `u` alone". The default u-encoder is sample-conditioned, so "sample-free u" was wrong. The
+  adversary target itself is unchanged.
+- The user guide names the real class (`_MrTotalVIRegistryAdapter`, private) instead of the
+  non-existent `MrTotalVIBatchDataModule`.
+
+### Documented
+
+- Directional bias of the default `"posterior"` DA estimator with unequal group sizes, the `"knn"`
+  per-sample pseudocount bias for small samples, and the scale of `n_mc_samples > 1` scores
+  (docstring corrected: it is not a Jensen debias).
+- The `eps` prior log-scale clamp at `-4.0`; `get_elbo` comparability within one configuration; the
+  penalty under `scale_observations=True`; the validation-metric scaling of the penalty.
+- The two admissibility rules (`is_admissible` against `admissible`) and the leave-one-out
+  own-sample failure rate.
+
 ## 0.1.0.dev0 (2026-11-17): extraction from the `mdmanurung/scvi-tools` fork
 
 MrTotalVI moved from `scvi.external.mrtotalvi` in the fork to the standalone package `mrtotalvi`,

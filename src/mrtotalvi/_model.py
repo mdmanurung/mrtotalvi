@@ -116,9 +116,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``hierarchy_mode="centered_v2"``.
     z_u_prior_scale
         Log-scale of the prior on ``eps`` (the donor residual).
-        ``0.0`` → ``p(eps) = N(0, 1)``.
+        ``0.0`` → ``p(eps) = N(0, 1)``. The loss clamps the log-scale at ``-4.0`` from
+        below (``pz_scale.clamp(min=-4.0)``), so a value under ``-4`` acts as ``-4``, and a
+        learnable scale receives no gradient once it is below ``-4``.
     learn_z_u_prior_scale
-        Whether ``pz_scale`` is a learnable parameter.
+        Whether ``pz_scale`` is a learnable parameter. With ``use_map=True`` the
+        ``eps`` term is ``-log p(eps)`` at a point, which can be negative, so
+        :meth:`get_elbo` values are comparable only within one configuration (same
+        ``use_map``, ``hierarchy_mode``, prior scales and KL weights).
     u_prior
         Resolved prior enum: exactly ``"standard"``, ``"mog"``, or ``"vamp"``.
         New calls default to ``"mog"``.
@@ -150,7 +155,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         shared offset unpenalised. The sum is a global term: the loss (a per-cell mean) gains
         ``penalty / n_cells``, with ``n_cells`` the number of cells in the registered AnnData,
         so the penalty is not multiplied by the batch size and is not annealed by
-        ``kl_weight``.
+        ``kl_weight``. With the legacy ``scale_observations=True`` each cell's data term is
+        also divided by its donor's cell count while the penalty is not, so one ``sigma``
+        shrinks more weakly than without it (``hierarchy_mode="centered_v2"`` weights average
+        to 1 and are unaffected). The validation metric ``elbo_validation`` reports the
+        penalty as ``kl_global / n_obs_validation`` (the scvi-tools convention), about
+        ``n_obs_training / n_obs_validation`` times its per-cell size in the loss, and
+        :meth:`get_elbo` leaves it out.
     u_encoder_sample_embedding_prior_scale
         Same prior with its own ``sigma`` on the u-encoder sample tables (``qu.sample_embed``
         and the gamma/beta tables of both conditional normalisations). Requires
@@ -238,6 +249,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     """
 
     _module_cls = MrTotalVAE
+
+    # True only while ``load`` rebuilds the model; see the empty-donor check in __init__.
+    _loading_checkpoint = False
 
     def __init__(
         self,
@@ -380,11 +394,19 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             .reindex(range(n_sample), fill_value=0)
             .sort_index()
         )
-        if (counts == 0).any():
-            missing = counts[counts == 0].index.tolist()
+        missing = counts[counts == 0].index.tolist()
+        self._empty_sample_positions = missing
+        # A checkpoint load rebuilds the model on the AnnData passed to ``load``, which
+        # may hold a subset of the training donors. The weights come from the checkpoint,
+        # so an empty donor is allowed there. A fresh model with scale_observations=True
+        # fails here because a donor weight would divide by zero cells. Other fresh models
+        # fail in ``train``.
+        if missing and scale_observations and not MrTotalVI._loading_checkpoint:
             raise ValueError(
                 f"Donors at index positions {missing} have no cells in the registered "
-                "AnnData. Remove them from sample_key or filter them from the data."
+                "AnnData, and scale_observations=True weights each cell by its donor's "
+                "cell count. Filter these donors from the data before setup_anndata, or "
+                "set scale_observations=False."
             )
         n_obs_per_sample = torch.tensor(counts.values, dtype=torch.float32)
 
@@ -440,7 +462,18 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self.label_order = (
             self.adata_manager.get_state_registry(REGISTRY_KEYS.LABELS_KEY).categorical_mapping
         )
-        self.sample_info = self.adata.obs[[sample_key]].drop_duplicates().reset_index(drop=True)
+        # One row per registered sample, in ``sample_order`` (the embedding row order),
+        # as in MrVI. ``drop_duplicates`` alone follows the order of first appearance.
+        self.sample_info = (
+            self.adata.obs[[sample_key]]
+            .drop_duplicates()
+            .assign(_order=lambda d: d[sample_key].map(
+                {s: i for i, s in enumerate(self.sample_order)}
+            ))
+            .sort_values("_order")
+            .drop(columns="_order")
+            .reset_index(drop=True)
+        )
 
         # Overwrite init_params_ from TOTALVI with MrTotalVI's full local scope
         self.init_params_ = self._get_init_params(locals())
@@ -616,10 +649,28 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # Checkpoints saved before ``spec_defaults`` existed have no flag and were built
         # with the old encoder defaults (qz without stop-gradient/dropout).
         token = _LEGACY_DEFAULTS_LOAD.set(_checkpoint_lacks_spec_defaults(dir_path, kwargs))
+        MrTotalVI._loading_checkpoint = True
         try:
             model = super().load(dir_path, *args, **kwargs)
         finally:
+            MrTotalVI._loading_checkpoint = False
             _LEGACY_DEFAULTS_LOAD.reset(token)
+        module = model.module
+        if (
+            module.sample_embedding_prior_scale is not None
+            or module.u_encoder_sample_embedding_prior_scale is not None
+        ) and module.n_obs_per_sample is not None:
+            n_trained = float(module.n_obs_per_sample.sum())
+            if abs(n_trained - module._n_obs_total) > 0.5:
+                warnings.warn(
+                    "The loaded AnnData has "
+                    f"{module._n_obs_total:.0f} cells, but the checkpoint was trained on "
+                    f"{n_trained:.0f}. The sample-embedding penalty is divided by the cell "
+                    "count of the AnnData passed to load, so continued training uses a "
+                    "different penalty strength than the original run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         loaded_hierarchy_mode = model.hierarchy_mode
         loaded_u_encoder_mode = model.u_encoder_mode
         resolved_hierarchy_mode = (
@@ -664,6 +715,27 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         model.module.hierarchy_mode = resolved_hierarchy_mode
         model.module.u_encoder_mode = resolved_u_encoder_mode
         model.module.qu.u_encoder_mode = resolved_u_encoder_mode
+        if (
+            resolved_u_encoder_mode == "sample_blind"
+            and module.u_encoder_sample_embedding_prior_scale is not None
+        ):
+            # The sample_blind encoder has no tables for this penalty, and the
+            # constructor rejects the pair, so drop the penalty from the module and from
+            # init_params_ (a re-saved checkpoint would otherwise fail to load).
+            warnings.warn(
+                "u_encoder_mode_override='sample_blind' removes the u-encoder sample "
+                "tables, so u_encoder_sample_embedding_prior_scale="
+                f"{module.u_encoder_sample_embedding_prior_scale} is switched off. "
+                "Continued training uses a different objective.",
+                UserWarning,
+                stacklevel=2,
+            )
+            module.u_encoder_sample_embedding_prior_scale = None
+            for group in model.init_params_.values():
+                if isinstance(group, dict) and (
+                    "u_encoder_sample_embedding_prior_scale" in group
+                ):
+                    group["u_encoder_sample_embedding_prior_scale"] = None
         if (
             model._freeze_prior_after_init
             and model.vamp_training_indices_sha256_ is not None
@@ -711,6 +783,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         indices before the first optimizer step. Pass ``accelerator='cpu'``
         explicitly to suppress the no-GPU warning.
         """
+        if self._empty_sample_positions:
+            raise ValueError(
+                f"Donors at index positions {self._empty_sample_positions} have no cells "
+                "in the AnnData of this model, so their embeddings cannot be trained. "
+                "Train on an AnnData that holds every registered donor. A loaded model may "
+                "still be used for inference on a subset."
+            )
         if accelerator == "auto":
             if torch.cuda.is_available():
                 accelerator = "gpu"
@@ -794,7 +873,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         if use_adversary:
             warnings.warn(
                 "The TOTALVI adversarial batch classifier is on and acts on z = u + eps, "
-                "not on the sample-free u (TOTALVI turns it on when a protein is missing "
+                "not on u alone (TOTALVI turns it on when a protein is missing "
                 "in some batch). It "
                 "can penalise donor information carried by eps when donors are nested "
                 "in batches. Pass adversarial_classifier=False to turn it off.",
@@ -1524,14 +1603,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     # Counterfactual representations (internal)
     # ------------------------------------------------------------------
 
-    def _compute_cf_representations(
+    def _iter_cf_representations(
         self,
         adata: AnnData,
         indices: npt.ArrayLike | None,
         batch_size: int,
         use_mean: bool = True,
-    ) -> tuple[npt.NDArray, list[str]]:
-        """Compute counterfactual z for every cell × donor combination.
+    ):
+        """Yield ``(reps, cell_positions)`` per minibatch of counterfactual ``z``.
 
         For each cell, runs the encoder once to get ``qz``, then loops over
         all ``n_sample`` donors.  For each donor ``d``:
@@ -1542,30 +1621,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             z_base, eps = module.qz(u, cf_sample)
             z[cell, d, :] = z_base + eps
 
-        Parameters
-        ----------
-        adata
-            Validated AnnData.
-        indices
-            Observation indices to use.
-        batch_size
-            Cells per DataLoader minibatch.
-        use_mean
-            If ``True``, uses ``qz.loc`` (posterior mean of the encoder) as
-            ``u``; otherwise uses the sampled ``u`` from inference.
-
-        Returns
-        -------
-        reps : np.ndarray
-            Shape ``(n_cells, n_sample, n_latent)``.
-        cell_names : list[str]
-            Original cell names in the same order as ``reps``.
+        ``reps`` has shape ``(n_cells_in_minibatch, n_sample, n_latent)`` and
+        ``cell_positions`` holds the row positions of those cells in ``adata``.
+        ``use_mean=True`` uses ``qz.loc`` (posterior mean of the encoder) as ``u``;
+        otherwise the sampled ``u`` from inference.
         """
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
         n_sample = self.summary_stats.n_sample
-
-        all_reps = []
-        all_cell_names = []
 
         was_training = self.module.training
         self.module.eval()
@@ -1573,7 +1635,6 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             with torch.inference_mode():
                 for tensors in tqdm(scdl, desc="Counterfactual representations"):
                     cell_idx = tensors[REGISTRY_KEYS.INDICES_KEY].long().flatten()
-                    all_cell_names.extend(adata.obs_names[cell_idx.numpy()].tolist())
 
                     # Full TotalVI + MrTotalVI encoder pass
                     inf_inputs = self.module._get_inference_input(tensors)
@@ -1611,10 +1672,44 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                             .permute(1, 0, 2)
                             .numpy()
                         )
-                    all_reps.append(batch_reps)
+                    yield batch_reps, cell_idx.numpy()
         finally:
             self.module.train(was_training)
 
+    def _n_selected_cells(self, adata: AnnData, indices: npt.ArrayLike | None) -> int:
+        """Number of cells ``indices`` selects (all cells when ``None``)."""
+        if indices is None:
+            return adata.n_obs
+        return len(np.arange(adata.n_obs)[np.asarray(indices)])
+
+    @staticmethod
+    def _check_output_size(n_bytes: float, max_gb: float | None, what: str, hint: str) -> None:
+        """Raise before allocating an output larger than ``max_gb`` GiB."""
+        if max_gb is not None and n_bytes > max_gb * 2**30:
+            raise ValueError(
+                f"{what} would need {n_bytes / 2**30:.1f} GiB, above max_gb={max_gb}. "
+                f"{hint} Pass max_gb=None to allow it."
+            )
+
+    def _compute_cf_representations(
+        self,
+        adata: AnnData,
+        indices: npt.ArrayLike | None,
+        batch_size: int,
+        use_mean: bool = True,
+    ) -> tuple[npt.NDArray, list[str]]:
+        """Counterfactual ``z`` for every cell x donor combination.
+
+        Returns ``(reps, cell_names)`` with ``reps`` of shape ``(n_cells, n_sample,
+        n_latent)``; see :meth:`_iter_cf_representations`.
+        """
+        all_reps = []
+        all_cell_names = []
+        for batch_reps, cell_positions in self._iter_cf_representations(
+            adata, indices, batch_size, use_mean=use_mean
+        ):
+            all_cell_names.extend(adata.obs_names[cell_positions].tolist())
+            all_reps.append(batch_reps)
         return np.concatenate(all_reps, axis=0), all_cell_names
 
     # ------------------------------------------------------------------
@@ -1641,6 +1736,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         indices: npt.ArrayLike | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
+        max_gb: float | None = 4.0,
     ) -> xr.DataArray:
         """Compute the local per-donor latent representation.
 
@@ -1657,6 +1753,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             Minibatch size.
         use_mean
             If ``True``, uses the posterior mean of the encoder as ``u``.
+        max_gb
+            Raise before encoding when the output would exceed this many GiB
+            (``n_cell * n_sample * n_latent`` float32). ``None`` disables the check.
+            Pass fewer ``indices`` or use :meth:`get_local_sample_distances` with
+            ``groupby`` to stay under it.
 
         Returns
         -------
@@ -1664,6 +1765,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
+        self._check_output_size(
+            4 * self._n_selected_cells(adata, indices)
+            * self.summary_stats.n_sample
+            * self.module.n_latent,
+            max_gb,
+            "The local sample representation",
+            "Pass fewer indices.",
+        )
 
         reps, cell_names = self._compute_cf_representations(
             adata, indices, batch_size, use_mean=use_mean
@@ -1685,11 +1794,16 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size: int = 256,
         use_mean: bool = True,
         norm: Literal["l2", "l1"] = "l2",
-    ) -> xr.DataArray:
+        groupby: str | list[str] | None = None,
+        keep_cell: bool = True,
+        max_gb: float | None = 4.0,
+    ) -> xr.DataArray | xr.Dataset:
         """Compute cell-specific pairwise donor distance matrices.
 
         For each cell, computes a symmetric ``(n_sample, n_sample)`` distance
-        matrix over the counterfactual donor representations.
+        matrix over the counterfactual donor representations. Distances are
+        computed per minibatch, so the ``(n_cell, n_sample, n_latent)``
+        representation is never held in memory.
 
         Parameters
         ----------
@@ -1703,38 +1817,87 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             If ``True``, uses the posterior mean of the encoder as ``u``.
         norm
             ``"l2"`` (Euclidean) or ``"l1"`` (Manhattan).
+        groupby
+            One or more columns of ``adata.obs``, as in
+            :meth:`scvi.external.MRVI.get_local_sample_distances`. For each column the
+            result holds the mean distance matrix over the cells of each group, as
+            ``<column>_distances``.
+        keep_cell
+            With ``groupby``, also keep the per-cell matrices (variable ``"cell"``).
+            ``False`` keeps only the group means, which needs memory for one
+            ``(n_sample, n_sample)`` matrix per group. It must be ``True`` without
+            ``groupby``.
+        max_gb
+            Raise before encoding when the per-cell output (``n_cell * n_sample^2``
+            float32) would exceed this many GiB. ``None`` disables the check. Use
+            ``groupby`` with ``keep_cell=False``, or fewer ``indices``, to stay under it.
 
         Returns
         -------
-        :class:`~xarray.DataArray` of shape ``(n_cell, n_sample, n_sample)``.
+        :class:`~xarray.DataArray` of shape ``(n_cell, n_sample, n_sample)`` without
+        ``groupby``. With ``groupby``, an :class:`~xarray.Dataset` with ``"cell"`` (if
+        ``keep_cell``) and one ``<column>_distances`` variable of shape ``(<column>, sample_x, sample_y)`` per column.
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-
-        reps, cell_names = self._compute_cf_representations(
-            adata, indices, batch_size, use_mean=use_mean
-        )
         if norm not in ("l2", "l1"):
             raise ValueError(f"Unsupported norm '{norm}'. Choose 'l2' or 'l1'.")
         p = 2.0 if norm == "l2" else 1.0
+        group_keys = [groupby] if isinstance(groupby, str) else list(groupby or [])
+        for key in group_keys:
+            if key not in adata.obs:
+                raise KeyError(f"groupby column {key!r} is not in adata.obs.")
+        if not keep_cell and not group_keys:
+            raise ValueError("keep_cell=False needs groupby; there would be no output.")
 
-        # Pairwise distances per cell, (n_cells, n_sample, n_sample), computed in
-        # cell chunks so no (n_cells, n_sample, n_sample, n_latent) tensor is built.
-        n_cells = reps.shape[0]
-        dists = np.empty((n_cells, reps.shape[1], reps.shape[1]), dtype=np.float32)
-        for start in range(0, n_cells, batch_size):
-            chunk = torch.as_tensor(reps[start : start + batch_size], dtype=torch.float32)
-            dists[start : start + batch_size] = torch.cdist(
+        n_sample = self.summary_stats.n_sample
+        n_cells = self._n_selected_cells(adata, indices)
+        if keep_cell:
+            self._check_output_size(
+                4 * n_cells * n_sample * n_sample,
+                max_gb,
+                "The per-cell distance matrices",
+                "Pass groupby with keep_cell=False for group means, or fewer indices.",
+            )
+            dists = np.empty((n_cells, n_sample, n_sample), dtype=np.float32)
+        cell_names: list[str] = []
+        sums = {key: {} for key in group_keys}  # key -> group -> [sum matrix, n cells]
+        start = 0
+        for batch_reps, positions in self._iter_cf_representations(
+            adata, indices, batch_size, use_mean=use_mean
+        ):
+            chunk = torch.as_tensor(batch_reps, dtype=torch.float32)
+            batch_d = torch.cdist(
                 chunk, chunk, p=p, compute_mode="donot_use_mm_for_euclid_dist"
             ).numpy()
+            cell_names.extend(adata.obs_names[positions].tolist())
+            if keep_cell:
+                dists[start : start + len(positions)] = batch_d
+            start += len(positions)
+            for key in group_keys:
+                labels = adata.obs[key].to_numpy()[positions]
+                for label in np.unique(labels):
+                    total = batch_d[labels == label].sum(axis=0, dtype=np.float64)
+                    count = int((labels == label).sum())
+                    prior = sums[key].get(label, [0.0, 0])
+                    sums[key][label] = [prior[0] + total, prior[1] + count]
 
-        return xr.DataArray(
-            dists,
-            dims=["cell_name", "sample_x", "sample_y"],
-            coords={
-                "cell_name": cell_names,
-                "sample_x": self.sample_order,
-                "sample_y": self.sample_order,
-            },
-            name="sample_distances",
-        )
+        coords = {"sample_x": self.sample_order, "sample_y": self.sample_order}
+        if not group_keys:
+            return xr.DataArray(
+                dists,
+                dims=["cell_name", "sample_x", "sample_y"],
+                coords={"cell_name": cell_names, **coords},
+                name="sample_distances",
+            )
+        data_vars = {}
+        if keep_cell:
+            data_vars["cell"] = (["cell_name", "sample_x", "sample_y"], dists)
+        for key in group_keys:
+            labels = list(sums[key])
+            means = np.stack([sums[key][g][0] / sums[key][g][1] for g in labels])
+            data_vars[f"{key}_distances"] = ([key, "sample_x", "sample_y"], means.astype(np.float32))
+        group_coords = {key: list(sums[key]) for key in group_keys}
+        if keep_cell:
+            group_coords["cell_name"] = cell_names
+        return xr.Dataset(data_vars, coords={**coords, **group_coords})
