@@ -291,6 +291,12 @@ Under `"knn"` the per-sample
 values, so read the enrichments. `donor_key` is not available with `"knn"`. Both remain
 descriptive. See the `differential_abundance` docstring for the full mapping.
 
+With `omit_original_sample=False` (forced by `donor_key`), `differential_abundance()` removes
+each cell's own kernel from its own sample's density (leave-one-cell-out), unlike upstream MrVI.
+Without this, every cell looks enriched for its own group. A group with no reference sample for
+a cell (for example one sample per condition under the default `omit_original_sample=True`)
+gives NaN, not `inf`, and a warning with the affected cell count.
+
 `MrTotalVI.differential_abundance()` is descriptive and non-inferential. Its public
 `differential_expression()` fails closed for both legacy and centered-v2 models. For biological
 DE, aggregate raw counts at the donor-by-condition level and use a replicate-aware method such as

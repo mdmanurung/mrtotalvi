@@ -180,6 +180,30 @@ def _knn_log_density(counts: np.ndarray, n_ref: np.ndarray) -> np.ndarray:
     return np.where(n_ref > 0, out, np.nan)
 
 
+def _leave_one_cell_out(ap, u_tensor, lp: np.ndarray, own: np.ndarray) -> np.ndarray:
+    """Remove each cell's own Normal component from its own sample's mixture density.
+
+    ``lp`` is ``ap.log_prob(u_tensor)`` with uniform weights ``1/n``. For a cell whose
+    component is ``own[i] >= 0`` the result is ``log((n * p - c_i) / (n - 1))``, computed in
+    log space as ``logsumexp(component log-probs without c_i) - log(n - 1)``. Cells with
+    ``own[i] < 0`` keep ``lp``. A one-component mixture has nothing left: NaN.
+    """
+    hit = np.nonzero(own >= 0)[0]
+    if hit.size == 0:
+        return lp
+    lp = lp.copy()
+    n_comp = ap.component_distribution.base_dist.loc.shape[0]
+    if n_comp == 1:
+        lp[hit] = np.nan
+        return lp
+    comp = ap.component_distribution.log_prob(u_tensor[hit].unsqueeze(-2))
+    comp[torch.arange(hit.size, device=comp.device), torch.as_tensor(own[hit], device=comp.device)] = (
+        -float("inf")
+    )
+    lp[hit] = (torch.logsumexp(comp, dim=-1) - np.log(n_comp - 1)).detach().cpu().numpy()
+    return lp
+
+
 def differential_abundance(
     model,
     *,
@@ -198,6 +222,21 @@ def differential_abundance(
     scale_floor: float | None = None,
 ) -> xr.Dataset:
     """Compute MrVI-style differential abundance log probabilities over ``u``.
+
+    With ``omit_original_sample=False`` (also forced by ``donor_key``) every cell is scored
+    leave-one-cell-out: its own Normal component is removed from its own sample's aggregated
+    posterior (in log space, renormalised by ``n_s - 1``), as ``local_sample_enrichment`` and
+    ``get_outlier_cell_sample_pairs`` already do. **This departs from upstream MrVI**, which
+    keeps the component; that bias made every cell look enriched for its own group (on a
+    null stub, +67.8 nats for ``"posterior"``, +9.1 with ``scale_floor=0.4`` and +32.6 with
+    ``donor_key``). The default ``omit_original_sample=True`` is unchanged. A sample with a
+    single cell has no leave-one-out density: its per-sample ``log_probs`` for that cell are
+    NaN and it carries no weight in group aggregates.
+
+    Group results are NaN, never ``-inf`` or ``inf``, when a cell's group has no reference
+    sample: a group made only of the cell's own sample under ``omit_original_sample=True``,
+    or only of a one-cell own sample under ``False``. Enrichments involving such a group are
+    NaN. A ``UserWarning`` gives the number of affected cells.
 
     Parameters
     ----------
@@ -389,12 +428,27 @@ def differential_abundance(
             )
         _dtype = ap.component_distribution.base_dist.loc.dtype
         _device = ap.component_distribution.base_dist.loc.device
+        # Component j of ``ap`` is the j-th cell (in adata order) of this sample. With
+        # omit_original_sample=False a cell of this sample must not score against its own
+        # component, so ``own_component`` maps each cell to that component (-1 = not in sample).
+        own_component = None
+        if not omit_original_sample:
+            own_component = np.full(adata.n_obs, -1, dtype=np.int64)
+            in_sample = np.where(adata.obs[sample_key].to_numpy() == sample_name)[0]
+            own_component[in_sample] = np.arange(in_sample.shape[0])
         draw_log_probs = []
         for us in us_list:
             chunk_lps = []
-            for u_rep in np.array_split(us, n_splits):
+            for rows, u_rep in zip(
+                np.array_split(np.arange(adata.n_obs), n_splits),
+                np.array_split(us, n_splits),
+                strict=True,
+            ):
                 u_tensor = torch.as_tensor(u_rep, dtype=_dtype, device=_device)
-                chunk_lps.append(ap.log_prob(u_tensor).detach().cpu().numpy())
+                lp = ap.log_prob(u_tensor).detach().cpu().numpy()
+                if own_component is not None:
+                    lp = _leave_one_cell_out(ap, u_tensor, lp, own_component[rows])
+                chunk_lps.append(lp)
             draw_log_probs.append(np.concatenate(chunk_lps, axis=0))  # (n_cells,)
         if n_mc_samples == 1:
             cell_lp = draw_log_probs[0]
@@ -437,6 +491,8 @@ def differential_abundance(
         coords={"cell_name": adata.obs_names.to_numpy(), "sample": np.asarray(sample_values)},
     )
 
+    empty_group = np.zeros(adata.n_obs, dtype=bool)  # cells with a group that has no reference
+
     def aggregate(samples: np.ndarray) -> np.ndarray:
         if density_estimator == "knn":
             cols = pd.Index(sample_values).get_indexer(samples)
@@ -448,10 +504,21 @@ def differential_abundance(
             sample_one_hot = np.zeros((adata.n_obs, len(samples)))
             for i, sample_name in enumerate(samples):
                 sample_one_hot[adata.obs[sample_key].to_numpy() == sample_name, i] = 1
-            denom = np.maximum((1 - sample_one_hot).sum(axis=1), 1)
+            n_ref = (1 - sample_one_hot).sum(axis=1)
             sample_log_probs = np.where(sample_one_hot, -np.inf, sample_log_probs)
-            return logsumexp(sample_log_probs, axis=1) - np.log(denom)
-        return logsumexp(sample_log_probs, axis=1) - np.log(sample_log_probs.shape[1])
+            result = logsumexp(sample_log_probs, axis=1) - np.log(np.maximum(n_ref, 1))
+            result[n_ref == 0] = np.nan  # group is only the cell's own sample
+        else:
+            # NaN marks a sample whose leave-one-cell-out density is empty (a one-cell own
+            # sample); it carries no weight, and a group with no usable sample is NaN.
+            usable = ~np.isnan(sample_log_probs)
+            n_ref = usable.sum(axis=1)
+            result = logsumexp(np.where(usable, sample_log_probs, -np.inf), axis=1) - np.log(
+                np.maximum(n_ref, 1)
+            )
+            result[n_ref == 0] = np.nan
+        empty_group[n_ref == 0] = True
+        return result
 
     cov_log_probs = {}
     cov_log_enrichs = {}
@@ -479,6 +546,15 @@ def differential_abundance(
                 enrich_values,
                 np.vstack([per_enrich[v] for v in enrich_values]).T,
             )
+
+    if empty_group.any():
+        warnings.warn(
+            f"{int(empty_group.sum())} cells have a group with no reference sample once "
+            "their own cell or sample is left out; their log probabilities and "
+            "enrichments for that group are NaN.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     coords = {"cell_name": adata.obs_names.to_numpy(), "sample": np.asarray(sample_values)}
     for key, (values, _) in cov_log_probs.items():
