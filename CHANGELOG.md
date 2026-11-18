@@ -25,7 +25,7 @@
   sample under `omit_original_sample=True`, as `"knn"` already did), and warns once with the
   number of affected cells.
 
-### Changed (defaults now match released MrVI)
+### Changed (defaults now follow released MrVI in part)
 
 - `MrTotalVI` defaults: `n_latent=30` (was 20) and `n_latent_u=10` (was `None`, isomorphic `u`).
   `n_latent_u=None` still gives the isomorphic hierarchy.

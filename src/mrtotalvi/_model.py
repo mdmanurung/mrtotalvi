@@ -351,7 +351,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             raise ValueError(
                 "gene_dispersion='gene-label' is not supported: TOTALVI builds the "
                 "model but training fails because the label tensor is not passed to "
-                "the generative step. Use 'gene', 'gene-batch' or 'gene-cell'."
+                "the generative step. Use 'gene' or 'gene-batch'."
             )
 
         # Call TOTALVI.__init__. n_sample / n_latent_sample / z_u_prior_scale /
