@@ -700,6 +700,13 @@ def _construct_design_matrix(
     return torch.tensor(xmat, dtype=torch.float32), names_all, n_fixed
 
 
+def _wald_pvalue(statistic: np.ndarray, df: np.ndarray) -> np.ndarray:
+    """Chi-square survival function in float64: a large statistic gives a small p, not 0."""
+    from scipy.stats import chi2
+
+    return chi2.sf(np.asarray(statistic, dtype=np.float64), np.asarray(df, dtype=np.float64))
+
+
 def _differential_expression(
     model,
     *,
@@ -774,8 +781,14 @@ def _differential_expression(
         BatchNorm-based decoders.
     **filter_samples_kwargs
         Forwarded to :func:`get_outlier_cell_sample_pairs`.
+
+    Notes
+    -----
+    ``pvalue`` is the chi-square survival function of the Wald statistic, in float64.
+    ``padj`` is Benjamini-Hochberg over one family: every analysed cell times every fixed
+    covariate. Per-cell tests share one model fit, so they are strongly dependent, and the
+    adjusted values change with how many cells and covariates are analysed.
     """
-    import torch.distributions as tdist
     from scipy.stats import false_discovery_control
 
     from scvi import REGISTRY_KEYS as RK
@@ -956,15 +969,15 @@ def _differential_expression(
                 ts = (betas_norm**2).sum(-1).mean(0)
 
                 # Chi2 p-values with df = n_admissible_per_cell
-                df = n_per_cell.clamp(min=1).float().unsqueeze(-1).expand_as(ts)
-                pvals = 1.0 - tdist.Chi2(df).cdf(ts)  # (n_cells, n_cov)
+                df = n_per_cell.clamp(min=1).unsqueeze(-1).expand_as(ts)
+                pvals = _wald_pvalue(ts.cpu().numpy(), df.cpu().numpy())  # (n_cells, n_cov)
 
                 # Un-standardise betas and average over MC draws
                 betas_rescaled = (betas * eps_std).mean(0)  # (n_cells, n_cov, n_latent)
 
                 beta_list.append(betas_rescaled[:, :n_fixed, :].cpu().numpy())
                 effect_size_list.append(ts[:, :n_fixed].cpu().numpy())
-                pvalue_list.append(pvals[:, :n_fixed].cpu().numpy())
+                pvalue_list.append(pvals[:, :n_fixed])
 
                 # ---- gene/protein LFC block ----
                 if store_lfc:
