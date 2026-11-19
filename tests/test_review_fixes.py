@@ -410,3 +410,50 @@ def test_counterfactual_indices_keep_whole_number_floats():
     adata = ad.AnnData(np.zeros((4, 1), dtype=np.float32))
     np.testing.assert_array_equal(cf._as_indices(adata, [1.0, 3.0], name="indices"), [1, 3])
     np.testing.assert_array_equal(cf._as_indices(adata, [2, 0], name="indices"), [2, 0])
+
+
+# Protein axis order on transfer ------------------------------------------------
+
+
+def _numpy_protein_model():
+    """A model whose protein matrix is numpy, with names in adata.uns."""
+    import scvi
+
+    adata = scvi.data.synthetic_iid(n_proteins=4)
+    adata.obsm["protein_expression"] = np.asarray(adata.obsm["protein_expression"])
+    adata.uns["prot_names"] = ["CD3", "CD4", "CD8", "CD19"]
+    adata.obs["sample"] = [f"s{i % 3}" for i in range(adata.n_obs)]
+    MrTotalVI.setup_anndata(
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        protein_names_uns_key="prot_names",
+        sample_key="sample",
+        batch_key="batch",
+    )
+    return MrTotalVI(adata, sample_key="sample", n_latent=3, n_latent_u=2), adata
+
+
+def test_reordered_protein_names_are_rejected_on_transfer():
+    model, adata = _numpy_protein_model()
+    other = adata.copy()
+    other.obsm["protein_expression"] = adata.obsm["protein_expression"][:, ::-1].copy()
+    other.uns["prot_names"] = ["CD19", "CD8", "CD4", "CD3"]
+    with pytest.raises(ValueError, match="registered protein"):
+        model._validate_anndata(other)
+
+
+def test_same_protein_order_is_accepted_on_transfer():
+    model, adata = _numpy_protein_model()
+    model._validate_anndata(adata.copy())
+
+
+def test_reordered_protein_names_are_rejected_on_load(tmp_path):
+    model, adata = _numpy_protein_model()
+    model.is_trained_ = True
+    model.save(tmp_path / "model", overwrite=True)
+    other = adata.copy()
+    other.obsm["protein_expression"] = adata.obsm["protein_expression"][:, ::-1].copy()
+    other.uns["prot_names"] = ["CD19", "CD8", "CD4", "CD3"]
+    with pytest.raises(ValueError, match="registered protein"):
+        MrTotalVI.load(tmp_path / "model", adata=other)
+    MrTotalVI.load(tmp_path / "model", adata=adata.copy())

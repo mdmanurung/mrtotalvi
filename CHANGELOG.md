@@ -44,6 +44,9 @@
 - Counterfactual and enrichment `indices` must be integers: a float such as `1.9` was cast to
   cell 1 without an error, and a string such as `"1"` was accepted. Whole-number floats such as
   `1.0` still work.
+- With a numpy protein matrix and names in `adata.uns` (`protein_names_uns_key`), a reordered
+  protein axis was accepted on transfer and on `MrTotalVI.load` and read against the
+  registered order. Both now raise. scvi-tools already checked a DataFrame protein matrix.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
   float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
   Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now

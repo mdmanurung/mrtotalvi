@@ -646,6 +646,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             model = super().load(dir_path, *args, **kwargs)
         finally:
             MrTotalVI._loading_checkpoint = False
+        model._check_protein_names(model.adata)
         module = model.module
         if (
             module.sample_embedding_prior_scale is not None
@@ -1727,7 +1728,27 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # copy_if_view=False), so the caller's object is registered once.
             _check_if_view(adata, copy_if_view=copy_if_view)
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+            self._check_protein_names(adata)
         return super()._validate_anndata(adata, copy_if_view=copy_if_view)
+
+    def _check_protein_names(self, adata) -> None:
+        """Raise if ``adata.uns`` protein names differ from the registered order.
+
+        scvi-tools compares protein names only for a DataFrame in obsm. With a numpy
+        matrix the names live in ``uns``, and a reordered axis would be read against the
+        registered order without an error, on transfer and on ``load``.
+        """
+        names_key = self.adata_manager.registry["setup_args"].get("protein_names_uns_key")
+        if names_key is None or names_key not in adata.uns:
+            return
+        registered = list(
+            self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names
+        )
+        if list(adata.uns[names_key]) != registered:
+            raise ValueError(
+                f"adata.uns['{names_key}'] does not match the registered protein names "
+                "and order; reorder the protein matrix to the registry."
+            )
 
     def get_local_sample_representation(
         self,
