@@ -41,6 +41,9 @@
   Marginal scenarios no longer copy four per-cell arrays each (constant fields are
   read-only broadcast views), and the context hash is streamed one scenario at a time;
   `context_table_sha256` and decoded values are unchanged.
+- Counterfactual and enrichment `indices` must be integers: a float such as `1.9` was cast to
+  cell 1 without an error, and a string such as `"1"` was accepted. Whole-number floats such as
+  `1.0` still work.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
   float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
   Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now

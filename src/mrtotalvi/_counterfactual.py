@@ -38,6 +38,14 @@ def _as_indices(adata, indices, *, name: str) -> np.ndarray:
             if result.ndim != 1 or result.size != adata.n_obs:
                 raise ValueError(f"{name} boolean mask must have length adata.n_obs.")
             result = np.flatnonzero(result)
+        elif result.size and not np.issubdtype(result.dtype, np.integer):
+            # Accept a float index only when it is a whole number: a cast would turn
+            # 1.9 into cell 1 without an error.
+            is_whole = np.issubdtype(result.dtype, np.floating) and np.all(
+                np.isfinite(result) & (result == np.round(result))
+            )
+            if not is_whole:
+                raise ValueError(f"{name} must contain integer observation indices.")
         result = result.astype(np.int64, copy=False)
     if result.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional.")

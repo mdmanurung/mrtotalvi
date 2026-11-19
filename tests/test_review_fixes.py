@@ -394,3 +394,19 @@ def test_marginal_scenarios_do_not_copy_per_cell_arrays():
     )
     # Before the fix every scenario owned four n-cell arrays: n * S * 24 bytes.
     assert owned < n_query * 24
+
+
+# Counterfactual index validation ----------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [[1.9], [-0.5], ["1"], [np.nan]])
+def test_counterfactual_indices_reject_non_integers(bad):
+    adata = ad.AnnData(np.zeros((4, 1), dtype=np.float32))
+    with pytest.raises(ValueError, match="integer observation indices"):
+        cf._as_indices(adata, bad, name="indices")
+
+
+def test_counterfactual_indices_keep_whole_number_floats():
+    adata = ad.AnnData(np.zeros((4, 1), dtype=np.float32))
+    np.testing.assert_array_equal(cf._as_indices(adata, [1.0, 3.0], name="indices"), [1, 3])
+    np.testing.assert_array_equal(cf._as_indices(adata, [2, 0], name="indices"), [2, 0])
