@@ -443,7 +443,8 @@ MrTotalVI does not support reference-query surgery or the `ArchesMixin` protocol
 `MrTotalVI.load_query_data` and `MrTotalVI.minify_adata` raise `NotImplementedError`
 (the inherited versions left new samples with random, frozen embeddings, or failed with
 a `KeyError`). `gene_dispersion="gene-label"` is rejected at construction with a
-`ValueError`; use `"gene"` or `"gene-batch"`.
+`ValueError`; use `"gene"` or `"gene-batch"`. `protein_dispersion="protein-label"` is
+rejected the same way; use `"protein"` or `"protein-batch"`.
 
 **Streaming and new-sample inference:**
 No data-module class is shipped. The private `_MrTotalVIRegistryAdapter` (`mrtotalvi._datamodule`) is not a

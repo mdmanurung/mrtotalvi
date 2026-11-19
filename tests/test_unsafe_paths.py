@@ -72,3 +72,12 @@ def test_gene_label_dispersion_is_rejected_at_construction():
     MrTotalVI.setup_anndata(adata, **SETUP)
     with pytest.raises(ValueError, match="gene-label"):
         MrTotalVI(adata, sample_key="sample", gene_dispersion="gene-label")
+
+
+def test_protein_label_dispersion_is_rejected_at_construction():
+    # Before the fix this built a (n_proteins, 0) dispersion, then the first forward
+    # pass raised AttributeError "'NoneType' object has no attribute 'squeeze'".
+    adata = _adata()
+    MrTotalVI.setup_anndata(adata, **SETUP)
+    with pytest.raises(ValueError, match="protein-label"):
+        MrTotalVI(adata, sample_key="sample", protein_dispersion="protein-label")

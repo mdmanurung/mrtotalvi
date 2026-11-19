@@ -348,6 +348,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "model but training fails because the label tensor is not passed to "
                 "the generative step. Use 'gene' or 'gene-batch'."
             )
+        if model_kwargs.get("protein_dispersion", "protein") == "protein-label":
+            raise ValueError(
+                "protein_dispersion='protein-label' is not supported: TOTALVI builds "
+                "the model but the first forward pass fails because no label tensor "
+                "reaches inference. Use 'protein' or 'protein-batch'."
+            )
 
         # Call TOTALVI.__init__. n_sample / n_latent_sample / z_u_prior_scale /
         # learn_z_u_prior_scale are explicit kwargs here but are absent from

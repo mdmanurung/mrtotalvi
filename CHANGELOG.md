@@ -53,6 +53,8 @@
   1000 for two batches); it now scales once. `get_feature_correlation_matrix` ignored its
   `adata` argument and always sampled the training data; it now uses `adata`. Default calls
   give the same output as before.
+- `protein_dispersion="protein-label"` is rejected in `MrTotalVI.__init__` with a `ValueError`,
+  like `gene_dispersion="gene-label"`. It built and then failed on the first forward pass.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
   float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
   Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now
