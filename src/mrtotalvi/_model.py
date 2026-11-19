@@ -35,6 +35,7 @@ from ._counterfactual import local_sample_enrichment as _local_sample_enrichment
 from ._module import MrTotalVAE
 from ._stats import (
     _differential_expression,
+    _loader_order,
 )
 from ._stats import (
     differential_abundance as _differential_abundance,
@@ -1547,7 +1548,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+        loader_indices, inverse = _loader_order(adata, indices)
+        scdl = self._make_data_loader(
+            adata=adata, indices=loader_indices, batch_size=batch_size
+        )
 
         was_training = self.module.training
         self.module.eval()
@@ -1591,7 +1595,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 results.append(rep.detach().cpu().numpy())
         finally:
             self.module.train(was_training)
-        return np.concatenate(results, axis=0)
+        latent = np.concatenate(results, axis=0)
+        return latent if inverse is None else latent[inverse]
 
     # ------------------------------------------------------------------
     # Counterfactual representations (internal)

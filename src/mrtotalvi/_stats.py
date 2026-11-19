@@ -52,11 +52,28 @@ def _as_indices(adata, indices):
     return np.asarray(indices)
 
 
+def _loader_order(adata, indices):
+    """Indices to hand the data loader, and the permutation back to request order.
+
+    scvi-tools sorts indices inside each minibatch for backed AnnData, so rows would come
+    back in sorted order, and h5py rejects repeated indices. For backed data each cell is
+    loaded once in ascending order, and the returned index array maps those rows back to
+    the request order; otherwise it is ``None``.
+    """
+    if indices is None or not getattr(adata, "isbacked", False):
+        return indices, None
+    unique_indices, inverse = np.unique(np.asarray(indices), return_inverse=True)
+    return unique_indices, inverse
+
+
 def collect_u_posterior(model, adata=None, indices=None, batch_size: int = 256):
     """Collect posterior Normal parameters for ``u`` from a model dataloader."""
     adata = model._validate_anndata(adata)
     indices = _as_indices(adata, indices)
-    dataloader = model._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+    loader_indices, inverse = _loader_order(adata, indices)
+    dataloader = model._make_data_loader(
+        adata=adata, indices=loader_indices, batch_size=batch_size
+    )
 
     locs = []
     scales = []
@@ -79,7 +96,10 @@ def collect_u_posterior(model, adata=None, indices=None, batch_size: int = 256):
     finally:
         model.module.train(was_training)
 
-    return torch.cat(locs, dim=0), torch.cat(scales, dim=0)
+    loc, scale = torch.cat(locs, dim=0), torch.cat(scales, dim=0)
+    if inverse is not None:
+        loc, scale = loc[inverse], scale[inverse]
+    return loc, scale
 
 
 def get_aggregated_posterior(

@@ -269,3 +269,49 @@ def test_max_component_log_prob_all_excluded_is_neg_inf():
         np.zeros((2, 4), dtype="f4"), loc, scale, lambda a, b: np.ones((b - a, 3), dtype=bool)
     )
     assert np.all(np.isneginf(got))
+
+
+# Backed AnnData row order -----------------------------------------------------
+
+# n_obs is 8 in the v2 fixture; the request has a duplicate and is not ascending.
+BACKED_REQUEST = np.array([7, 2, 5, 0, 6, 1, 3, 4, 2])
+
+
+@pytest.mark.parametrize("batch_size", [4, 256])  # 4 crosses minibatch boundaries
+def test_backed_adata_returns_rows_in_request_order(tmp_path, batch_size):
+    """scvi sorts backed minibatches; outputs must still follow the requested order."""
+    from mrtotalvi._counterfactual import _collect_observed_context, _encode_u_params
+    from mrtotalvi._stats import collect_u_posterior
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+    model._validate_anndata(backed)
+    ascending = np.arange(backed.n_obs)
+
+    # Expected rows come from the ascending request, where the backed sort is a no-op.
+    ref_loc, ref_scale, ref_sample = _encode_u_params(model, backed, ascending, batch_size)
+    loc, scale, sample = _encode_u_params(model, backed, BACKED_REQUEST, batch_size)
+    np.testing.assert_allclose(loc, ref_loc[BACKED_REQUEST], atol=1e-6)
+    np.testing.assert_allclose(scale, ref_scale[BACKED_REQUEST], atol=1e-6)
+    np.testing.assert_array_equal(sample, ref_sample[BACKED_REQUEST])
+
+    ref_context = _collect_observed_context(model, backed, ascending, batch_size)
+    context = _collect_observed_context(model, backed, BACKED_REQUEST, batch_size)
+    for key in ("batch", "sample", "library"):
+        np.testing.assert_array_equal(context[key], ref_context[key][BACKED_REQUEST])
+
+    for give_z in (False, True):
+        latent = model.get_latent_representation(
+            adata=backed, indices=BACKED_REQUEST, give_z=give_z, batch_size=batch_size
+        )
+        ref_latent = model.get_latent_representation(
+            adata=backed, indices=ascending, give_z=give_z, batch_size=batch_size
+        )
+        np.testing.assert_allclose(latent, ref_latent[BACKED_REQUEST], atol=1e-6)
+
+    posterior_loc, _ = collect_u_posterior(
+        model, adata=backed, indices=BACKED_REQUEST, batch_size=batch_size
+    )
+    np.testing.assert_allclose(posterior_loc.numpy(), ref_loc[BACKED_REQUEST], atol=1e-6)

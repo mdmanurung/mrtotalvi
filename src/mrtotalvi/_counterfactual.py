@@ -20,6 +20,8 @@ from torch.distributions import Normal
 from scvi import REGISTRY_KEYS
 from scvi.module._constants import MODULE_KEYS
 
+from ._stats import _loader_order
+
 SCHEMA_VERSION = "mrtotalvi-counterfactual-v1"
 MAX_IN_MEMORY_BYTES = 512 * 1024 * 1024
 # Each marginal context scenario is one full decode pass over the query cells.
@@ -149,9 +151,10 @@ def _counter_normal_noise(
 
 
 def _encode_u_params(model, adata, indices: np.ndarray, batch_size: int):
+    loader_indices, inverse = _loader_order(adata, indices)
     loader = model._make_data_loader(
         adata=adata,
-        indices=indices,
+        indices=loader_indices,
         batch_size=batch_size,
     )
     locs = []
@@ -181,17 +184,21 @@ def _encode_u_params(model, adata, indices: np.ndarray, batch_size: int):
                 )
     finally:
         model.module.train(was_training)
-    return (
+    params = (
         torch.cat(locs).numpy().astype(np.float32, copy=False),
         torch.cat(scales).numpy().astype(np.float32, copy=False),
         torch.cat(observed_samples).numpy().astype(np.int64, copy=False),
     )
+    if inverse is None:
+        return params
+    return tuple(values[inverse] for values in params)
 
 
 def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int):
+    loader_indices, inverse = _loader_order(adata, indices)
     loader = model._make_data_loader(
         adata=adata,
-        indices=indices,
+        indices=loader_indices,
         batch_size=batch_size,
     )
     batches = []
@@ -243,7 +250,7 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
     finally:
         if uses_latent_library:
             model.module.train(was_training)
-    return {
+    context = {
         "batch": torch.cat(batches).numpy().astype(np.int64),
         "panel": torch.cat(panels).numpy().astype(np.int64),
         "sample": torch.cat(samples).numpy().astype(np.int64),
@@ -260,6 +267,12 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
         ),
         "library_estimand": library_estimand,
     }
+    if inverse is not None:
+        # Per-cell arrays go back to request order; the estimand label is a string.
+        for key, values in context.items():
+            if isinstance(values, np.ndarray):
+                context[key] = values[inverse]
+    return context
 
 
 def _mapping(model, registry_key: str) -> np.ndarray:

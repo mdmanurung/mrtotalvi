@@ -44,6 +44,11 @@
   documented.
 - Counterfactual support and admissibility scoring is vectorised in chunks; scores are
   bit-identical to the per-pair loop.
+- Backed AnnData: `get_latent_representation`, the counterfactual and enrichment encoders
+  and `collect_u_posterior` returned rows in sorted order (scvi-tools sorts backed
+  minibatches) while labelling them in request order, so non-ascending `indices` swapped
+  cells. Backed requests now load each cell once in ascending order and map rows back;
+  repeated indices also work. In-memory AnnData takes the same path as before.
 
 ### Changed (defaults now follow released MrVI in part)
 
@@ -158,7 +163,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 - The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
 - `train()` overwrites `lr` and KL warm-up passed through `plan_kwargs`; pass them to `train()`.
 - Local sample distances are not masked for sample support.
-- Outputs assume dataloader row order equals `indices` order; backed AnnData can break this.
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).
 - The seed combiner does not compare `specified_panel` or the enrichment contrast settings.
