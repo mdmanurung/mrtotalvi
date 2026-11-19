@@ -315,3 +315,82 @@ def test_backed_adata_returns_rows_in_request_order(tmp_path, batch_size):
         model, adata=backed, indices=BACKED_REQUEST, batch_size=batch_size
     )
     np.testing.assert_allclose(posterior_loc.numpy(), ref_loc[BACKED_REQUEST], atol=1e-6)
+
+
+# Marginal scenario memory and context hash -----------------------------------
+
+
+class _ContextStubModel:
+    module = type("Module", (), {"panel_key": "panel"})()
+
+    class adata_manager:
+        @staticmethod
+        def get_state_registry(key):
+            return type("Registry", (), {"categorical_mapping": ["a", "b", "c"]})()
+
+
+def _marginal_request(n_query, n_ref, *, library_policy="sample_balanced_marginal"):
+    """Reference cells with distinct library sizes, so each is its own context."""
+    rng = np.random.default_rng(3)
+    reference = {
+        "batch": np.arange(n_ref) % 3,
+        "panel": np.arange(n_ref) % 3,
+        "library": (100.0 + rng.random(n_ref) * 50).astype(np.float32),
+        "sample": np.arange(n_ref) % 2,
+    }
+    query = {
+        "batch": np.arange(n_query) % 3,
+        "panel": np.arange(n_query) % 3,
+        "library": np.linspace(100, 200, n_query).astype(np.float32),
+    }
+    return dict(
+        model=_ContextStubModel,
+        observed_context=query,
+        batch_policy="sample_balanced_marginal",
+        specified_batch=None,
+        panel_policy="sample_balanced_marginal",
+        specified_panel=None,
+        library_policy=library_policy,
+        specified_library_size=None,
+        reference_context=reference,
+    )
+
+
+@pytest.mark.parametrize("library_policy", ["sample_balanced_marginal", "observed"])
+def test_context_hash_matches_full_json_payload(library_policy):
+    """The streamed hash equals sha256 of the full JSON payload the old code built."""
+    import hashlib
+    import json
+
+    scenarios, digest = cf._build_context_scenarios(
+        **_marginal_request(7, 5, library_policy=library_policy)
+    )
+    payload = json.dumps(
+        [
+            {
+                "batch": np.asarray(s["batch"]).tolist(),
+                "library": [float(v) for v in s["library"]],
+                "panel": np.asarray(s["panel"]).tolist(),
+                "weight": [float(v) for v in s["weight"]],
+            }
+            for s in scenarios
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert digest == hashlib.sha256(payload.encode()).hexdigest()
+
+
+def test_marginal_scenarios_do_not_copy_per_cell_arrays():
+    """S contexts over n cells hold O(n + S) memory, not n x S copies."""
+    n_query, n_ref = 20_000, 64
+    scenarios, _ = cf._build_context_scenarios(**_marginal_request(n_query, n_ref))
+    assert len(scenarios) == n_ref
+    owned = sum(
+        values.nbytes
+        for scenario in scenarios
+        for values in scenario.values()
+        if isinstance(values, np.ndarray) and values.base is None
+    )
+    # Before the fix every scenario owned four n-cell arrays: n * S * 24 bytes.
+    assert owned < n_query * 24

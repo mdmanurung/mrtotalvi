@@ -484,45 +484,60 @@ def _build_context_scenarios(
                 "distinct reference library size. Subset marginal_reference_indices."
             )
 
+        # A field set by the context is a read-only broadcast view, and an observed
+        # field is the shared array, so S scenarios add no n_cells x S copies.
         scenarios = []
         for (context_batch, context_panel, context_library), weight in sorted(
             context_weights.items()
         ):
-            scenario_batch = batch.copy()
-            scenario_panel = panel.copy()
-            scenario_library = library.copy()
-            if batch_marginal:
-                scenario_batch.fill(context_batch)
-                scenario_panel.fill(context_panel)
-            if library_marginal:
-                scenario_library.fill(context_library)
             scenarios.append(
                 {
-                    "batch": scenario_batch,
-                    "panel": scenario_panel,
-                    "library": scenario_library,
-                    "weight": np.full(n_cells, weight, dtype=np.float32),
+                    "batch": (
+                        np.broadcast_to(np.int64(context_batch), (n_cells,))
+                        if batch_marginal
+                        else batch
+                    ),
+                    "panel": (
+                        np.broadcast_to(np.int64(context_panel), (n_cells,))
+                        if batch_marginal
+                        else panel
+                    ),
+                    "library": (
+                        np.broadcast_to(np.float32(context_library), (n_cells,))
+                        if library_marginal
+                        else library
+                    ),
+                    "weight": np.broadcast_to(np.float32(weight), (n_cells,)),
                 }
             )
 
-    context_payload = json.dumps(
-        [
-            {
-                "batch": scenario["batch"].tolist(),
-                "library": [
-                    float(value) for value in scenario["library"]
-                ],
-                "panel": scenario["panel"].tolist(),
-                "weight": [
-                    float(value) for value in scenario["weight"]
-                ],
-            }
-            for scenario in scenarios
-        ],
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return scenarios, hashlib.sha256(context_payload.encode()).hexdigest()
+    # The hash input is the JSON list of scenario tables (sort_keys, compact
+    # separators), fed to sha256 one scenario at a time.
+    context_hash = hashlib.sha256(b"[")
+    for position, scenario in enumerate(scenarios):
+        if position:
+            context_hash.update(b",")
+        context_hash.update(
+            (
+                '{"batch":' + _json_array(scenario["batch"], as_float=False)
+                + ',"library":' + _json_array(scenario["library"], as_float=True)
+                + ',"panel":' + _json_array(scenario["panel"], as_float=False)
+                + ',"weight":' + _json_array(scenario["weight"], as_float=True)
+                + "}"
+            ).encode()
+        )
+    context_hash.update(b"]")
+    return scenarios, context_hash.hexdigest()
+
+
+def _json_array(values: np.ndarray, *, as_float: bool) -> str:
+    """Compact JSON list of a per-cell array; a constant broadcast is written once."""
+    if values.size and values.strides == (0,):
+        value = values[0]
+        token = json.dumps(float(value) if as_float else int(value))
+        return "[" + ",".join([token] * values.size) + "]"
+    items = [float(value) for value in values] if as_float else values.tolist()
+    return json.dumps(items, separators=(",", ":"))
 
 
 def _max_component_log_prob(

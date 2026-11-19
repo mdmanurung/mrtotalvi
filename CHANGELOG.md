@@ -38,6 +38,9 @@
 - `library_policy="sample_balanced_marginal"` raises a `ValueError` above 1024 distinct
   reference contexts (each is one decode pass) and asks you to subset
   `marginal_reference_indices`. It used to run one decode per distinct library size.
+  Marginal scenarios no longer copy four per-cell arrays each (constant fields are
+  read-only broadcast views), and the context hash is streamed one scenario at a time;
+  `context_table_sha256` and decoded values are unchanged.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
   float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
   Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now
