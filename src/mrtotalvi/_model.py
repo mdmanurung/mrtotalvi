@@ -179,9 +179,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Keys you pass win. Checkpoints saved before this default load with their
         one-layer ``qu``.
     spec_defaults
-        ``None`` (default) applies the ``qz_kwargs`` and ``qu_kwargs`` defaults above. ``False`` skips them
-        and reproduces the ``qz`` built before ``spec_defaults`` existed (no stop-gradient or dropout). The resolved value is saved
-        with the model; checkpoints that lack it load with ``False``.
+        ``None`` (default) applies the ``qz_kwargs`` and ``qu_kwargs`` defaults above.
+        ``False`` skips both: it rebuilds the ``qz`` made before ``spec_defaults``
+        existed (no stop-gradient or dropout) and the one-layer ``qu``. The resolved
+        value is saved with the model; checkpoints that lack it load with ``False``.
     kl_z_weight
         Static scalar weight applied to ``KL(q_z ‖ p_z)`` before the global
         ``kl_weight`` annealing.  Default ``1.0`` preserves prior behaviour.
@@ -1063,9 +1064,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size
             Dataloader batch size.
         n_mc_samples
-            MC draws from ``q(u|x)`` for Jensen-gap bias correction.
-            See :func:`~mrtotalvi._stats.differential_abundance`
-            for full semantics.  Default ``1`` preserves deterministic behavior.
+            MC draws from ``q(u|x)``; ``> 1`` scores ``log E_q[p(u)]``, a smoothed
+            alternative to the plug-in ``log p(E[u])``, not a bias correction.
+            Outputs from ``1`` and ``> 1`` sit on different scales; do not mix them.
+            See :func:`~mrtotalvi._stats.differential_abundance`.
+            Default ``1`` is deterministic.
         density_estimator
             ``"posterior"`` (default, unchanged MrVI aggregated posterior), ``"knn"``
             (neighbour-count density ratio in ``u``) or ``"scale_floor"`` (aggregated
