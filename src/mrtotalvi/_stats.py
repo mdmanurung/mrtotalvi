@@ -1154,7 +1154,8 @@ def get_outlier_cell_sample_pairs(
     cells from their own sample. ``get_counterfactual_latent`` uses a different rule (one
     threshold per target sample), so its ``admissible`` flag is a different quantity.
 
-    ``random_state`` seeds the per-sample subsample; ``None`` uses
+    A registered sample with no cells in ``adata`` gets a NaN, inadmissible column and adds
+    no threshold scores. ``random_state`` seeds the per-sample subsample; ``None`` uses
     :attr:`scvi.settings.seed` when set, otherwise the subsample is not reproducible.
     """
     rng = np.random.default_rng(random_state if random_state is not None else settings.seed)
@@ -1179,8 +1180,14 @@ def get_outlier_cell_sample_pairs(
     n_splits = max(int(np.ceil(adata.n_obs / batch_size)), 1)
     for sample_name in tqdm(sample_values, desc="Outlier cell-sample scores"):
         sample_idxs = np.where(adata.obs[sample_key].to_numpy() == sample_name)[0]
+        if sample_idxs.size == 0:
+            # A registered sample absent from this adata has no mixture: every pair is
+            # NaN and inadmissible, and it adds no threshold scores.
+            log_probs.append(np.full((us.shape[0], 1), np.nan, dtype=np.float32))
+            continue
         if subsample_size is not None and sample_idxs.shape[0] > subsample_size:
-            sample_idxs = rng.choice(sample_idxs, size=subsample_size, replace=False)
+            # Sorted, so component j is the j-th index whatever order the loader keeps.
+            sample_idxs = np.sort(rng.choice(sample_idxs, size=subsample_size, replace=False))
 
         ap = model.get_aggregated_posterior(
             adata=adata,
@@ -1219,6 +1226,8 @@ def get_outlier_cell_sample_pairs(
             sample_log_probs.append(comp_log_probs.max(dim=1, keepdim=True).values.cpu().numpy())
         log_probs.append(np.concatenate(sample_log_probs, axis=0))
 
+    if not thresholds:
+        raise ValueError(f"No registered sample of '{sample_key}' has cells in adata.")
     threshold_values = torch.cat(thresholds).numpy()
     global_threshold = np.quantile(threshold_values, q=quantile_threshold)
     log_probs = np.concatenate(log_probs, axis=1)
