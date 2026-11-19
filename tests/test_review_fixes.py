@@ -502,3 +502,56 @@ def test_feature_correlation_uses_the_supplied_adata():
     )
     values = np.random.default_rng(other.n_obs).gamma(2.0, size=(other.n_obs, n_features))
     np.testing.assert_allclose(got.values, np.corrcoef(values[1:6], rowvar=False), atol=1e-12)
+
+
+# One-cell samples in the outlier pairs ----------------------------------------
+
+# log N(x; mu, 0.5) in one dimension = -log(0.5) - log(2 pi) / 2 - d^2 / (2 * 0.25).
+_LOG_NORMAL_D0 = -math.log(0.5) - 0.5 * math.log(2 * math.pi)
+
+
+def _one_cell_sample_data(u, labels):
+    obs = pd.DataFrame({"sample": labels}, index=[f"c{i}" for i in range(len(labels))])
+    return ad.AnnData(np.zeros((len(labels), 1), dtype=np.float32), obs=obs)
+
+
+def test_one_cell_sample_has_no_own_support():
+    u = np.array([[0.0], [1.0], [2.0], [5.0], [5.5], [7.0]])
+    labels = np.array(["A", "B", "B", "C", "C", "C"])
+    out = get_outlier_cell_sample_pairs(
+        _OutlierStub(u, labels),
+        adata=_one_cell_sample_data(u, labels),
+        sample_key="sample",
+        subsample_size=None,
+        quantile_threshold=0.05,
+        batch_size=8,
+    )
+    # c0 is the only cell of A: no independent component, so NaN and inadmissible.
+    assert np.isnan(out["log_probs"].sel(sample="A", cell_name="c0"))
+    assert not out["is_admissible"].sel(sample="A", cell_name="c0")
+    # Another cell still scores against A's single component (d = 1 for c1).
+    np.testing.assert_allclose(
+        out["log_probs"].sel(sample="A", cell_name="c1"), _LOG_NORMAL_D0 - 2.0, atol=1e-5
+    )
+    # The pooled threshold holds only B's and C's leave-one-out scores, by hand:
+    # B: d = 1, 1; C: d = 0.5, 0.5, 1.5 (c5 nearest c4).
+    pool = _LOG_NORMAL_D0 - 2.0 * np.array([1.0, 1.0, 0.25, 0.25, 2.25])
+    expected = np.quantile(pool, 0.05)
+    got = float(
+        out["log_probs"].sel(sample="A", cell_name="c1")
+        - out["log_ratios"].sel(sample="A", cell_name="c1")
+    )
+    np.testing.assert_allclose(got, expected, atol=1e-5)
+
+
+def test_outlier_pairs_need_one_sample_with_two_cells():
+    u = np.array([[0.0], [1.0], [2.0]])
+    labels = np.array(["A", "B", "C"])
+    with pytest.raises(ValueError, match="at least 2 cells"):
+        get_outlier_cell_sample_pairs(
+            _OutlierStub(u, labels),
+            adata=_one_cell_sample_data(u, labels),
+            sample_key="sample",
+            subsample_size=None,
+            batch_size=8,
+        )

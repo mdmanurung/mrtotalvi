@@ -1188,7 +1188,9 @@ def get_outlier_cell_sample_pairs(
     threshold per target sample), so its ``admissible`` flag is a different quantity.
 
     A registered sample with no cells in ``adata`` gets a NaN, inadmissible column and adds
-    no threshold scores. ``random_state`` seeds the per-sample subsample; ``None`` uses
+    no threshold scores. A sample whose mixture has one component (a one-cell sample, or
+    ``subsample_size=1``) gives that cell a NaN, inadmissible score for its own sample and
+    adds no threshold score. ``random_state`` seeds the per-sample subsample; ``None`` uses
     :attr:`scvi.settings.seed` when set, otherwise the subsample is not reproducible.
     """
     rng = np.random.default_rng(random_state if random_state is not None else settings.seed)
@@ -1232,14 +1234,18 @@ def get_outlier_cell_sample_pairs(
             dtype=ap.component_distribution.base_dist.loc.dtype,
             device=ap.component_distribution.base_dist.loc.device,
         )
-        in_comp_log_probs = ap.component_distribution.log_prob(in_sample.unsqueeze(-2))
-        thresholds.append(_rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu())
+        # A one-component mixture has no leave-one-out score, so it adds nothing to the
+        # pooled threshold (its 1x1 entry would be the cell's own self-density).
+        if sample_idxs.shape[0] > 1:
+            in_comp_log_probs = ap.component_distribution.log_prob(in_sample.unsqueeze(-2))
+            thresholds.append(
+                _rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu()
+            )
 
         # A cell inside this sample's subsample must not match its own component,
-        # mirroring the leave-one-out thresholds above (single-component case kept).
+        # mirroring the leave-one-out thresholds above.
         own_component = np.full(us.shape[0], -1, dtype=np.int64)
-        if sample_idxs.shape[0] > 1:
-            own_component[sample_idxs] = np.arange(sample_idxs.shape[0])
+        own_component[sample_idxs] = np.arange(sample_idxs.shape[0])
 
         sample_log_probs = []
         for rows in np.array_split(np.arange(us.shape[0]), n_splits):
@@ -1257,10 +1263,18 @@ def get_outlier_cell_sample_pairs(
                     torch.as_tensor(chunk_own[hit], device=comp_log_probs.device),
                 ] = -float("inf")
             sample_log_probs.append(comp_log_probs.max(dim=1, keepdim=True).values.cpu().numpy())
-        log_probs.append(np.concatenate(sample_log_probs, axis=0))
+        sample_scores = np.concatenate(sample_log_probs, axis=0)
+        if sample_idxs.shape[0] == 1:
+            # The only component is the cell itself: no independent reference, so NaN
+            # (inadmissible), as in differential_abundance.
+            sample_scores[sample_idxs] = np.nan
+        log_probs.append(sample_scores)
 
     if not thresholds:
-        raise ValueError(f"No registered sample of '{sample_key}' has cells in adata.")
+        raise ValueError(
+            f"No registered sample of '{sample_key}' has at least 2 cells in adata; "
+            "leave-one-out thresholds are undefined."
+        )
     threshold_values = torch.cat(thresholds).numpy()
     global_threshold = np.quantile(threshold_values, q=quantile_threshold)
     log_probs = np.concatenate(log_probs, axis=1)

@@ -467,7 +467,9 @@ plug-in; do not mix the two.
 leave-one-out scores. `get_counterfactual_latent` (`admissible`) uses one quantile per target
 sample. They are different quantities. In both, a cell's own sample is scored leave-one-out, so
 about `quantile_threshold` (default 5%) of own-sample pairs fail by design, and the private DE
-filter drops that share of cells from their own sample.
+filter drops that share of cells from their own sample. A one-cell sample (or
+`subsample_size=1`) has no leave-one-out reference: its cell is NaN and inadmissible for its own
+sample, and that sample adds nothing to the pooled threshold.
 
 **Objective (methods note):**
 The default training objective (`use_map=True`) is a MAP/cross-entropy penalty on the residual

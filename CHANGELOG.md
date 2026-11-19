@@ -55,6 +55,13 @@
   give the same output as before.
 - `protein_dispersion="protein-label"` is rejected in `MrTotalVI.__init__` with a `ValueError`,
   like `gene_dispersion="gene-label"`. It built and then failed on the first forward pass.
+- `get_outlier_cell_sample_pairs` applies its leave-one-out rule to one-component samples (a
+  one-cell sample, or `subsample_size=1`), as decided by the user on 2026-11-20. Before, the
+  cell matched its own single component, so it was admissible for its own sample with no
+  independent reference, and its self-density entered the pooled threshold. The cell is now
+  NaN and inadmissible for its own sample, and the sample adds no threshold score; the pooled
+  threshold can change. Samples with 2+ cells in the mixture give the same output as before.
+  Upstream MrVI keeps the self-match.
 - The private, quarantined batch data module now rejects a validation collection whose gene
   `var_names` differ in order from training; it compared only the protein axis.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
