@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import uuid
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -1966,9 +1967,17 @@ def local_sample_enrichment(
         )
         for group_position, group in enumerate(group_order):
             positions = np.flatnonzero(group_values == group)
-            group_density[..., group_position] = (
-                np.logaddexp.reduce(density[..., positions], axis=-1)
-                - math.log(positions.size)
+            # A sample with no retained reference (a factual singleton) is NaN;
+            # it carries no weight, and a group with no usable sample is NaN.
+            member_density = density[..., positions]
+            usable = ~np.isnan(member_density)
+            n_usable = usable.sum(axis=-1)
+            with np.errstate(divide="ignore"):
+                reduced = np.logaddexp.reduce(
+                    np.where(usable, member_density, -np.inf), axis=-1
+                ) - np.log(np.maximum(n_usable, 1)).astype(np.float32)
+            group_density[..., group_position] = np.where(
+                n_usable > 0, reduced, np.nan
             )
         data_vars["group_log_density"] = (
             ("draw", "cell_name", "group"),
@@ -2044,13 +2053,19 @@ def local_sample_enrichment(
             ("draw", "cell_name", "donor"),
             donor_log_ratio,
         )
+        # A donor whose pair has a NaN sample density is skipped in the summaries;
+        # a cell with no usable donor is NaN.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            donor_mean = np.nanmean(donor_log_ratio, axis=-1, dtype=np.float64)
+            donor_median = np.nanmedian(donor_log_ratio, axis=-1)
         data_vars["donor_log_ratio_mean"] = (
             ("draw", "cell_name"),
-            np.mean(donor_log_ratio, axis=-1, dtype=np.float64).astype(np.float32),
+            donor_mean.astype(np.float32),
         )
         data_vars["donor_log_ratio_median"] = (
             ("draw", "cell_name"),
-            np.median(donor_log_ratio, axis=-1).astype(np.float32),
+            donor_median.astype(np.float32),
         )
         coords["donor"] = donor_order
 

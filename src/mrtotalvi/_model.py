@@ -1310,7 +1310,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
 
         These outputs are descriptive and non-inferential. A factual singleton
         has zero retained references, ``finite_support=False``, and ``NaN``
-        density.
+        density. A ``NaN`` sample carries no weight in ``group_log_density``
+        or in the donor mean and median; only a group or cell with no usable
+        sample is ``NaN``.
         """
         return _local_sample_enrichment(
             self,
