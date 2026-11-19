@@ -393,6 +393,14 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
                 "Training and validation collections must provide identical "
                 "authoritative protein names in exact order."
             )
+        if self._validset is not None and not np.array_equal(
+            self._dataset.var_joint,
+            self._validset.var_joint,
+        ):
+            raise ValueError(
+                "Training and validation collections must have identical gene "
+                "var_names in exact order."
+            )
 
         # n_obs_per_sample: exposed as a convenience attribute (matching the
         # generic reference's convention), but deliberately *not* stored

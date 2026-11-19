@@ -55,6 +55,8 @@
   give the same output as before.
 - `protein_dispersion="protein-label"` is rejected in `MrTotalVI.__init__` with a `ValueError`,
   like `gene_dispersion="gene-label"`. It built and then failed on the first forward pass.
+- The private, quarantined batch data module now rejects a validation collection whose gene
+  `var_names` differ in order from training; it compared only the protein axis.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
   float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
   Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now
