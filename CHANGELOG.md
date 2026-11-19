@@ -24,6 +24,26 @@
   enrichments when a cell's group has no reference sample (a group made only of the cell's own
   sample under `omit_original_sample=True`, as `"knn"` already did), and warns once with the
   number of affected cells.
+- `local_sample_enrichment`: a target sample with NaN density (a factual singleton) no longer
+  makes `group_log_density`, `log_ratio` and the donor mean and median NaN for the cell. The
+  group `logmeanexp` runs over the usable samples and divides by their count; the donor
+  summaries skip NaN donors. A group or cell with no usable sample stays NaN. All-finite
+  outputs are bit-identical to before.
+- `differential_abundance(donor_key=...)`: donor centering uses `nanmean`, so a NaN one-cell
+  own sample no longer turns every sample of that donor NaN in the covariate aggregates.
+- `get_outlier_cell_sample_pairs`: the per-sample subsample is sorted, so leave-one-out
+  masks the right component whatever order the loader keeps (same set, same seed). A
+  registered sample with no cells in `adata` gets a NaN, inadmissible column instead of
+  raising.
+- `library_policy="sample_balanced_marginal"` raises a `ValueError` above 1024 distinct
+  reference contexts (each is one decode pass) and asks you to subset
+  `marginal_reference_indices`. It used to run one decode per distinct library size.
+- Private `_differential_expression`: `pvalue` is the chi-square survival function in
+  float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
+  Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now
+  documented.
+- Counterfactual support and admissibility scoring is vectorised in chunks; scores are
+  bit-identical to the per-pair loop.
 
 ### Changed (defaults now follow released MrVI in part)
 
@@ -139,7 +159,8 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 - `train()` overwrites `lr` and KL warm-up passed through `plan_kwargs`; pass them to `train()`.
 - Local sample distances are not masked for sample support.
 - Outputs assume dataloader row order equals `indices` order; backed AnnData can break this.
-- `library_policy="sample_balanced_marginal"` runs one full decode per distinct library value.
+- `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
+  context; above 1024 contexts it now fails rather than running (no binning, by design).
 - The seed combiner does not compare `specified_panel` or the enrichment contrast settings.
 - Test gaps: the hierarchy tests pass on an untrained model, no known-answer test covers DA on the
   default `omit_original_sample=True` path, and the shared training helper passes `lr` through
