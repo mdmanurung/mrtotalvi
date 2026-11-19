@@ -513,18 +513,30 @@ def _build_context_scenarios(
 
 
 def _max_component_log_prob(
-    point: np.ndarray,
+    points: np.ndarray,
     component_loc: np.ndarray,
     component_scale: np.ndarray,
-    keep: np.ndarray,
-) -> float:
-    if not np.any(keep):
-        return math.nan
-    point_tensor = torch.as_tensor(point, dtype=torch.float32)
-    loc_tensor = torch.as_tensor(component_loc[keep], dtype=torch.float32)
-    scale_tensor = torch.as_tensor(component_scale[keep], dtype=torch.float32)
-    values = Normal(loc_tensor, scale_tensor).log_prob(point_tensor).sum(dim=-1)
-    return float(values.max().item())
+    exclude,
+) -> np.ndarray:
+    """Max diagonal-Gaussian component log density for each point, in row chunks.
+
+    ``exclude(start, stop)`` returns a boolean ``(stop - start, n_components)`` mask of
+    components to skip for those points. A point with every component skipped is -inf.
+    """
+    n_components, n_latent = component_loc.shape
+    chunk_size = max(1, 2**24 // max(n_components * n_latent, 1))
+    components = Normal(
+        torch.as_tensor(component_loc, dtype=torch.float32),
+        torch.as_tensor(component_scale, dtype=torch.float32),
+    )
+    scores = np.empty(points.shape[0], dtype=np.float64)
+    for start in range(0, points.shape[0], chunk_size):
+        stop = min(start + chunk_size, points.shape[0])
+        point_tensor = torch.as_tensor(points[start:stop], dtype=torch.float32)
+        values = components.log_prob(point_tensor[:, None, :]).sum(dim=-1)
+        values[torch.as_tensor(exclude(start, stop))] = -math.inf
+        scores[start:stop] = values.max(dim=1).values.numpy()
+    return scores
 
 
 def _support_and_admissibility(
@@ -560,31 +572,29 @@ def _support_and_admissibility(
         loc = reference_loc[target_mask]
         scale = reference_scale[target_mask]
         names = reference_names[target_mask]
-        keep_by_query = [names != query_name for query_name in query_names]
-        for query_position, keep in enumerate(keep_by_query):
-            support[query_position, target_position] = bool(np.any(keep))
+        if names.size == 0:
+            continue
+        # A query cell is never scored against its own component; support needs
+        # at least one other component.
+        unique_names, name_counts = np.unique(names, return_counts=True)
+        lookup = np.minimum(np.searchsorted(unique_names, query_names), unique_names.size - 1)
+        n_self = np.where(unique_names[lookup] == query_names, name_counts[lookup], 0)
+        support[:, target_position] = names.size > n_self
         if loc.shape[0] < 2:
             continue
 
-        reference_scores = np.empty(loc.shape[0], dtype=np.float64)
-        for component_index in range(loc.shape[0]):
-            keep = np.ones(loc.shape[0], dtype=bool)
-            keep[component_index] = False
-            reference_scores[component_index] = _max_component_log_prob(
-                loc[component_index],
-                loc,
-                scale,
-                keep,
-            )
-        threshold = float(np.quantile(reference_scores, support_quantile))
+        def leave_one_out(start, stop, n_components=loc.shape[0]):
+            return np.arange(start, stop)[:, None] == np.arange(n_components)[None, :]
 
-        for query_position, point in enumerate(query_loc):
-            keep = keep_by_query[query_position]
-            score = _max_component_log_prob(point, loc, scale, keep)
-            admissible[query_position, target_position] = bool(
-                np.isfinite(score)
-                and score - threshold > admissibility_threshold
-            )
+        def self_match(start, stop, names=names):
+            return names[None, :] == query_names[start:stop, None]
+
+        reference_scores = _max_component_log_prob(loc, loc, scale, leave_one_out)
+        threshold = float(np.quantile(reference_scores, support_quantile))
+        scores = _max_component_log_prob(query_loc, loc, scale, self_match)
+        admissible[:, target_position] = np.isfinite(scores) & (
+            scores - threshold > admissibility_threshold
+        )
     return support, admissible
 
 
