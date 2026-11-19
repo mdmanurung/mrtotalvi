@@ -34,6 +34,11 @@ def _validate_sample_level_covariates(obs, sample_key: str, cov_keys: list[str])
             )
 
 
+# Absolute cosine between a fixed covariate and another design column above which the
+# per-covariate Wald statistic is flagged as mixed (a warning only; no output changes).
+_CORRELATED_DESIGN_TOL = 0.1
+
+
 def _rowwise_max_excluding_diagonal(matrix: torch.Tensor) -> torch.Tensor:
     if matrix.ndim != 2:
         raise ValueError(f"Expected a 2D matrix, got shape {tuple(matrix.shape)}.")
@@ -327,7 +332,10 @@ def differential_abundance(
           is ``knn_k * n_g / N`` (``N`` the reference size). Where that is below about 1, the
           score tends to ``log(0.5 / n_g)``, which favours the smaller sample (null stub with
           samples of 2000, 2000, 2000 and 30 cells and ``knn_k=50``: the 30-cell sample
-          ranked first for every cell). Group scores, which pool counts, are not affected.
+          ranked first for every cell). Group scores pool counts but share the bias when a
+          pooled group's expected count ``knn_k * n_g / N`` is below about 1 (null stub with
+          groups of 4000 and 30 cells, ``knn_k=50``: mean log-enrichment +0.65 towards the
+          30-cell group); a warning names such groups.
         - A group with no reference cells for a cell (its own sample under
           ``omit_original_sample=True``) scores NaN, where ``"posterior"`` gives ``-inf``.
         - Group scores are sample-size corrected by cell counts (pooled cells), not by the
@@ -586,6 +594,26 @@ def differential_abundance(
 
     cov_log_probs = {}
     cov_log_enrichs = {}
+    if density_estimator == "knn" and sample_cov_keys:
+        # The fixed 0.5 pseudocount favours a group whose expected neighbour count is
+        # below about 1.
+        cells_per_sample = adata.obs[sample_key].value_counts()
+        n_reference = cells_per_sample.reindex(sample_values).fillna(0).sum()
+        small_groups = []
+        for key in sample_cov_keys:
+            for value in sample_info[key].unique():
+                samples = sample_info.loc[sample_info[key] == value, sample_key]
+                n_group = cells_per_sample.reindex(samples).fillna(0).sum()
+                if 0 < knn_k * n_group / n_reference < 1:
+                    small_groups.append(f"{key}={value}")
+        if small_groups:
+            warnings.warn(
+                "knn group scores are biased towards groups whose expected neighbour "
+                f"count knn_k * n_g / N is below 1: {small_groups}. Increase knn_k or "
+                "use density_estimator='posterior'.",
+                UserWarning,
+                stacklevel=2,
+            )
     for key in sample_cov_keys:
         per_value = {}
         per_enrich = {}
@@ -778,7 +806,10 @@ def _differential_expression(
         If ``True``, compute and store gene/protein log2-fold-changes (LFC) in
         the returned dataset.  Requires ``model.module`` to implement
         ``compute_h_from_x_eps``.  LFC is batch-marginalized by weighting over
-        unique batch values observed in each mini-batch.
+        unique batch values observed in each mini-batch. ``lfc_std`` is the square
+        root of the weighted mean of per-batch MC variances, as in upstream MrVI. It
+        ignores the between-batch term and the covariance between batches that share
+        MC draws, so it is not the SD of the batch-marginal LFC; it is never smaller.
     donor_key
         Column in ``adata.obs`` identifying the donor.  Adds donor dummy
         columns as nuisance covariates; only fixed-effect betas are returned.
@@ -893,6 +924,29 @@ def _differential_expression(
     n_covariates = Xmat.shape[1]
     device = model.device
     Xmat = Xmat.to(device)
+
+    # The per-covariate Wald statistic multiplies betas by sqrt(X^T M X), as upstream MrVI
+    # does, so a fixed covariate that is not orthogonal to another design column picks up
+    # that column's effect. Only the sum over covariates is the joint Wald statistic.
+    design_norm = torch.linalg.vector_norm(Xmat, dim=0).clamp(min=1e-12)
+    design_cosine = (Xmat.T @ Xmat) / torch.outer(design_norm, design_norm)
+    design_cosine.fill_diagonal_(0.0)
+    if bool((design_cosine[:n_fixed].abs() > _CORRELATED_DESIGN_TOL).any()):
+        warnings.warn(
+            "Design columns are correlated: per-covariate effect_size, pvalue and padj "
+            "mix effects between them (upstream MrVI behaviour); beta is unaffected and "
+            "only the sum of effect_size over covariates is the joint Wald statistic.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if filter_inadmissible_samples and not np.all(admissible_samples > 0):
+        warnings.warn(
+            "Rejected (inadmissible) samples still enter the per-cell centring and "
+            "scaling of eps before the weighted fit (upstream MrVI behaviour), so they "
+            "can still move beta and the Wald statistic.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     scdl = model._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
 

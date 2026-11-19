@@ -555,3 +555,74 @@ def test_outlier_pairs_need_one_sample_with_two_cells():
             subsample_size=None,
             batch_size=8,
         )
+
+
+# Warnings for inherited DE and DA properties -----------------------------------
+
+
+def test_knn_warns_for_groups_with_expected_count_below_one():
+    """knn_k * n_g / N = 10 * 6 / 406 < 1 for the small group, so a warning names it."""
+    from mrtotalvi._stats import differential_abundance
+    from tests.test_da_density_estimator import StubModel
+
+    rng = np.random.default_rng(0)
+    sizes = {"s0": 200, "s1": 200, "s2": 3, "s3": 3}
+    labels = np.concatenate([[name] * n for name, n in sizes.items()])
+    u = rng.normal(size=(labels.size, 2))
+    obs = pd.DataFrame(
+        {"sample": labels, "size": np.where(np.isin(labels, ["s0", "s1"]), "big", "small")},
+        index=[f"c{i}" for i in range(labels.size)],
+    )
+    adata = ad.AnnData(np.zeros((labels.size, 1), dtype=np.float32), obs=obs)
+    with pytest.warns(UserWarning, match=r"size=small"):
+        differential_abundance(
+            StubModel(u, labels),
+            adata=adata,
+            sample_key="sample",
+            sample_cov_keys=["size"],
+            density_estimator="knn",
+            knn_k=10,
+            omit_original_sample=False,
+        )
+
+
+@pytest.fixture(scope="module")
+def trained_de_model():
+    adata = _make_adata()
+    adata.obs["condition"] = np.where(
+        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
+    )
+    adata.obs["site"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_2"]), "x", "y")
+    MrTotalVI.setup_anndata(
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        sample_key="sample",
+        batch_key="batch",
+    )
+    model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT, n_latent_u=4)
+    model.train(max_epochs=MAX_EPOCHS_QUICK, accelerator="cpu")
+    return model
+
+
+def test_de_warns_only_for_correlated_design_columns(trained_de_model):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trained_de_model._legacy_differential_expression_for_reproducibility(
+            sample_cov_keys=["condition"], mc_samples=1, batch_size=32
+        )
+    assert not any("Design columns are correlated" in str(w.message) for w in caught)
+    # condition and site are 0/1 columns that share donor_0, so they are not orthogonal.
+    with pytest.warns(UserWarning, match="Design columns are correlated"):
+        trained_de_model._legacy_differential_expression_for_reproducibility(
+            sample_cov_keys=["condition", "site"], mc_samples=1, batch_size=32
+        )
+
+
+def test_de_warns_when_rejected_samples_enter_standardisation(trained_de_model):
+    with pytest.warns(UserWarning, match="Rejected \\(inadmissible\\) samples"):
+        trained_de_model._legacy_differential_expression_for_reproducibility(
+            sample_cov_keys=["condition"],
+            mc_samples=1,
+            batch_size=32,
+            filter_inadmissible_samples=True,
+        )

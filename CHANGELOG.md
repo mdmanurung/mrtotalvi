@@ -62,6 +62,13 @@
   NaN and inadmissible for its own sample, and the sample adds no threshold score; the pooled
   threshold can change. Samples with 2+ cells in the mixture give the same output as before.
   Upstream MrVI keeps the self-match.
+- New warnings, no output changes: the private DE path warns when a fixed covariate is not
+  orthogonal to another design column (per-covariate Wald statistics then mix effects) and
+  when `filter_inadmissible_samples=True` leaves rejected samples in the eps standardisation;
+  `density_estimator="knn"` warns for groups whose expected neighbour count
+  `knn_k * n_g / N` is below 1. The `knn` docstring no longer says pooled group scores avoid
+  the pseudocount bias. `lfc_std` is documented as an upper bound on the SD of the
+  batch-marginal LFC.
 - The private, quarantined batch data module now rejects a validation collection whose gene
   `var_names` differ in order from training; it compared only the protein axis.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
@@ -185,6 +192,10 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 
 ### Known open issues (from the 2026-11-17 Fable and Opus reviews; not fixed)
 
+- Kept for upstream MrVI parity (user, 2026-11-20), now warned or documented: the private DE
+  path's per-covariate Wald statistic mixes correlated covariates (sqrt(X^T M X) prefactor),
+  rejected samples still enter the eps standardisation, and `lfc_std` averages per-batch
+  variances.
 - `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
 - The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
 - `train()` overwrites `lr` and KL warm-up passed through `plan_kwargs`; pass them to `train()`.
