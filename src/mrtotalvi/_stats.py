@@ -502,9 +502,14 @@ def differential_abundance(
     if donor_column_groups:
         # Within-donor centering: subtract the per-donor mean across that donor's
         # samples so that donor blocks are absorbed before covariate aggregation.
+        # A NaN sample (a one-cell own sample) is left out of the donor mean.
         agg_log_probs = log_probs.copy()
-        for col_idx in donor_column_groups:
-            agg_log_probs[:, col_idx] -= agg_log_probs[:, col_idx].mean(axis=1, keepdims=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for col_idx in donor_column_groups:
+                agg_log_probs[:, col_idx] -= np.nanmean(
+                    agg_log_probs[:, col_idx], axis=1, keepdims=True
+                )
 
     coords = {"cell_name": adata.obs_names.to_numpy(), "sample": np.asarray(sample_values)}
     data_vars = {"log_probs": (["cell_name", "sample"], log_probs)}
