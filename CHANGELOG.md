@@ -47,6 +47,12 @@
 - With a numpy protein matrix and names in `adata.uns` (`protein_names_uns_key`), a reordered
   protein axis was accepted on transfer and on `MrTotalVI.load` and read against the
   registered order. Both now raise. scvi-tools already checked a DataFrame protein matrix.
+- Two inherited TOTALVI methods are overridden to fix scvi-tools 1.5.2 bugs.
+  `get_normalized_expression` with several `transform_batch` values and a numeric
+  `library_size` multiplied the running RNA sum on every batch (row sums near 500500 at
+  1000 for two batches); it now scales once. `get_feature_correlation_matrix` ignored its
+  `adata` argument and always sampled the training data; it now uses `adata`. Default calls
+  give the same output as before.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
   float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
   Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now

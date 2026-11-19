@@ -457,3 +457,48 @@ def test_reordered_protein_names_are_rejected_on_load(tmp_path):
     with pytest.raises(ValueError, match="registered protein"):
         MrTotalVI.load(tmp_path / "model", adata=other)
     MrTotalVI.load(tmp_path / "model", adata=adata.copy())
+
+
+# Inherited TOTALVI methods ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "transform_batch", [["batch_0", "batch_1"], ["batch_0", "batch_1", "batch_0"]]
+)
+def test_normalized_expression_library_size_scales_once(transform_batch):
+    """Scale rows sum to 1, so a batch mean scaled by L sums to L per cell."""
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, _ = _make_v2_model()
+    torch.manual_seed(0)
+    unit, _ = model.get_normalized_expression(
+        transform_batch=transform_batch, library_size=1, return_numpy=True
+    )
+    torch.manual_seed(0)
+    scaled, _ = model.get_normalized_expression(
+        transform_batch=transform_batch, library_size=1000.0, return_numpy=True
+    )
+    np.testing.assert_allclose(scaled.sum(1), 1000.0, rtol=1e-4)
+    np.testing.assert_allclose(scaled, 1000.0 * unit, rtol=1e-4)
+
+
+def test_feature_correlation_uses_the_supplied_adata():
+    """Correlations come from the passed adata, checked against np.corrcoef by hand."""
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    other = adata[:6].copy()
+    n_features = model.summary_stats.n_vars + model.summary_stats.n_proteins
+
+    def fake_denoised(adata=None, indices=None, n_samples=1, **kwargs):
+        source = model.adata if adata is None else adata
+        values = np.random.default_rng(source.n_obs).gamma(2.0, size=(source.n_obs, n_features))
+        rows = values if indices is None else values[np.asarray(indices)]
+        return rows[:, :, None]
+
+    model._get_denoised_samples = fake_denoised
+    got = model.get_feature_correlation_matrix(
+        adata=other, indices=np.arange(1, 6), n_samples=1, correlation_type="pearson"
+    )
+    values = np.random.default_rng(other.n_obs).gamma(2.0, size=(other.n_obs, n_features))
+    np.testing.assert_allclose(got.values, np.corrcoef(values[1:6], rowvar=False), atol=1e-12)
