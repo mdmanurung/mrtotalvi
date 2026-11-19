@@ -249,7 +249,9 @@ Technical contexts are explicit:
   scalar or cell-aligned vector.
 - `sample_balanced_marginal` weights biological samples equally and empirical
   joint batch/panel contexts within each sample. Batch and panel cannot be
-  marginalized separately.
+  marginalized separately. Each distinct reference context (batch, panel and,
+  for the library policy, each distinct library size) is one decode pass; more
+  than 1024 contexts fail, so subset `marginal_reference_indices`.
 
 In-memory output has a hard 512 MiB estimate including summaries and overhead. Requests above that
 limit must be reduced through explicit cell, target, or feature subsetting. Public `zarr_path` /

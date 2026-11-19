@@ -22,6 +22,8 @@ from scvi.module._constants import MODULE_KEYS
 
 SCHEMA_VERSION = "mrtotalvi-counterfactual-v1"
 MAX_IN_MEMORY_BYTES = 512 * 1024 * 1024
+# Each marginal context scenario is one full decode pass over the query cells.
+MAX_CONTEXT_SCENARIOS = 1024
 INTERPRETATION = "registered-sample model transformation; non-causal"
 
 
@@ -461,6 +463,13 @@ def _build_context_scenarios(
                     ),
                 )
                 context_weights[key] = context_weights.get(key, 0.0) + row_weight
+        if len(context_weights) > MAX_CONTEXT_SCENARIOS:
+            raise ValueError(
+                f"The marginal reference gives {len(context_weights)} distinct "
+                f"technical contexts (limit {MAX_CONTEXT_SCENARIOS}); each is one "
+                "decode pass. library_policy='sample_balanced_marginal' keys every "
+                "distinct reference library size. Subset marginal_reference_indices."
+            )
 
         scenarios = []
         for (context_batch, context_panel, context_library), weight in sorted(
