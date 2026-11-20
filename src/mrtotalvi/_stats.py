@@ -685,8 +685,9 @@ def _construct_design_matrix(
     normalize_design_matrix
         Min-max normalize each fixed-effect column to [0, 1].
     donor_key
-        Optional column to add donor dummy columns after the fixed effects as
-        nuisance covariates (not normalized, not reported in output betas).
+        Optional column to add one offset column per donor after the fixed effects, as
+        nuisance covariates (not normalized, not reported in output betas). No donor is
+        dropped, so each donor's level is absorbed and does not leak into the fixed betas.
 
     Returns
     -------
@@ -735,7 +736,10 @@ def _construct_design_matrix(
             cov = sample_info[donor_key]
         if hasattr(cov, "cat"):
             cov = cov.cat.remove_unused_categories()
-        donor_dummies = pd.get_dummies(cov, drop_first=True)
+        # One offset column per donor (no drop_first): the design has no intercept, so a
+        # dropped donor's level would be forced to 0 and leak into the fixed betas. This is
+        # how upstream MrVI adds batch offsets (add_batch_specific_offsets).
+        donor_dummies = pd.get_dummies(cov, drop_first=False)
         donor_mat = donor_dummies.values.astype(np.float32)
         donor_names = np.array([f"{donor_key}_{c}" for c in donor_dummies.columns], dtype=str)
         if n_fixed > 0:
@@ -814,8 +818,8 @@ def _differential_expression(
         ignores the between-batch term and the covariance between batches that share
         MC draws, so it is not the SD of the batch-marginal LFC; it is never smaller.
     donor_key
-        Column in ``adata.obs`` identifying the donor.  Adds donor dummy
-        columns as nuisance covariates; only fixed-effect betas are returned.
+        Column in ``adata.obs`` identifying the donor.  Adds one offset column per
+        donor as nuisance covariates; only fixed-effect betas are returned.
     delta
         Effect-size threshold for the posterior-DE probability (PDE):
         ``pde = P(|lfc| >= delta)``.  Only used when ``store_lfc=True``.

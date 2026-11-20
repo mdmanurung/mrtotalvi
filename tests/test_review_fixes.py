@@ -866,3 +866,55 @@ def test_seed_combiner_rejects_different_technical_context():
     assert small.attrs["specified_library_size"] != large.attrs["specified_library_size"]
     with pytest.raises(ValueError, match="specified_library_size"):
         combine_mrtotalvi_seed_results({0: small, 1: large})
+
+
+@pytest.mark.parametrize(
+    ("offsets", "effect"),
+    [((0.0, 0.0, 0.0, 0.0), 1.0), ((3.0, 0.0, 0.0, 0.0), 0.0), ((0.0, 3.0, 0.0, 0.0), 0.0),
+     ((3.0, -1.0, 2.0, 0.0), 1.0)],
+)
+def test_de_donor_offsets_do_not_leak_into_beta(trained_paired_model, offsets, effect):
+    """eps = patient offset + effect * time, so the time beta must equal the planted effect."""
+    model = trained_paired_model
+    order = list(model.sample_order)
+    level = {f"p{i}": value for i, value in enumerate(offsets)}
+    table = torch.tensor(
+        [[level[s.split("_")[0]] + effect * s.endswith("t1")] for s in order], dtype=torch.float32
+    )
+    scale = torch.arange(1.0, model.module.n_latent + 1)
+
+    def residual(u, sample, deterministic=False):
+        eps = table[sample.flatten().long()] * scale
+        return torch.zeros_like(eps), eps, None
+
+    original = model.module.qz.forward
+    model.module.qz.forward = residual
+    try:
+        de = model._legacy_differential_expression_for_reproducibility(
+            sample_cov_keys=["time"], donor_key="patient", mc_samples=1, batch_size=200,
+            indices=np.arange(50),
+        )
+    finally:
+        model.module.qz.forward = original
+    expected = np.broadcast_to(effect * scale.numpy(), de["beta"].values[:, 0, :].shape)
+    np.testing.assert_allclose(de["beta"].values[:, 0, :], expected, atol=1e-4)
+
+
+@pytest.fixture(scope="module")
+def trained_paired_model():
+    import scvi
+
+    scvi.settings.seed = 0
+    adata = scvi.data.synthetic_iid()
+    patient = np.arange(adata.n_obs) % 4
+    time = (np.arange(adata.n_obs) // 4) % 2
+    adata.obs["patient"] = [f"p{i}" for i in patient]
+    adata.obs["time"] = [f"t{i}" for i in time]
+    adata.obs["sample"] = [f"p{i}_t{j}" for i, j in zip(patient, time)]
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        batch_key="batch",
+    )
+    model = MrTotalVI(adata, sample_key="sample", n_latent=5)
+    model.train(max_epochs=2, accelerator="cpu")
+    return model

@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Private DE path with `donor_key`: the design dropped the first donor's column and has no
+  intercept, so that donor's residual level leaked into the fixed-effect `beta` (a pure patient
+  offset of 3 gave a time `beta` of 0.9 or -0.3, by donor order). Every donor now gets its own
+  offset column, as upstream MrVI adds batch offsets (user decision, 2026-11-20). `beta`,
+  `effect_size`, p-values and LFC change whenever `donor_key` is set.
 - Regressions from the 2026-11-20 fixes: a boolean `indices` mask on backed AnnData raised
   `IndexError` (it was passed to `np.unique`); a `residual_prior_mode="factual"` checkpoint
   loaded with `hierarchy_mode_override="legacy"` could not be reloaded (the override now resets
