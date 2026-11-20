@@ -203,6 +203,7 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).
 - The seed combiner does not compare `specified_panel` or the enrichment contrast settings.
-- Test gaps: the hierarchy tests pass on an untrained model, no known-answer test covers DA on the
+- Test gaps: the hierarchy tests pass on an untrained model (now named `*_wiring`; no
+  donor-recovery test exists yet), no known-answer test covers DA on the
   default `omit_original_sample=True` path, and the shared training helper passes `lr` through
   `plan_kwargs`, so it is ignored.

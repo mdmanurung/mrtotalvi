@@ -4,9 +4,10 @@ Four invariants (CLAUDE.md "deepening invariance"):
   (a) smoke        — trains to completion with finite ELBO; counterfactual paths
                      (cf_sample, mc_samples=2) also produce finite tensors.
   (b) reconstruction — MrTotalVI's converged recon loss ≤ stock TotalVI × 1.05.
-  (c) non-degenerate — per-sample embedding row-variance > init 0.1; eps non-zero.
-  (d) donor-axis    — get_local_sample_distances separates donors injected with
-                       a known per-donor shift in gene expression.
+  (c) non-degenerate — per-sample embedding rows vary and eps is non-zero.
+  (d) donor-axis    — get_local_sample_distances collapses when the embedding is zeroed.
+The (c) and (d) checks are wiring tests: they also pass on an untrained model, so they
+show the hierarchy code path is live, not that training recovered donor signal.
 """
 
 from __future__ import annotations
@@ -1380,8 +1381,12 @@ def test_elbo_not_severely_regressed(adata_basic):
 # (c) Non-degenerate sample embedding
 # ---------------------------------------------------------------------------
 
-def test_non_degenerate_sample_embedding(adata_basic):
-    """Per-sample embedding row-variance exceeds initialisation; eps is non-zero."""
+def test_non_degenerate_sample_embedding_wiring(adata_basic):
+    """Per-sample embedding rows vary and eps is non-zero.
+
+    Wiring test: random initial embeddings already pass, so it checks the code path,
+    not learning.
+    """
     import torch
 
     model = _setup_and_train(adata_basic, max_epochs=MAX_EPOCHS_QUICK)
@@ -1391,7 +1396,7 @@ def test_non_degenerate_sample_embedding(adata_basic):
 
     emb_weight = module.qz.embedding.weight.detach().cpu()  # (n_sample, n_latent_sample)
     row_var = emb_weight.var(dim=1).numpy()
-    # After even 3 epochs of gradient updates, every row should have moved
+    # Random initial rows already have positive variance; this rules out a zeroed table.
     assert np.all(row_var > 0.0), (
         f"Some embedding rows have zero variance — hierarchy is (partially) a no-op.\n{row_var}"
     )
@@ -1410,10 +1415,12 @@ def test_non_degenerate_sample_embedding(adata_basic):
 # (d) Donor-axis separation via get_local_sample_distances
 # ---------------------------------------------------------------------------
 
-def test_donor_axis_separation(adata_shifted):
-    """Trained hierarchy produces cross-donor distances that collapse when the
-    embedding is zeroed — a before/after contrast proving the hierarchy encodes
-    real donor signal rather than random variation.
+def test_donor_axis_separation_wiring(adata_shifted):
+    """Cross-donor distances collapse when the embedding is zeroed.
+
+    Wiring test: an untrained model shows the same contrast, so this checks that the
+    distances route through the sample embedding, not that training recovered donor
+    signal.
 
     Mechanism: zeroing the embedding table makes every donor return the same
     embedding vector → the attention block outputs the same context for all
@@ -1521,8 +1528,11 @@ def test_qu_encoder_gradients_flow(adata_basic):
     )
 
 
-def test_qu_encoder_donor_rows_diverge(adata_basic):
-    """After training, different donor rows of cond_norm1.gamma_embedding differ.
+def test_qu_encoder_donor_rows_diverge_wiring(adata_basic):
+    """Different donor rows of cond_norm1.gamma_embedding differ.
+
+    Wiring test: the N(1, 0.02) initial rows already differ, so this checks that the
+    sample-conditioned encoder is built, not that training separated donors.
 
     gamma_embedding is initialized N(1, 0.02). Each donor receives independent
     gradient updates based on its expression signature, so rows should diverge

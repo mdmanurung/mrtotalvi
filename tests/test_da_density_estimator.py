@@ -257,9 +257,27 @@ def _own_group_enrichment(estimator=None, donor_key=None, **kwargs):
     ids=["posterior", "scale_floor", "donor_key"],
 )
 def test_null_own_group_enrichment_is_centred_without_own_kernel(kwargs, before_fix_nats):
-    own = _own_group_enrichment(**kwargs)
-    assert abs(np.mean(own)) < 5.0  # before the fix: +before_fix_nats
-    assert np.mean(own > 0) < 0.7  # before the fix: ~100% of cells above 0
+    # Before the fix: mean +before_fix_nats and ~100% of cells above 0.
+    assert _null_calibrated(_own_group_enrichment(**kwargs))
+
+
+def _null_calibrated(own):
+    """Bounds from the null itself, for all cells and each condition (a first, b last).
+
+    Under exchangeable samples the mean is 0 (|z| < 4) and P(> 0) is 0.5 (within four
+    binomial SDs).
+    """
+    for group in (own, own[: own.size // 2], own[own.size // 2 :]):
+        z = np.mean(group) / (np.std(group) / np.sqrt(group.size))
+        if abs(z) >= 4 or abs(np.mean(group > 0) - 0.5) >= 4 * np.sqrt(0.25 / group.size):
+            return False
+    return True
+
+
+def test_null_check_rejects_a_biased_vector():
+    # Mean 4.9 with 60% above 0 passed the old bounds (|mean| < 5, share < 0.7).
+    own = np.r_[np.full(600, 10.0), np.full(400, -2.75)]
+    assert not _null_calibrated(own)
 
 
 def test_loo_removes_exactly_the_own_component():
