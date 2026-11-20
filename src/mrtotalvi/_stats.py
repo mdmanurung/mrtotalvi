@@ -67,7 +67,10 @@ def _loader_order(adata, indices):
     """
     if indices is None or not getattr(adata, "isbacked", False):
         return indices, None
-    unique_indices, inverse = np.unique(np.asarray(indices), return_inverse=True)
+    indices = np.asarray(indices)
+    if indices.dtype == np.bool_:
+        indices = np.flatnonzero(indices)  # a mask selects rows; np.unique would give [F, T]
+    unique_indices, inverse = np.unique(indices, return_inverse=True)
     return unique_indices, inverse
 
 

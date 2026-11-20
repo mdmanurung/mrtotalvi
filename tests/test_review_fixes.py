@@ -795,3 +795,74 @@ def test_new_model_flags_survive_save_and_load(tmp_path):
     loaded = MrTotalVI.load(tmp_path / "m", adata=adata)
     assert loaded.module.residual_prior_mode == "factual"
     assert loaded.module.anneal_protein_likelihood is False
+
+
+# Fable review regressions ------------------------------------------------------
+
+
+def test_backed_boolean_mask_selects_rows(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+    model._validate_anndata(backed)
+    mask = np.zeros(backed.n_obs, dtype=bool)
+    mask[[1, 4, 6]] = True
+    got = model.get_latent_representation(adata=backed, indices=mask)
+    expected = model.get_latent_representation(adata=backed, indices=[1, 4, 6])
+    np.testing.assert_allclose(got, expected, atol=1e-6)
+
+
+def test_legacy_override_of_factual_checkpoint_saves_and_reloads(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+        residual_prior_mode="factual",
+    )
+    model.is_trained_ = True
+    model.save(tmp_path / "f", overwrite=True)
+    with pytest.warns(UserWarning, match="resets it to 'raw_mean'"):
+        legacy = MrTotalVI.load(
+            tmp_path / "f", adata=adata, hierarchy_mode_override="legacy",
+            allow_semantic_override=True,
+        )
+    assert legacy.module.residual_prior_mode == "raw_mean"
+    legacy.save(tmp_path / "g", overwrite=True)
+    assert MrTotalVI.load(tmp_path / "g", adata=adata).hierarchy_mode == "legacy"
+
+
+def test_seed_combiner_accepts_an_old_and_a_new_result_with_a_warning():
+    import xarray as xr
+
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    old = xr.Dataset({"v": (("draw",), [1.0, 3.0])})
+    new = xr.Dataset(
+        {"v": (("draw",), [5.0, 7.0])},
+        attrs={"group_key": "", "contrast": "[]", "donor_key": "", "specified_library_size": ""},
+    )
+    with pytest.warns(UserWarning, match="cannot be compared"):
+        result = combine_mrtotalvi_seed_results({0: old, 1: new})
+    assert result.v_between_seed_mean.item() == 4.0
+
+
+def test_seed_combiner_rejects_different_technical_context():
+    from mrtotalvi import combine_mrtotalvi_seed_results
+    from tests.test_mrtotalvi_v2 import _make_context_v2_model
+
+    model, adata = _make_context_v2_model()
+    request = dict(adata=adata, indices=[0, 1], target_samples=["sample_0"],
+                   gene_list=[str(adata.var_names[0])],
+                   protein_list=[str(model.adata_manager.get_state_registry(
+                       REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names[0])],
+                   library_policy="specified", inference_mode="posterior_mc", n_draws=2)
+    small = model.get_counterfactual_expression(specified_library_size=1.0, **request)
+    large = model.get_counterfactual_expression(
+        specified_library_size=1000.0, random_state=1, **request
+    )
+    assert small.attrs["specified_library_size"] != large.attrs["specified_library_size"]
+    with pytest.raises(ValueError, match="specified_library_size"):
+        combine_mrtotalvi_seed_results({0: small, 1: large})

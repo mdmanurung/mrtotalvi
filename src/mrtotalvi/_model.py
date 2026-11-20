@@ -760,6 +760,22 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             model.module.u_vamp_pseudo.requires_grad_(False)
         model.init_params_["non_kwargs"]["hierarchy_mode"] = resolved_hierarchy_mode
         model.init_params_["non_kwargs"]["u_encoder_mode"] = resolved_u_encoder_mode
+        # residual_prior_mode="factual" exists only for centered_v2, and legacy never reads
+        # it; keep it only where the constructor accepts it, so the model saves and reloads.
+        if (
+            resolved_hierarchy_mode != "centered_v2"
+            and getattr(model.module, "residual_prior_mode", "raw_mean") != "raw_mean"
+        ):
+            warnings.warn(
+                "residual_prior_mode='factual' applies only to centered_v2; the legacy "
+                "override resets it to 'raw_mean'.",
+                UserWarning,
+                stacklevel=2,
+            )
+            model.module.residual_prior_mode = "raw_mean"
+            for group in model.init_params_.values():
+                if isinstance(group, dict) and "residual_prior_mode" in group:
+                    group["residual_prior_mode"] = "raw_mean"
         model._refresh_model_summary()
         return model
 

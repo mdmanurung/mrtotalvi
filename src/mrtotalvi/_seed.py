@@ -32,7 +32,16 @@ _ESTIMAND_ATTRS = (
     "group_key",
     "contrast",
     "donor_key",
+    "specified_library_size",
+    "marginal_reference",
+    "reference_cells",
+    "max_reference_cells_per_sample",
 )
+
+# Settings added to result attrs after results were already being saved. A result that
+# lacks one cannot be checked against a result that has it, so the pair is reported as
+# unverifiable instead of as a mismatch.
+_LATER_SETTING_ATTRS = frozenset(_ESTIMAND_ATTRS[_ESTIMAND_ATTRS.index("specified_panel") :])
 
 # Outputs that depend on a setting, and the attribute that records it. Results written
 # before the attribute existed lack it, so their settings cannot be compared.
@@ -89,6 +98,11 @@ def combine_mrtotalvi_seed_results(
             if output in dataset.data_vars and setting not in dataset.attrs
         }
         | {
+            key
+            for key in _LATER_SETTING_ATTRS
+            if len({key in dataset.attrs for dataset in datasets}) > 1
+        }
+        | {
             "specified_panel"
             for dataset in datasets
             if dataset.attrs.get("panel_policy") == "specified"
@@ -118,7 +132,11 @@ def combine_mrtotalvi_seed_results(
         mismatched = [
             key
             for key in _ESTIMAND_ATTRS
-            if dataset.attrs.get(key) != template.attrs.get(key)
+            if not (
+                key in _LATER_SETTING_ATTRS
+                and (key not in dataset.attrs or key not in template.attrs)
+            )
+            and dataset.attrs.get(key) != template.attrs.get(key)
         ]
         if mismatched:
             raise ValueError(

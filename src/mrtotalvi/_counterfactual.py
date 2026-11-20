@@ -56,6 +56,19 @@ def _as_indices(adata, indices, *, name: str) -> np.ndarray:
     return result
 
 
+def _settings_digest(values) -> str:
+    """Short sha256 of a setting (cell names or numbers) for result attrs; "" for None."""
+    if values is None:
+        return ""
+    values = np.asarray(values)
+    payload = (
+        "\n".join(map(str, values.tolist())).encode()
+        if values.dtype.kind in "OUS"
+        else np.asarray(values, dtype=np.float64).tobytes()
+    )
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
 def _validate_quantiles(quantiles) -> np.ndarray:
     values = np.asarray(quantiles, dtype=np.float64)
     if values.ndim != 1 or values.size == 0:
@@ -1751,6 +1764,15 @@ def get_counterfactual_expression(
             "estimated_bytes_with_overhead": int(estimated_bytes),
             "registered_target_limitation": "registered samples only; no new-sample extrapolation",
             "interpretation": INTERPRETATION,
+            # The seed combiner compares these technical settings across seeds.
+            "specified_library_size": _settings_digest(
+                specified_library_size if library_policy == "specified" else None
+            ),
+            "marginal_reference": _settings_digest(
+                np.asarray(adata.obs_names[reference_indices], dtype=str)
+                if uses_marginal_context
+                else None
+            ),
         },
     )
     if inference_mode == "posterior_mc":
@@ -2148,6 +2170,11 @@ def local_sample_enrichment(
                 [] if contrast is None else [str(value) for value in contrast]
             ),
             "donor_key": "" if donor_key is None else str(donor_key),
+            "reference_cells": _settings_digest(reference_names),
+            "max_reference_cells_per_sample": (
+                "" if max_reference_cells_per_sample is None
+                else str(int(max_reference_cells_per_sample))
+            ),
         },
     )
     if inference_mode == "posterior_mc":

@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- Regressions from the 2026-11-20 fixes: a boolean `indices` mask on backed AnnData raised
+  `IndexError` (it was passed to `np.unique`); a `residual_prior_mode="factual"` checkpoint
+  loaded with `hierarchy_mode_override="legacy"` could not be reloaded (the override now resets
+  the mode to `"raw_mean"`, with a warning); and an old seed result combined with a new one
+  raised "different estimands" (a setting present in only some results is now reported as
+  unverifiable).
+- The seed combiner also compares the technical context: counterfactual expression records
+  `specified_library_size` and a digest of the marginal reference cells, and enrichment records
+  a digest of its reference cells and `max_reference_cells_per_sample`. Seeds run with library
+  size 1 and 1000 used to pool into one between-seed SD.
 - New known-answer donor-recovery test: 8 donors with planted RNA effects (log-ratio
   -2.8 to 2.8), package defaults, 100 epochs. Donor distances must rank the planted effects
   with an exact donor-permutation p <= 0.01 on each of training seeds 0, 1 and 2. Untrained
