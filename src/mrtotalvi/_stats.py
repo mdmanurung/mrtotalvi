@@ -340,7 +340,7 @@ def differential_abundance(
           groups of 4000 and 30 cells, ``knn_k=50``: mean log-enrichment +0.65 towards the
           30-cell group); a warning names such groups.
         - A group with no reference cells for a cell (its own sample under
-          ``omit_original_sample=True``) scores NaN, where ``"posterior"`` gives ``-inf``.
+          ``omit_original_sample=True``) scores NaN, as it does under ``"posterior"``.
         - Group scores are sample-size corrected by cell counts (pooled cells), not by the
           equal-sample ``logmeanexp`` that ``"posterior"`` uses. Samples with more cells
           weigh more in a group.
@@ -571,9 +571,9 @@ def differential_abundance(
     def aggregate(samples: np.ndarray) -> np.ndarray:
         if density_estimator == "knn":
             cols = pd.Index(sample_values).get_indexer(samples)
-            return _knn_log_density(
-                knn_counts[:, cols].sum(axis=1), knn_n_ref[:, cols].sum(axis=1)
-            )
+            n_ref = knn_n_ref[:, cols].sum(axis=1)
+            empty_group[n_ref == 0] = True
+            return _knn_log_density(knn_counts[:, cols].sum(axis=1), n_ref)
         sample_log_probs = agg_ds.loc[{"sample": samples}].values
         if omit_original_sample:
             sample_one_hot = np.zeros((adata.n_obs, len(samples)))
@@ -606,6 +606,7 @@ def differential_abundance(
         for key in sample_cov_keys:
             for value in sample_info[key].unique():
                 samples = sample_info.loc[sample_info[key] == value, sample_key]
+                samples = samples[samples.isin(sample_values)]  # analysed samples only
                 n_group = cells_per_sample.reindex(samples).fillna(0).sum()
                 if 0 < knn_k * n_group / n_reference < 1:
                     small_groups.append(f"{key}={value}")
@@ -812,8 +813,8 @@ def _differential_expression(
     store_lfc
         If ``True``, compute and store gene/protein log2-fold-changes (LFC) in
         the returned dataset.  Requires ``model.module`` to implement
-        ``compute_h_from_x_eps``.  LFC is batch-marginalized by weighting over
-        unique batch values observed in each mini-batch. ``lfc_std`` is the square
+        ``compute_h_from_x_eps``.  LFC is batch-marginalized with uniform weights
+        over every registered batch, as in upstream MrVI. ``lfc_std`` is the square
         root of the weighted mean of per-batch MC variances, as in upstream MrVI. It
         ignores the between-batch term and the covariance between batches that share
         MC draws, so it is not the SD of the batch-marginal LFC; it is never smaller.

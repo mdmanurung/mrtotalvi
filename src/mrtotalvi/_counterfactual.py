@@ -49,6 +49,8 @@ def _as_indices(adata, indices, *, name: str) -> np.ndarray:
         result = result.astype(np.int64, copy=False)
     if result.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional.")
+    if result.size == 0:
+        raise ValueError(f"{name} must select at least one observation.")
     if np.any(result < 0) or np.any(result >= adata.n_obs):
         raise IndexError(f"{name} contains an out-of-range observation index.")
     if np.unique(result).size != result.size:
@@ -67,6 +69,16 @@ def _settings_digest(values) -> str:
         else np.asarray(values, dtype=np.float64).tobytes()
     )
     return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _validate_random_state(random_state) -> None:
+    """The seed keys Philox noise as a 32-bit word; anything else would be cast silently."""
+    if (
+        isinstance(random_state, bool)
+        or not isinstance(random_state, (int, np.integer))
+        or not 0 <= int(random_state) < 2**32
+    ):
+        raise ValueError("random_state must be an integer in [0, 2**32).")
 
 
 def _validate_quantiles(quantiles) -> np.ndarray:
@@ -1126,6 +1138,7 @@ def get_counterfactual_latent(
         raise ValueError("batch_size must be a positive integer.")
     _validate_chunk_size(target_chunk_size, name="target_chunk_size")
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
 
     cell_names = np.asarray(adata.obs_names[query_indices], dtype=str)
@@ -1410,6 +1423,7 @@ def get_counterfactual_expression(
     _validate_chunk_size(feature_chunk_size, name="feature_chunk_size")
 
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
     gene_indices, gene_labels = _validate_features(
         adata.var_names,
@@ -1985,6 +1999,7 @@ def local_sample_enrichment(
         )
 
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
     cell_names = np.asarray(adata.obs_names[query_indices], dtype=str)
     if np.unique(cell_names).size != cell_names.size:
@@ -2116,8 +2131,9 @@ def local_sample_enrichment(
         )
         for group_position, group in enumerate(group_order):
             positions = np.flatnonzero(group_values == group)
-            # A sample with no retained reference (a factual singleton) is NaN;
-            # it carries no weight, and a group with no usable sample is NaN.
+            # A sample with no retained reference is NaN: it has no reference cells
+            # in the selection, or it is a factual singleton. It carries no weight,
+            # and a group with no usable sample is NaN.
             member_density = density[..., positions]
             usable = ~np.isnan(member_density)
             n_usable = usable.sum(axis=-1)

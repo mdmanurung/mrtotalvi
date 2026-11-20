@@ -208,7 +208,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
         only. The seed and ordered training-index digest are persisted before
-        optimization. Non-Vamp use raises.
+        optimization. Non-Vamp use raises. Without it the pseudo-inputs start as
+        ``0.01 * randn``, so all Vamp components start nearly identical.
     freeze_prior_after_init
         If ``True`` and ``u_prior="vamp"``, freeze the VampPrior pseudo-input
         parameters after data-driven initialisation so they do not drift during
@@ -1952,7 +1953,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         registered order without an error, on transfer and on ``load``.
         """
         names_key = self.adata_manager.registry["setup_args"].get("protein_names_uns_key")
-        if names_key is None or names_key not in adata.uns:
+        if names_key is None:
+            return
+        if names_key not in adata.uns:
+            warnings.warn(
+                f"adata.uns['{names_key}'] is missing, so the protein axis order cannot be "
+                "checked against the registry (ad.concat drops uns by default).",
+                UserWarning,
+                stacklevel=3,
+            )
             return
         registered = list(
             self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names
@@ -2126,6 +2135,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         for key in group_keys:
             if key not in adata.obs:
                 raise KeyError(f"groupby column {key!r} is not in adata.obs.")
+            if adata.obs[key].isna().any():
+                raise ValueError(
+                    f"groupby column {key!r} has missing labels; fill or drop them first."
+                )
         if not keep_cell and not group_keys:
             raise ValueError("keep_cell=False needs groupby; there would be no output.")
 

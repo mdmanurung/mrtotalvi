@@ -319,8 +319,10 @@ is `log(k + 0.5) - log(n_reference)`. In a synthetic 2-D check
 (`tests/test_da_density_estimator.py`) both recovered a planted depletion, with a per-cell null sd
 of about 0.2-0.3 (`knn_k=50`, floor 0.4); the posterior estimator's null sd there was about 10.
 Under `"knn"` the per-sample
-`log_probs` are comparable across samples within a cell but not across cells or with `"posterior"`
-values, so read the enrichments. `donor_key` is not available with `"knn"`. Both remain
+`log_probs` are comparable across samples of similar size within a cell, but not across cells or
+with `"posterior"` values, so read the enrichments. Where a sample's expected neighbour count
+`knn_k * n_g / N` is below about 1, the score favours the smaller sample. Group scores share
+the bias; a warning names such groups, but not such samples. `donor_key` is not available with `"knn"`. Both remain
 descriptive. See the `differential_abundance` docstring for the full mapping.
 
 With `omit_original_sample=False` (forced by `donor_key`), `differential_abundance()` removes
@@ -502,7 +504,8 @@ negative. The loss clamps the `eps` prior log-scale below at `-4.0`
 (`pz_scale.clamp(min=-4.0)`). A `z_u_prior_scale` under `-4` therefore acts as `-4`, and with
 `learn_z_u_prior_scale=True` a scale that reaches `-4` receives no gradient.
 
-The `kl_u` term uses a single-sample Monte-Carlo estimate of `KL(q(u)‖p(u))` (unbiased, higher
+The `kl_u` term is analytic for `u_prior="standard"`. For the mixture priors (`"mog"`,
+`"vamp"`) it is a single-sample Monte-Carlo estimate of `KL(q(u)‖p(u))` (unbiased, higher
 variance than analytic).
 
 `differential_abundance` computes no test. The Wald statistic in `differential_expression` (private; the public method refuses) is compared with a Chi²

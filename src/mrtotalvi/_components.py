@@ -1219,9 +1219,9 @@ class EncoderUZ(nn.Module):
         eps_dist = None
         if not self.use_map:
             # Stochastic eps: split 2*n_latent into mean/log-scale; clamp before exp (M1).
-            # The lower bound keeps the scale at or above 1e-3, the floor upstream MrVI
-            # uses (softplus + 1e-3); without it float32 gave an infinite KL below about
-            # log-scale -52 and a zero scale below about -104.
+            # The lower bound keeps the scale at or above 1e-3. The value matches upstream
+            # MrVI (softplus + 1e-3); the clamp-then-exp form does not. Without it float32
+            # gave an infinite KL below about log-scale -52 and a zero scale below -104.
             eps_mean, eps_log_scale = residual.chunk(2, dim=-1)
             eps_scale = eps_log_scale.clamp(min=_EPS_LOG_SCALE_MIN, max=10.0).exp()
             eps_dist = Normal(eps_mean, eps_scale)

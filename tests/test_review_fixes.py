@@ -758,27 +758,44 @@ def test_factual_residual_prior_needs_centered_v2():
         MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", residual_prior_mode="factual")
 
 
-@pytest.mark.parametrize("hierarchy_mode", ["legacy", "centered_v2"])
+@pytest.mark.parametrize(
+    "path", ["legacy", "centered_v2", "mc_samples", "scale_observations", "no_hierarchy"]
+)
 @pytest.mark.parametrize("anneal", [True, False])
-def test_protein_likelihood_slope_at_zero_kl_weight(hierarchy_mode, anneal):
-    """d loss / d pro_recons_weight at kl_weight=0 is mean protein NLL, or 0 when annealed."""
+def test_protein_likelihood_slope_at_zero_kl_weight(path, anneal):
+    """d loss / d pro_recons_weight at kl_weight=0 is mean protein NLL, or 0 when annealed.
+
+    Each ``path`` reaches a different branch of ``loss`` that applies the protein weight.
+    """
     from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
 
     adata = _make_v2_adata(n_samples=3)
     model = MrTotalVI(
-        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode=hierarchy_mode,
+        adata, sample_key="sample", n_latent=3, n_latent_u=2,
+        hierarchy_mode="centered_v2" if path == "centered_v2" else "legacy",
+        scale_observations=path == "scale_observations",
         anneal_protein_likelihood=anneal,
     )
     module = model.module.eval()
     tensors = next(iter(model._make_data_loader(adata=adata, batch_size=8)))
-    inference, generative = module(tensors, compute_loss=False)
+    inference_kwargs = {"n_samples": 2} if path == "mc_samples" else {}
+    inference, generative = module(
+        tensors, inference_kwargs=inference_kwargs, compute_loss=False
+    )
+    if path == "no_hierarchy":
+        inference = {k: v for k, v in inference.items() if k != "eps"}
 
     def loss(weight):
         return module.loss(tensors, inference, generative, kl_weight=0.0, pro_recons_weight=weight)
 
     reference = loss(0.0)
     slope = (loss(0.8).loss - reference.loss).item() / 0.8
-    expected = 0.0 if anneal else reference.reconstruction_loss["reconst_loss_protein"].mean().item()
+    protein_nll = reference.reconstruction_loss["reconst_loss_protein"]
+    if path == "scale_observations":
+        # Legacy scale_observations divides each cell's loss by its sample's cell count.
+        counts = module.n_obs_per_sample[tensors["sample"].long().flatten()]
+        protein_nll = protein_nll / counts
+    expected = 0.0 if anneal else protein_nll.mean().item()
     assert slope == pytest.approx(expected, rel=1e-5, abs=1e-5)
 
 
@@ -1071,3 +1088,76 @@ def test_learnable_prior_scale_with_map_warns():
 
     with pytest.warns(UserWarning, match="removes most of the donor residual"):
         MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", learn_z_u_prior_scale=True)
+
+
+# Step 9 nits --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [True, -1, 2**32, 1.5, "1"])
+def test_counterfactual_random_state_must_be_a_32_bit_integer(bad):
+    with pytest.raises(ValueError, match="random_state"):
+        cf._validate_random_state(bad)
+
+
+def test_counterfactual_random_state_accepts_numpy_integers():
+    cf._validate_random_state(np.int64(2**32 - 1))
+    cf._validate_random_state(0)
+
+
+def test_counterfactual_indices_reject_an_empty_selection():
+    adata = ad.AnnData(np.zeros((4, 1), dtype=np.float32))
+    with pytest.raises(ValueError, match="at least one observation"):
+        cf._as_indices(adata, np.zeros(4, dtype=bool), name="indices")
+
+
+def test_missing_protein_names_warn_on_transfer():
+    model, adata = _numpy_protein_model()
+    other = adata.copy()
+    del other.uns["prot_names"]
+    with pytest.warns(UserWarning, match="protein axis order cannot be checked"):
+        model._validate_anndata(other)
+
+
+def test_local_sample_distances_reject_missing_group_labels():
+    model, adata = _numpy_protein_model()
+    adata.obs["group"] = pd.Series(["a", None] * (adata.n_obs // 2), index=adata.obs_names)
+    model.is_trained_ = True  # the label check runs before any inference
+    with pytest.raises(ValueError, match="missing labels"):
+        model.get_local_sample_distances(adata=adata, groupby="group")
+
+
+def test_seed_combiner_warns_for_entries_nan_in_some_seeds():
+    import xarray as xr
+
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    first = xr.Dataset({"value": (("draw", "cell"), [[1.0, np.nan], [3.0, np.nan]])})
+    second = xr.Dataset({"value": (("draw", "cell"), [[5.0, 2.0], [7.0, 4.0]])})
+    with pytest.warns(UserWarning, match=r"value \(1\)"):
+        result = combine_mrtotalvi_seed_results({0: first, 1: second})
+    # Cell 0 has both seeds (means 2 and 6); cell 1 only the second seed (mean 3).
+    np.testing.assert_allclose(result.value_between_seed_mean.values, [4.0, 3.0])
+
+
+def test_registry_adapter_keeps_pandas_category_order():
+    from mrtotalvi._datamodule import _MrTotalVIRegistryAdapter
+    from tests.test_datamodule import _make_adata as _make_dm_adata
+
+    adata = _make_dm_adata()
+    order = sorted(adata.obs["sample"].unique(), reverse=True) + ["unused"]
+    adata.obs["sample"] = pd.Categorical(adata.obs["sample"], categories=order)
+    dm = _MrTotalVIRegistryAdapter(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        parallel=False,
+    )
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample"
+    )
+    registered = MrTotalVI(adata, sample_key="sample").adata_manager.get_state_registry(
+        REGISTRY_KEYS.SAMPLE_KEY
+    ).categorical_mapping
+    np.testing.assert_array_equal(registered, order)
+    adapter_mapping = dm.registry["field_registries"][REGISTRY_KEYS.SAMPLE_KEY][
+        "state_registry"
+    ]["categorical_mapping"]
+    np.testing.assert_array_equal(adapter_mapping, order)

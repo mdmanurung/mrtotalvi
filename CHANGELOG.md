@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- Small input and doc fixes (no numbers change). Counterfactual methods reject a `random_state`
+  outside `[0, 2**32)` or of a non-integer type, and an empty `indices` selection, before
+  inference. A transfer `adata` missing the protein-names `uns` key now warns that the protein
+  order is unchecked. `get_local_sample_distances(groupby=...)` raises on missing labels. The
+  seed combiner warns when an entry is NaN in only some seeds. The private registry adapter keeps
+  a pandas Categorical's category order, as `setup_anndata` does. Docstrings and the user guide
+  now state: uniform LFC weights over every registered batch; NaN (not `-inf`) for a group with
+  no reference under `"posterior"`; an analytic `kl_u` for the standard prior; nearly identical
+  Vamp components without `init_prior_from_data`; and the kNN small-sample bias.
 - `learn_z_u_prior_scale=True` with `use_map=True` now warns at construction: the optimizer
   shrinks `pz_scale` and `eps` together until the `-4` clamp, which removes most of the donor
   residual (`eps` RMS 0.003 against 0.085 by default in one synthetic run). Training is

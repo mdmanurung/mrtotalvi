@@ -159,6 +159,7 @@ def combine_mrtotalvi_seed_results(
     )
     additions = {}
     skipped_latent: list[str] = []
+    partial_variables: list[str] = []
     for variable_name, variable in combined.data_vars.items():
         if "draw" not in variable.dims or not np.issubdtype(
             variable.dtype,
@@ -191,7 +192,20 @@ def combine_mrtotalvi_seed_results(
             continue
         additions[between_mean_name] = within_mean.mean("training_seed")
         additions[between_sd_name] = within_mean.std("training_seed", ddof=1)
+        n_partial = int(
+            (within_mean.isnull().any("training_seed") & within_mean.notnull().any("training_seed"))
+            .sum()
+        )
+        if n_partial:
+            partial_variables.append(f"{variable_name} ({n_partial})")
 
+    if partial_variables:
+        warnings.warn(
+            "Some entries are NaN in only some seeds; their between-seed mean and SD use the "
+            f"remaining seeds (variable and entry count): {', '.join(partial_variables)}.",
+            UserWarning,
+            stacklevel=2,
+        )
     combined = combined.assign(additions)
     combined.attrs = dict(template.attrs)
     combined.attrs["uncertainty_separation"] = (
