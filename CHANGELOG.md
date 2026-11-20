@@ -69,6 +69,13 @@
   `knn_k * n_g / N` is below 1. The `knn` docstring no longer says pooled group scores avoid
   the pseudocount bias. `lfc_std` is documented as an upper bound on the SD of the
   batch-marginal LFC.
+- `use_map=False`: the stochastic residual log-scale is clamped below at `log(1e-3)`, the
+  scale floor of upstream MrVI (user decision, 2026-11-20). In float32 a log-scale below
+  about -52 gave an infinite KL and below about -104 a zero scale that made `Normal` raise.
+  Only values below log-scale -6.9 change; `use_map=True` (the default, required by
+  `centered_v2`) is unaffected.
+- The VampPrior `freeze_prior_after_init` docstring no longer says the prior landscape stays
+  fixed: only the pseudo-inputs freeze, and the components move as the shared `qu` trains.
 - The private, quarantined batch data module now rejects a validation collection whose gene
   `var_names` differ in order from training; it compared only the protein axis.
 - Private `_differential_expression`: `pvalue` is the chi-square survival function in
@@ -192,6 +199,9 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 
 ### Known open issues (from the 2026-11-17 Fable and Opus reviews; not fixed)
 
+- Inherited from upstream TOTALVAE: with `n_samples > 1` the library posterior is drawn with
+  `ql.sample()`, so it carries no gradient. Training never passes `n_samples`, so only
+  evaluation calls use it.
 - Kept for upstream MrVI parity (user, 2026-11-20), now warned or documented: the private DE
   path's per-covariate Wald statistic mixes correlated covariates (sqrt(X^T M X) prefactor),
   rejected samples still enter the eps standardisation, and `lfc_std` averages per-batch

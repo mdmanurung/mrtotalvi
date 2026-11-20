@@ -626,3 +626,23 @@ def test_de_warns_when_rejected_samples_enter_standardisation(trained_de_model):
             batch_size=32,
             filter_inadmissible_samples=True,
         )
+
+
+# Stochastic residual scale floor ----------------------------------------------
+
+
+@pytest.mark.parametrize("log_scale", [-60.0, -110.0])
+def test_stochastic_residual_scale_has_a_floor(log_scale):
+    """A very negative log-scale gives scale 1e-3 and a finite KL, not inf or a crash."""
+    from torch.distributions import kl_divergence
+
+    from mrtotalvi._components import EncoderUZ
+
+    encoder = EncoderUZ(n_latent=3, n_sample=2, n_latent_u=2, use_map=False)
+    raw = torch.cat([torch.zeros(4, 3), torch.full((4, 3), log_scale)], dim=-1)
+    encoder.attention_block.forward = lambda query_embed, kv_embed: raw
+    _, _, eps_dist = encoder(torch.zeros(4, 2), torch.zeros(4, dtype=torch.long))
+    np.testing.assert_allclose(eps_dist.scale.numpy(), 1e-3, rtol=1e-6)
+    # Closed form for KL(N(0, s) || N(0, 1)) per dimension: -log s + s^2 / 2 - 1/2.
+    kl = kl_divergence(eps_dist, Normal(0.0, 1.0))
+    np.testing.assert_allclose(kl.numpy(), -math.log(1e-3) + 0.5e-6 - 0.5, rtol=1e-5)

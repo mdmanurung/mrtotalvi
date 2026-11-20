@@ -8,6 +8,7 @@ without depending on mrvi_torch internals.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,6 +22,10 @@ from torch.distributions import Categorical, Independent, MixtureSameFamily, Nor
 from torch.nn import init
 
 from scvi.module.base import auto_move_data
+
+# Lower bound on the stochastic residual log-scale: log(1e-3), the scale floor of upstream
+# MrVI (scvi/external/mrvi/_module.py:572). User decision, 2026-11-20.
+_EPS_LOG_SCALE_MIN = math.log(1e-3)
 
 
 def _gelu(x: torch.Tensor) -> torch.Tensor:
@@ -245,10 +250,12 @@ def init_u_prior(
         For MoG: centroids should be in latent space. Ignored when ``None``.
     freeze_prior_after_init
         If ``True``, freeze the location/shape prior parameters after
-        initialization so the prior landscape does not move during training.
-        For VampPrior this freezes ``u_vamp_pseudo``; for MoG it freezes
-        ``u_prior_means`` and ``u_prior_scales``. ``u_prior_logits`` (mixture
-        weights) remains trainable in all cases.
+        initialization.
+        For VampPrior this freezes ``u_vamp_pseudo`` only: the components are
+        ``qu`` applied to the pseudo-inputs, and ``qu`` keeps training, so the
+        VampPrior landscape still moves. For MoG it freezes ``u_prior_means``
+        and ``u_prior_scales``. ``u_prior_logits`` (mixture weights) remains
+        trainable in all cases.
 
         Freezing preserves the initialized prior landscape. Any effect on
         cross-seed differential-abundance stability remains unvalidated and
@@ -1211,9 +1218,12 @@ class EncoderUZ(nn.Module):
 
         eps_dist = None
         if not self.use_map:
-            # Stochastic eps: split 2*n_latent into mean/log-scale; clamp before exp (M1)
+            # Stochastic eps: split 2*n_latent into mean/log-scale; clamp before exp (M1).
+            # The lower bound keeps the scale at or above 1e-3, the floor upstream MrVI
+            # uses (softplus + 1e-3); without it float32 gave an infinite KL below about
+            # log-scale -52 and a zero scale below about -104.
             eps_mean, eps_log_scale = residual.chunk(2, dim=-1)
-            eps_scale = eps_log_scale.clamp(max=10.0).exp()
+            eps_scale = eps_log_scale.clamp(min=_EPS_LOG_SCALE_MIN, max=10.0).exp()
             eps_dist = Normal(eps_mean, eps_scale)
             residual = eps_dist.loc if deterministic else eps_dist.rsample()
 
