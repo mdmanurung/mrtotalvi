@@ -1594,12 +1594,16 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``library_size`` inside the ``transform_batch`` loop, so two batches at
         ``library_size=1000`` gave row sums near 500500. This runs the upstream method at
         ``library_size=1``, where that loop is exact, and scales the RNA output once.
-        Protein output and ``library_size`` of ``1``, ``None`` or ``"latent"`` are
-        unchanged. See :meth:`scvi.model.TOTALVI.get_normalized_expression`.
+        Protein output and ``library_size`` of ``1`` or ``"latent"`` are unchanged.
+        For backed AnnData, rows come back in the requested order (upstream returns them
+        sorted but labels them in request order). See
+        :meth:`scvi.model.TOTALVI.get_normalized_expression`.
         """
+        resolved = self.adata if adata is None else adata
+        loader_indices, inverse = _loader_order(resolved, indices)
         request = dict(
             adata=adata,
-            indices=indices,
+            indices=loader_indices,
             n_samples_overall=n_samples_overall,
             transform_batch=transform_batch,
             gene_list=gene_list,
@@ -1607,9 +1611,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             **kwargs,
         )
         if library_size is None or isinstance(library_size, str) or library_size == 1:
-            return super().get_normalized_expression(library_size=library_size, **request)
-        rna, protein = super().get_normalized_expression(library_size=1, **request)
-        return rna * library_size, protein
+            rna, protein = super().get_normalized_expression(library_size=library_size, **request)
+        else:
+            rna, protein = super().get_normalized_expression(library_size=1, **request)
+            rna = rna * library_size
+        if inverse is None:
+            return rna, protein
+        requested = np.asarray(indices)
+        if requested.dtype == np.bool_:
+            requested = np.flatnonzero(requested)
+        names = np.asarray(resolved.obs_names)[requested]
+
+        def request_order(values):
+            if hasattr(values, "iloc"):
+                reordered = values.iloc[inverse].copy()
+                reordered.index = names
+                return reordered
+            return values[inverse]
+
+        return request_order(rna), request_order(protein)
 
     @torch.inference_mode()
     def get_feature_correlation_matrix(
@@ -1662,8 +1682,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 [denoised_data[:, :, i] for i in range(n_samples)], axis=0
             ).astype(np.float64)
             if log_transform is True:
-                flattened[:, : self.n_genes] = np.log(flattened[:, : self.n_genes] + 1e-8)
-                flattened[:, self.n_genes :] = np.log1p(flattened[:, self.n_genes :])
+                # Upstream reads self.n_genes, which neither TOTALVI nor MrTotalVI defines.
+                n_genes = self.summary_stats.n_vars
+                flattened[:, :n_genes] = np.log(flattened[:, :n_genes] + 1e-8)
+                flattened[:, n_genes:] = np.log1p(flattened[:, n_genes:])
             if correlation_type == "pearson":
                 corr_matrix = np.corrcoef(flattened, rowvar=False)
             else:

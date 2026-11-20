@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- `get_normalized_expression` on backed AnnData with non-ascending `indices` returned rows in
+  sorted order labelled in request order (upstream behaviour the earlier backed fix missed); it
+  now returns them in request order. `get_feature_correlation_matrix(log_transform=True)` raised
+  `AttributeError` (upstream reads the undefined `self.n_genes`); it now uses the gene count.
 - The 512 MiB guard of `get_counterfactual_latent` and `get_counterfactual_expression` sized
   only the output. Centering builds residuals for every registered sample in each minibatch, so
   300 registered samples, one target, 256 cells and 32 draws passed an estimate of 5.5 MiB and

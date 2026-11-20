@@ -1031,3 +1031,36 @@ def test_memory_guard_counts_every_registered_sample():
             indices=np.arange(256), target_samples=["s0"], inference_mode="posterior_mc",
             n_draws=32,
         )
+
+
+# Overrides: backed order and log transform -----------------------------------------
+
+
+def test_normalized_expression_keeps_request_order_on_backed_data(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+    model._validate_anndata(backed)
+    request = [7, 2, 5, 0]
+    # The protein foreground mixture is deterministic per cell, so compare by cell.
+    torch.manual_seed(0)
+    reference_rna, reference_protein = model.get_normalized_expression(
+        adata=backed, indices=[0, 2, 5, 7], n_samples=1
+    )
+    torch.manual_seed(0)
+    rna, protein = model.get_normalized_expression(adata=backed, indices=request, n_samples=1)
+    assert list(rna.index) == list(backed.obs_names[request])
+    np.testing.assert_allclose(
+        protein.values, reference_protein.loc[backed.obs_names[request]].values, rtol=1e-5
+    )
+
+
+def test_feature_correlation_log_transform_runs():
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    corr = model.get_feature_correlation_matrix(adata=adata, n_samples=2, log_transform=True)
+    n_features = model.summary_stats.n_vars + model.summary_stats.n_proteins
+    assert corr.shape == (n_features, n_features)
