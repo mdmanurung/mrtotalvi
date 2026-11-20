@@ -951,3 +951,50 @@ def test_continued_training_runs_in_train_mode(tmp_path):
     assert modes_during(model) == {True}  # second call
     model.save(tmp_path / "m", overwrite=True)
     assert modes_during(MrTotalVI.load(tmp_path / "m", adata=adata)) == {True}
+
+
+# Protein availability when the panel is the batch -----------------------------
+
+
+def _batch_only_context_model():
+    """Protein 0 is never measured in batch_0, and no panel is registered."""
+    import scvi
+
+    adata = scvi.data.synthetic_iid(batch_size=6, n_genes=5, n_proteins=3, n_batches=2)
+    adata.obs["sample"] = np.asarray(["sample_0"] * 6 + ["sample_1"] * 6)
+    adata.obs["batch"] = np.asarray(["batch_0", "batch_1"] * 6)
+    protein = np.asarray(adata.obsm["protein_expression"], dtype=np.float32) + 1.0
+    protein[adata.obs["batch"].to_numpy() == "batch_0", 0] = 0.0
+    adata.obsm["protein_expression"] = protein
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        batch_key="batch",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = MrTotalVI(
+            adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+            u_encoder_mode="sample_blind",
+        )
+    model.is_trained_ = True
+    return model, adata
+
+
+def test_specified_batch_also_sets_the_protein_mask_without_a_panel():
+    model, adata = _batch_only_context_model()
+    proteins = [str(p) for p in model.adata_manager.get_state_registry(
+        REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names]
+    batch_1_cells = np.flatnonzero(adata.obs["batch"].to_numpy() == "batch_1")[:2]
+    out = model.get_counterfactual_expression(
+        adata=adata, indices=batch_1_cells, gene_list=[str(adata.var_names[0])],
+        protein_list=proteins[:1], batch_policy="specified", specified_batch="batch_0",
+    )
+    # Decoded in batch_0, where protein 0 was never measured: unavailable, not a value
+    # from decoder weights the masked likelihood never trained.
+    assert not out["protein_available"].values.any()
+    with pytest.raises(ValueError, match="the panel is the batch"):
+        model.get_counterfactual_expression(
+            adata=adata, indices=batch_1_cells, gene_list=[str(adata.var_names[0])],
+            protein_list=proteins[:1], batch_policy="specified", specified_batch="batch_0",
+            panel_policy="specified", specified_panel="batch_1",
+        )

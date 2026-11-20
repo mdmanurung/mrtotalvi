@@ -389,6 +389,14 @@ def _validate_context_request(
         )
     if library_policy == "specified":
         _specified_library(specified_library_size, n_cells)
+    if model.module.panel_key != "panel" and panel_policy == "specified" and (
+        batch_policy != "specified" or str(specified_panel) != str(specified_batch)
+    ):
+        raise ValueError(
+            "Without a registered panel the panel is the batch: specify the batch with "
+            "batch_policy='specified', and leave panel_policy='observed' or set the same "
+            "specified_panel."
+        )
 
 
 def _build_context_scenarios(
@@ -453,6 +461,10 @@ def _build_context_scenarios(
         )
     if library_policy == "specified":
         library = _specified_library(specified_library_size, n_cells)
+    if model.module.panel_key != "panel" and batch_policy == "specified":
+        # Without a registered panel the panel is the batch, so the protein mask must
+        # follow the batch the cell is decoded in, not the cell's observed batch.
+        panel = batch.copy()
 
     if not (batch_marginal or library_marginal):
         scenarios = [

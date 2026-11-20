@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Counterfactual expression without a registered panel (the panel is the batch):
+  `batch_policy="specified"` decoded in the specified batch but masked proteins by the cell's
+  observed batch, so a protein never measured in the specified batch got a value from decoder
+  weights the masked likelihood never trained. The mask now follows the specified batch, and a
+  conflicting `specified_panel` raises (user decision, 2026-11-20).
 - A second `train()` call, or `train()` after `load`, ran with the module in eval mode:
   scvi-tools leaves it there after a fit and after load, and Lightning >= 2.6 no longer
   switches it back. Dropout was off and the `u_invariance_weight` penalty was skipped.

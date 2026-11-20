@@ -251,7 +251,8 @@ Technical contexts are explicit:
   the default TotalVI setting, or the posterior log-normal mean when
   `use_observed_lib_size=False`.
 - `specified` requires registered batch/panel labels and a positive library
-  scalar or cell-aligned vector.
+  scalar or cell-aligned vector. Without a registered panel the panel is the batch, so a
+  specified batch also sets the protein mask; a different `specified_panel` raises.
 - `sample_balanced_marginal` weights biological samples equally and empirical
   joint batch/panel contexts within each sample. Batch and panel cannot be
   marginalized separately. Each distinct reference context (batch, panel and,
