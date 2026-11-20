@@ -34,6 +34,11 @@ def _validate_sample_level_covariates(obs, sample_key: str, cov_keys: list[str])
             )
 
 
+# Absolute cosine between a fixed covariate and another design column above which the
+# per-covariate Wald statistic is flagged as mixed (a warning only; no output changes).
+_CORRELATED_DESIGN_TOL = 0.1
+
+
 def _rowwise_max_excluding_diagonal(matrix: torch.Tensor) -> torch.Tensor:
     if matrix.ndim != 2:
         raise ValueError(f"Expected a 2D matrix, got shape {tuple(matrix.shape)}.")
@@ -52,11 +57,28 @@ def _as_indices(adata, indices):
     return np.asarray(indices)
 
 
+def _loader_order(adata, indices):
+    """Indices to hand the data loader, and the permutation back to request order.
+
+    scvi-tools sorts indices inside each minibatch for backed AnnData, so rows would come
+    back in sorted order, and h5py rejects repeated indices. For backed data each cell is
+    loaded once in ascending order, and the returned index array maps those rows back to
+    the request order; otherwise it is ``None``.
+    """
+    if indices is None or not getattr(adata, "isbacked", False):
+        return indices, None
+    unique_indices, inverse = np.unique(np.asarray(indices), return_inverse=True)
+    return unique_indices, inverse
+
+
 def collect_u_posterior(model, adata=None, indices=None, batch_size: int = 256):
     """Collect posterior Normal parameters for ``u`` from a model dataloader."""
     adata = model._validate_anndata(adata)
     indices = _as_indices(adata, indices)
-    dataloader = model._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+    loader_indices, inverse = _loader_order(adata, indices)
+    dataloader = model._make_data_loader(
+        adata=adata, indices=loader_indices, batch_size=batch_size
+    )
 
     locs = []
     scales = []
@@ -79,7 +101,10 @@ def collect_u_posterior(model, adata=None, indices=None, batch_size: int = 256):
     finally:
         model.module.train(was_training)
 
-    return torch.cat(locs, dim=0), torch.cat(scales, dim=0)
+    loc, scale = torch.cat(locs, dim=0), torch.cat(scales, dim=0)
+    if inverse is not None:
+        loc, scale = loc[inverse], scale[inverse]
+    return loc, scale
 
 
 def get_aggregated_posterior(
@@ -307,7 +332,10 @@ def differential_abundance(
           is ``knn_k * n_g / N`` (``N`` the reference size). Where that is below about 1, the
           score tends to ``log(0.5 / n_g)``, which favours the smaller sample (null stub with
           samples of 2000, 2000, 2000 and 30 cells and ``knn_k=50``: the 30-cell sample
-          ranked first for every cell). Group scores, which pool counts, are not affected.
+          ranked first for every cell). Group scores pool counts but share the bias when a
+          pooled group's expected count ``knn_k * n_g / N`` is below about 1 (null stub with
+          groups of 4000 and 30 cells, ``knn_k=50``: mean log-enrichment +0.65 towards the
+          30-cell group); a warning names such groups.
         - A group with no reference cells for a cell (its own sample under
           ``omit_original_sample=True``) scores NaN, where ``"posterior"`` gives ``-inf``.
         - Group scores are sample-size corrected by cell counts (pooled cells), not by the
@@ -502,9 +530,14 @@ def differential_abundance(
     if donor_column_groups:
         # Within-donor centering: subtract the per-donor mean across that donor's
         # samples so that donor blocks are absorbed before covariate aggregation.
+        # A NaN sample (a one-cell own sample) is left out of the donor mean.
         agg_log_probs = log_probs.copy()
-        for col_idx in donor_column_groups:
-            agg_log_probs[:, col_idx] -= agg_log_probs[:, col_idx].mean(axis=1, keepdims=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for col_idx in donor_column_groups:
+                agg_log_probs[:, col_idx] -= np.nanmean(
+                    agg_log_probs[:, col_idx], axis=1, keepdims=True
+                )
 
     coords = {"cell_name": adata.obs_names.to_numpy(), "sample": np.asarray(sample_values)}
     data_vars = {"log_probs": (["cell_name", "sample"], log_probs)}
@@ -561,6 +594,26 @@ def differential_abundance(
 
     cov_log_probs = {}
     cov_log_enrichs = {}
+    if density_estimator == "knn" and sample_cov_keys:
+        # The fixed 0.5 pseudocount favours a group whose expected neighbour count is
+        # below about 1.
+        cells_per_sample = adata.obs[sample_key].value_counts()
+        n_reference = cells_per_sample.reindex(sample_values).fillna(0).sum()
+        small_groups = []
+        for key in sample_cov_keys:
+            for value in sample_info[key].unique():
+                samples = sample_info.loc[sample_info[key] == value, sample_key]
+                n_group = cells_per_sample.reindex(samples).fillna(0).sum()
+                if 0 < knn_k * n_group / n_reference < 1:
+                    small_groups.append(f"{key}={value}")
+        if small_groups:
+            warnings.warn(
+                "knn group scores are biased towards groups whose expected neighbour "
+                f"count knn_k * n_g / N is below 1: {small_groups}. Increase knn_k or "
+                "use density_estimator='posterior'.",
+                UserWarning,
+                stacklevel=2,
+            )
     for key in sample_cov_keys:
         per_value = {}
         per_enrich = {}
@@ -695,6 +748,13 @@ def _construct_design_matrix(
     return torch.tensor(xmat, dtype=torch.float32), names_all, n_fixed
 
 
+def _wald_pvalue(statistic: np.ndarray, df: np.ndarray) -> np.ndarray:
+    """Chi-square survival function in float64: a large statistic gives a small p, not 0."""
+    from scipy.stats import chi2
+
+    return chi2.sf(np.asarray(statistic, dtype=np.float64), np.asarray(df, dtype=np.float64))
+
+
 def _differential_expression(
     model,
     *,
@@ -746,7 +806,10 @@ def _differential_expression(
         If ``True``, compute and store gene/protein log2-fold-changes (LFC) in
         the returned dataset.  Requires ``model.module`` to implement
         ``compute_h_from_x_eps``.  LFC is batch-marginalized by weighting over
-        unique batch values observed in each mini-batch.
+        unique batch values observed in each mini-batch. ``lfc_std`` is the square
+        root of the weighted mean of per-batch MC variances, as in upstream MrVI. It
+        ignores the between-batch term and the covariance between batches that share
+        MC draws, so it is not the SD of the batch-marginal LFC; it is never smaller.
     donor_key
         Column in ``adata.obs`` identifying the donor.  Adds donor dummy
         columns as nuisance covariates; only fixed-effect betas are returned.
@@ -769,8 +832,14 @@ def _differential_expression(
         BatchNorm-based decoders.
     **filter_samples_kwargs
         Forwarded to :func:`get_outlier_cell_sample_pairs`.
+
+    Notes
+    -----
+    ``pvalue`` is the chi-square survival function of the Wald statistic, in float64.
+    ``padj`` is Benjamini-Hochberg over one family: every analysed cell times every fixed
+    covariate. Per-cell tests share one model fit, so they are strongly dependent, and the
+    adjusted values change with how many cells and covariates are analysed.
     """
-    import torch.distributions as tdist
     from scipy.stats import false_discovery_control
 
     from scvi import REGISTRY_KEYS as RK
@@ -855,6 +924,29 @@ def _differential_expression(
     n_covariates = Xmat.shape[1]
     device = model.device
     Xmat = Xmat.to(device)
+
+    # The per-covariate Wald statistic multiplies betas by sqrt(X^T M X), as upstream MrVI
+    # does, so a fixed covariate that is not orthogonal to another design column picks up
+    # that column's effect. Only the sum over covariates is the joint Wald statistic.
+    design_norm = torch.linalg.vector_norm(Xmat, dim=0).clamp(min=1e-12)
+    design_cosine = (Xmat.T @ Xmat) / torch.outer(design_norm, design_norm)
+    design_cosine.fill_diagonal_(0.0)
+    if bool((design_cosine[:n_fixed].abs() > _CORRELATED_DESIGN_TOL).any()):
+        warnings.warn(
+            "Design columns are correlated: per-covariate effect_size, pvalue and padj "
+            "mix effects between them (upstream MrVI behaviour); beta is unaffected and "
+            "only the sum of effect_size over covariates is the joint Wald statistic.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if filter_inadmissible_samples and not np.all(admissible_samples > 0):
+        warnings.warn(
+            "Rejected (inadmissible) samples still enter the per-cell centring and "
+            "scaling of eps before the weighted fit (upstream MrVI behaviour), so they "
+            "can still move beta and the Wald statistic.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     scdl = model._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
 
@@ -951,15 +1043,15 @@ def _differential_expression(
                 ts = (betas_norm**2).sum(-1).mean(0)
 
                 # Chi2 p-values with df = n_admissible_per_cell
-                df = n_per_cell.clamp(min=1).float().unsqueeze(-1).expand_as(ts)
-                pvals = 1.0 - tdist.Chi2(df).cdf(ts)  # (n_cells, n_cov)
+                df = n_per_cell.clamp(min=1).unsqueeze(-1).expand_as(ts)
+                pvals = _wald_pvalue(ts.cpu().numpy(), df.cpu().numpy())  # (n_cells, n_cov)
 
                 # Un-standardise betas and average over MC draws
                 betas_rescaled = (betas * eps_std).mean(0)  # (n_cells, n_cov, n_latent)
 
                 beta_list.append(betas_rescaled[:, :n_fixed, :].cpu().numpy())
                 effect_size_list.append(ts[:, :n_fixed].cpu().numpy())
-                pvalue_list.append(pvals[:, :n_fixed].cpu().numpy())
+                pvalue_list.append(pvals[:, :n_fixed])
 
                 # ---- gene/protein LFC block ----
                 if store_lfc:
@@ -1149,7 +1241,10 @@ def get_outlier_cell_sample_pairs(
     cells from their own sample. ``get_counterfactual_latent`` uses a different rule (one
     threshold per target sample), so its ``admissible`` flag is a different quantity.
 
-    ``random_state`` seeds the per-sample subsample; ``None`` uses
+    A registered sample with no cells in ``adata`` gets a NaN, inadmissible column and adds
+    no threshold scores. A sample whose mixture has one component (a one-cell sample, or
+    ``subsample_size=1``) gives that cell a NaN, inadmissible score for its own sample and
+    adds no threshold score. ``random_state`` seeds the per-sample subsample; ``None`` uses
     :attr:`scvi.settings.seed` when set, otherwise the subsample is not reproducible.
     """
     rng = np.random.default_rng(random_state if random_state is not None else settings.seed)
@@ -1174,8 +1269,14 @@ def get_outlier_cell_sample_pairs(
     n_splits = max(int(np.ceil(adata.n_obs / batch_size)), 1)
     for sample_name in tqdm(sample_values, desc="Outlier cell-sample scores"):
         sample_idxs = np.where(adata.obs[sample_key].to_numpy() == sample_name)[0]
+        if sample_idxs.size == 0:
+            # A registered sample absent from this adata has no mixture: every pair is
+            # NaN and inadmissible, and it adds no threshold scores.
+            log_probs.append(np.full((us.shape[0], 1), np.nan, dtype=np.float32))
+            continue
         if subsample_size is not None and sample_idxs.shape[0] > subsample_size:
-            sample_idxs = rng.choice(sample_idxs, size=subsample_size, replace=False)
+            # Sorted, so component j is the j-th index whatever order the loader keeps.
+            sample_idxs = np.sort(rng.choice(sample_idxs, size=subsample_size, replace=False))
 
         ap = model.get_aggregated_posterior(
             adata=adata,
@@ -1187,14 +1288,18 @@ def get_outlier_cell_sample_pairs(
             dtype=ap.component_distribution.base_dist.loc.dtype,
             device=ap.component_distribution.base_dist.loc.device,
         )
-        in_comp_log_probs = ap.component_distribution.log_prob(in_sample.unsqueeze(-2))
-        thresholds.append(_rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu())
+        # A one-component mixture has no leave-one-out score, so it adds nothing to the
+        # pooled threshold (its 1x1 entry would be the cell's own self-density).
+        if sample_idxs.shape[0] > 1:
+            in_comp_log_probs = ap.component_distribution.log_prob(in_sample.unsqueeze(-2))
+            thresholds.append(
+                _rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu()
+            )
 
         # A cell inside this sample's subsample must not match its own component,
-        # mirroring the leave-one-out thresholds above (single-component case kept).
+        # mirroring the leave-one-out thresholds above.
         own_component = np.full(us.shape[0], -1, dtype=np.int64)
-        if sample_idxs.shape[0] > 1:
-            own_component[sample_idxs] = np.arange(sample_idxs.shape[0])
+        own_component[sample_idxs] = np.arange(sample_idxs.shape[0])
 
         sample_log_probs = []
         for rows in np.array_split(np.arange(us.shape[0]), n_splits):
@@ -1212,8 +1317,18 @@ def get_outlier_cell_sample_pairs(
                     torch.as_tensor(chunk_own[hit], device=comp_log_probs.device),
                 ] = -float("inf")
             sample_log_probs.append(comp_log_probs.max(dim=1, keepdim=True).values.cpu().numpy())
-        log_probs.append(np.concatenate(sample_log_probs, axis=0))
+        sample_scores = np.concatenate(sample_log_probs, axis=0)
+        if sample_idxs.shape[0] == 1:
+            # The only component is the cell itself: no independent reference, so NaN
+            # (inadmissible), as in differential_abundance.
+            sample_scores[sample_idxs] = np.nan
+        log_probs.append(sample_scores)
 
+    if not thresholds:
+        raise ValueError(
+            f"No registered sample of '{sample_key}' has at least 2 cells in adata; "
+            "leave-one-out thresholds are undefined."
+        )
     threshold_values = torch.cat(thresholds).numpy()
     global_threshold = np.quantile(threshold_values, q=quantile_threshold)
     log_probs = np.concatenate(log_probs, axis=1)

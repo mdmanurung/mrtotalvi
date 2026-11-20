@@ -35,6 +35,7 @@ from ._counterfactual import local_sample_enrichment as _local_sample_enrichment
 from ._module import MrTotalVAE
 from ._stats import (
     _differential_expression,
+    _loader_order,
 )
 from ._stats import (
     differential_abundance as _differential_abundance,
@@ -179,9 +180,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Keys you pass win. Checkpoints saved before this default load with their
         one-layer ``qu``.
     spec_defaults
-        ``None`` (default) applies the ``qz_kwargs`` and ``qu_kwargs`` defaults above. ``False`` skips them
-        and reproduces the ``qz`` built before ``spec_defaults`` existed (no stop-gradient or dropout). The resolved value is saved
-        with the model; checkpoints that lack it load with ``False``.
+        ``None`` (default) applies the ``qz_kwargs`` and ``qu_kwargs`` defaults above.
+        ``False`` skips both: it rebuilds the ``qz`` made before ``spec_defaults``
+        existed (no stop-gradient or dropout) and the one-layer ``qu``. The resolved
+        value is saved with the model; checkpoints that lack it load with ``False``.
     kl_z_weight
         Static scalar weight applied to ``KL(q_z ‖ p_z)`` before the global
         ``kl_weight`` annealing.  Default ``1.0`` preserves prior behaviour.
@@ -345,6 +347,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "gene_dispersion='gene-label' is not supported: TOTALVI builds the "
                 "model but training fails because the label tensor is not passed to "
                 "the generative step. Use 'gene' or 'gene-batch'."
+            )
+        if model_kwargs.get("protein_dispersion", "protein") == "protein-label":
+            raise ValueError(
+                "protein_dispersion='protein-label' is not supported: TOTALVI builds "
+                "the model but the first forward pass fails because no label tensor "
+                "reaches inference. Use 'protein' or 'protein-batch'."
             )
 
         # Call TOTALVI.__init__. n_sample / n_latent_sample / z_u_prior_scale /
@@ -644,6 +652,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             model = super().load(dir_path, *args, **kwargs)
         finally:
             MrTotalVI._loading_checkpoint = False
+        model._check_protein_names(model.adata)
         module = model.module
         if (
             module.sample_embedding_prior_scale is not None
@@ -1063,9 +1072,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size
             Dataloader batch size.
         n_mc_samples
-            MC draws from ``q(u|x)`` for Jensen-gap bias correction.
-            See :func:`~mrtotalvi._stats.differential_abundance`
-            for full semantics.  Default ``1`` preserves deterministic behavior.
+            MC draws from ``q(u|x)``; ``> 1`` scores ``log E_q[p(u)]``, a smoothed
+            alternative to the plug-in ``log p(E[u])``, not a bias correction.
+            Outputs from ``1`` and ``> 1`` sit on different scales; do not mix them.
+            See :func:`~mrtotalvi._stats.differential_abundance`.
+            Default ``1`` is deterministic.
         density_estimator
             ``"posterior"`` (default, unchanged MrVI aggregated posterior), ``"knn"``
             (neighbour-count density ratio in ``u``) or ``"scale_floor"`` (aggregated
@@ -1310,7 +1321,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
 
         These outputs are descriptive and non-inferential. A factual singleton
         has zero retained references, ``finite_support=False``, and ``NaN``
-        density.
+        density. A ``NaN`` sample carries no weight in ``group_log_density``
+        or in the donor mean and median; only a group or cell with no usable
+        sample is ``NaN``.
         """
         return _local_sample_enrichment(
             self,
@@ -1492,6 +1505,107 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     # Latent representation
     # ------------------------------------------------------------------
 
+    def get_normalized_expression(
+        self,
+        adata=None,
+        indices=None,
+        n_samples_overall=None,
+        transform_batch=None,
+        gene_list=None,
+        protein_list=None,
+        library_size=1,
+        **kwargs,
+    ):
+        """TOTALVI ``get_normalized_expression`` with the library scaling applied once.
+
+        scvi-tools 1.5.2 (``scvi/model/_totalvi.py:540``) multiplies the running RNA sum by
+        ``library_size`` inside the ``transform_batch`` loop, so two batches at
+        ``library_size=1000`` gave row sums near 500500. This runs the upstream method at
+        ``library_size=1``, where that loop is exact, and scales the RNA output once.
+        Protein output and ``library_size`` of ``1``, ``None`` or ``"latent"`` are
+        unchanged. See :meth:`scvi.model.TOTALVI.get_normalized_expression`.
+        """
+        request = dict(
+            adata=adata,
+            indices=indices,
+            n_samples_overall=n_samples_overall,
+            transform_batch=transform_batch,
+            gene_list=gene_list,
+            protein_list=protein_list,
+            **kwargs,
+        )
+        if library_size is None or isinstance(library_size, str) or library_size == 1:
+            return super().get_normalized_expression(library_size=library_size, **request)
+        rna, protein = super().get_normalized_expression(library_size=1, **request)
+        return rna * library_size, protein
+
+    @torch.inference_mode()
+    def get_feature_correlation_matrix(
+        self,
+        adata=None,
+        indices=None,
+        n_samples: int = 10,
+        batch_size: int = 64,
+        rna_size_factor: int = 1000,
+        transform_batch=None,
+        correlation_type: Literal["spearman", "pearson"] = "spearman",
+        log_transform: bool = False,
+        silent: bool = True,
+    ):
+        """TOTALVI ``get_feature_correlation_matrix`` that samples from ``adata``.
+
+        The scvi-tools 1.5.2 body (``scvi/model/_totalvi.py:1046-1131``) validates
+        ``adata`` but calls ``_get_denoised_samples`` without it, so correlations always
+        came from the training data. This copy passes ``adata`` through; nothing else
+        changes. See :meth:`scvi.model.TOTALVI.get_feature_correlation_matrix`.
+        """
+        from collections.abc import Iterable
+
+        import pandas as pd
+        from scipy.stats import spearmanr
+        from scvi.model._utils import (
+            _get_batch_code_from_category,
+            _get_var_names_from_manager,
+        )
+        from scvi.utils import track
+
+        adata = self._validate_anndata(adata)
+        adata_manager = self.get_anndata_manager(adata, required=True)
+        if not isinstance(transform_batch, Iterable):
+            transform_batch = [transform_batch]
+        transform_batch = _get_batch_code_from_category(adata_manager, transform_batch)
+
+        corr_mats = []
+        for b in track(transform_batch, disable=silent):
+            denoised_data = self._get_denoised_samples(
+                adata=adata,
+                n_samples=n_samples,
+                batch_size=batch_size,
+                rna_size_factor=rna_size_factor,
+                transform_batch=b,
+                indices=indices,
+            )
+            # Stack the posterior samples as extra rows: (cells * samples, features).
+            flattened = np.concatenate(
+                [denoised_data[:, :, i] for i in range(n_samples)], axis=0
+            ).astype(np.float64)
+            if log_transform is True:
+                flattened[:, : self.n_genes] = np.log(flattened[:, : self.n_genes] + 1e-8)
+                flattened[:, self.n_genes :] = np.log1p(flattened[:, self.n_genes :])
+            if correlation_type == "pearson":
+                corr_matrix = np.corrcoef(flattened, rowvar=False)
+            else:
+                corr_matrix, _ = spearmanr(flattened, axis=0)
+            corr_mats.append(corr_matrix)
+        corr_matrix = np.mean(np.stack(corr_mats), axis=0)
+        names = np.concatenate(
+            [
+                np.asarray(_get_var_names_from_manager(adata_manager)),
+                self.protein_state_registry.column_names,
+            ]
+        )
+        return pd.DataFrame(corr_matrix, index=names, columns=names)
+
     def get_latent_representation(
         self,
         adata: AnnData | None = None,
@@ -1542,7 +1656,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+        loader_indices, inverse = _loader_order(adata, indices)
+        scdl = self._make_data_loader(
+            adata=adata, indices=loader_indices, batch_size=batch_size
+        )
 
         was_training = self.module.training
         self.module.eval()
@@ -1586,7 +1703,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 results.append(rep.detach().cpu().numpy())
         finally:
             self.module.train(was_training)
-        return np.concatenate(results, axis=0)
+        latent = np.concatenate(results, axis=0)
+        return latent if inverse is None else latent[inverse]
 
     # ------------------------------------------------------------------
     # Counterfactual representations (internal)
@@ -1717,7 +1835,27 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # copy_if_view=False), so the caller's object is registered once.
             _check_if_view(adata, copy_if_view=copy_if_view)
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+            self._check_protein_names(adata)
         return super()._validate_anndata(adata, copy_if_view=copy_if_view)
+
+    def _check_protein_names(self, adata) -> None:
+        """Raise if ``adata.uns`` protein names differ from the registered order.
+
+        scvi-tools compares protein names only for a DataFrame in obsm. With a numpy
+        matrix the names live in ``uns``, and a reordered axis would be read against the
+        registered order without an error, on transfer and on ``load``.
+        """
+        names_key = self.adata_manager.registry["setup_args"].get("protein_names_uns_key")
+        if names_key is None or names_key not in adata.uns:
+            return
+        registered = list(
+            self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names
+        )
+        if list(adata.uns[names_key]) != registered:
+            raise ValueError(
+                f"adata.uns['{names_key}'] does not match the registered protein names "
+                "and order; reorder the protein matrix to the registry."
+            )
 
     def get_local_sample_representation(
         self,

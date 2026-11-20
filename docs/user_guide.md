@@ -249,7 +249,9 @@ Technical contexts are explicit:
   scalar or cell-aligned vector.
 - `sample_balanced_marginal` weights biological samples equally and empirical
   joint batch/panel contexts within each sample. Batch and panel cannot be
-  marginalized separately.
+  marginalized separately. Each distinct reference context (batch, panel and,
+  for the library policy, each distinct library size) is one decode pass; more
+  than 1024 contexts fail, so subset `marginal_reference_indices`.
 
 In-memory output has a hard 512 MiB estimate including summaries and overhead. Requests above that
 limit must be reduced through explicit cell, target, or feature subsetting. Public `zarr_path` /
@@ -441,7 +443,8 @@ MrTotalVI does not support reference-query surgery or the `ArchesMixin` protocol
 `MrTotalVI.load_query_data` and `MrTotalVI.minify_adata` raise `NotImplementedError`
 (the inherited versions left new samples with random, frozen embeddings, or failed with
 a `KeyError`). `gene_dispersion="gene-label"` is rejected at construction with a
-`ValueError`; use `"gene"` or `"gene-batch"`.
+`ValueError`; use `"gene"` or `"gene-batch"`. `protein_dispersion="protein-label"` is
+rejected the same way; use `"protein"` or `"protein-batch"`.
 
 **Streaming and new-sample inference:**
 No data-module class is shipped. The private `_MrTotalVIRegistryAdapter` (`mrtotalvi._datamodule`) is not a
@@ -464,7 +467,9 @@ plug-in; do not mix the two.
 leave-one-out scores. `get_counterfactual_latent` (`admissible`) uses one quantile per target
 sample. They are different quantities. In both, a cell's own sample is scored leave-one-out, so
 about `quantile_threshold` (default 5%) of own-sample pairs fail by design, and the private DE
-filter drops that share of cells from their own sample.
+filter drops that share of cells from their own sample. A one-cell sample (or
+`subsample_size=1`) has no leave-one-out reference: its cell is NaN and inadmissible for its own
+sample, and that sample adds nothing to the pooled threshold.
 
 **Objective (methods note):**
 The default training objective (`use_map=True`) is a MAP/cross-entropy penalty on the residual

@@ -24,6 +24,71 @@
   enrichments when a cell's group has no reference sample (a group made only of the cell's own
   sample under `omit_original_sample=True`, as `"knn"` already did), and warns once with the
   number of affected cells.
+- `local_sample_enrichment`: a target sample with NaN density (a factual singleton) no longer
+  makes `group_log_density`, `log_ratio` and the donor mean and median NaN for the cell. The
+  group `logmeanexp` runs over the usable samples and divides by their count; the donor
+  summaries skip NaN donors. A group or cell with no usable sample stays NaN. All-finite
+  outputs are bit-identical to before.
+- `differential_abundance(donor_key=...)`: donor centering uses `nanmean`, so a NaN one-cell
+  own sample no longer turns every sample of that donor NaN in the covariate aggregates.
+- `get_outlier_cell_sample_pairs`: the per-sample subsample is sorted, so leave-one-out
+  masks the right component whatever order the loader keeps (same set, same seed). A
+  registered sample with no cells in `adata` gets a NaN, inadmissible column instead of
+  raising.
+- `library_policy="sample_balanced_marginal"` raises a `ValueError` above 1024 distinct
+  reference contexts (each is one decode pass) and asks you to subset
+  `marginal_reference_indices`. It used to run one decode per distinct library size.
+  Marginal scenarios no longer copy four per-cell arrays each (constant fields are
+  read-only broadcast views), and the context hash is streamed one scenario at a time;
+  `context_table_sha256` and decoded values are unchanged.
+- Counterfactual and enrichment `indices` must be integers: a float such as `1.9` was cast to
+  cell 1 without an error, and a string such as `"1"` was accepted. Whole-number floats such as
+  `1.0` still work.
+- With a numpy protein matrix and names in `adata.uns` (`protein_names_uns_key`), a reordered
+  protein axis was accepted on transfer and on `MrTotalVI.load` and read against the
+  registered order. Both now raise. scvi-tools already checked a DataFrame protein matrix.
+- Two inherited TOTALVI methods are overridden to fix scvi-tools 1.5.2 bugs.
+  `get_normalized_expression` with several `transform_batch` values and a numeric
+  `library_size` multiplied the running RNA sum on every batch (row sums near 500500 at
+  1000 for two batches); it now scales once. `get_feature_correlation_matrix` ignored its
+  `adata` argument and always sampled the training data; it now uses `adata`. Default calls
+  give the same output as before.
+- `protein_dispersion="protein-label"` is rejected in `MrTotalVI.__init__` with a `ValueError`,
+  like `gene_dispersion="gene-label"`. It built and then failed on the first forward pass.
+- `get_outlier_cell_sample_pairs` applies its leave-one-out rule to one-component samples (a
+  one-cell sample, or `subsample_size=1`), as decided by the user on 2026-11-20. Before, the
+  cell matched its own single component, so it was admissible for its own sample with no
+  independent reference, and its self-density entered the pooled threshold. The cell is now
+  NaN and inadmissible for its own sample, and the sample adds no threshold score; the pooled
+  threshold can change. Samples with 2+ cells in the mixture give the same output as before.
+  Upstream MrVI keeps the self-match.
+- New warnings, no output changes: the private DE path warns when a fixed covariate is not
+  orthogonal to another design column (per-covariate Wald statistics then mix effects) and
+  when `filter_inadmissible_samples=True` leaves rejected samples in the eps standardisation;
+  `density_estimator="knn"` warns for groups whose expected neighbour count
+  `knn_k * n_g / N` is below 1. The `knn` docstring no longer says pooled group scores avoid
+  the pseudocount bias. `lfc_std` is documented as an upper bound on the SD of the
+  batch-marginal LFC.
+- `use_map=False`: the stochastic residual log-scale is clamped below at `log(1e-3)`, the
+  scale floor of upstream MrVI (user decision, 2026-11-20). In float32 a log-scale below
+  about -52 gave an infinite KL and below about -104 a zero scale that made `Normal` raise.
+  Only values below log-scale -6.9 change; `use_map=True` (the default, required by
+  `centered_v2`) is unaffected.
+- The VampPrior `freeze_prior_after_init` docstring no longer says the prior landscape stays
+  fixed: only the pseudo-inputs freeze, and the components move as the shared `qu` trains.
+- The private, quarantined batch data module now rejects a validation collection whose gene
+  `var_names` differ in order from training; it compared only the protein axis.
+- Private `_differential_expression`: `pvalue` is the chi-square survival function in
+  float64 (was `1 - cdf` in float32, which gave exactly 0 for large statistics). The
+  Benjamini-Hochberg family (all cells times all fixed covariates) is unchanged and now
+  documented.
+- Counterfactual support and admissibility scoring is vectorised in chunks; scores are
+  bit-identical to the per-pair loop.
+- Backed AnnData: `get_latent_representation`, the counterfactual and enrichment encoders
+  and `collect_u_posterior` returned rows in sorted order (scvi-tools sorts backed
+  minibatches) while labelling them in request order, so non-ascending `indices` swapped
+  cells. Backed requests now load each cell once in ascending order and map rows back;
+  repeated indices also work. In-memory AnnData takes the same path as before.
 
 ### Changed (defaults now follow released MrVI in part)
 
@@ -134,13 +199,21 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 
 ### Known open issues (from the 2026-11-17 Fable and Opus reviews; not fixed)
 
+- Inherited from upstream TOTALVAE: with `n_samples > 1` the library posterior is drawn with
+  `ql.sample()`, so it carries no gradient. Training never passes `n_samples`, so only
+  evaluation calls use it.
+- Kept for upstream MrVI parity (user, 2026-11-20), now warned or documented: the private DE
+  path's per-covariate Wald statistic mixes correlated covariates (sqrt(X^T M X) prefactor),
+  rejected samples still enter the eps standardisation, and `lfc_std` averages per-batch
+  variances.
 - `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
 - The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
 - `train()` overwrites `lr` and KL warm-up passed through `plan_kwargs`; pass them to `train()`.
 - Local sample distances are not masked for sample support.
-- Outputs assume dataloader row order equals `indices` order; backed AnnData can break this.
-- `library_policy="sample_balanced_marginal"` runs one full decode per distinct library value.
+- `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
+  context; above 1024 contexts it now fails rather than running (no binning, by design).
 - The seed combiner does not compare `specified_panel` or the enrichment contrast settings.
-- Test gaps: the hierarchy tests pass on an untrained model, no known-answer test covers DA on the
+- Test gaps: the hierarchy tests pass on an untrained model (now named `*_wiring`; no
+  donor-recovery test exists yet), no known-answer test covers DA on the
   default `omit_original_sample=True` path, and the shared training helper passes `lr` through
   `plan_kwargs`, so it is ignored.

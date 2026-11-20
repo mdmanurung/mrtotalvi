@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import uuid
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -19,8 +20,12 @@ from torch.distributions import Normal
 from scvi import REGISTRY_KEYS
 from scvi.module._constants import MODULE_KEYS
 
+from ._stats import _loader_order
+
 SCHEMA_VERSION = "mrtotalvi-counterfactual-v1"
 MAX_IN_MEMORY_BYTES = 512 * 1024 * 1024
+# Each marginal context scenario is one full decode pass over the query cells.
+MAX_CONTEXT_SCENARIOS = 1024
 INTERPRETATION = "registered-sample model transformation; non-causal"
 
 
@@ -33,6 +38,14 @@ def _as_indices(adata, indices, *, name: str) -> np.ndarray:
             if result.ndim != 1 or result.size != adata.n_obs:
                 raise ValueError(f"{name} boolean mask must have length adata.n_obs.")
             result = np.flatnonzero(result)
+        elif result.size and not np.issubdtype(result.dtype, np.integer):
+            # Accept a float index only when it is a whole number: a cast would turn
+            # 1.9 into cell 1 without an error.
+            is_whole = np.issubdtype(result.dtype, np.floating) and np.all(
+                np.isfinite(result) & (result == np.round(result))
+            )
+            if not is_whole:
+                raise ValueError(f"{name} must contain integer observation indices.")
         result = result.astype(np.int64, copy=False)
     if result.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional.")
@@ -146,9 +159,10 @@ def _counter_normal_noise(
 
 
 def _encode_u_params(model, adata, indices: np.ndarray, batch_size: int):
+    loader_indices, inverse = _loader_order(adata, indices)
     loader = model._make_data_loader(
         adata=adata,
-        indices=indices,
+        indices=loader_indices,
         batch_size=batch_size,
     )
     locs = []
@@ -178,17 +192,21 @@ def _encode_u_params(model, adata, indices: np.ndarray, batch_size: int):
                 )
     finally:
         model.module.train(was_training)
-    return (
+    params = (
         torch.cat(locs).numpy().astype(np.float32, copy=False),
         torch.cat(scales).numpy().astype(np.float32, copy=False),
         torch.cat(observed_samples).numpy().astype(np.int64, copy=False),
     )
+    if inverse is None:
+        return params
+    return tuple(values[inverse] for values in params)
 
 
 def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int):
+    loader_indices, inverse = _loader_order(adata, indices)
     loader = model._make_data_loader(
         adata=adata,
-        indices=indices,
+        indices=loader_indices,
         batch_size=batch_size,
     )
     batches = []
@@ -240,7 +258,7 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
     finally:
         if uses_latent_library:
             model.module.train(was_training)
-    return {
+    context = {
         "batch": torch.cat(batches).numpy().astype(np.int64),
         "panel": torch.cat(panels).numpy().astype(np.int64),
         "sample": torch.cat(samples).numpy().astype(np.int64),
@@ -257,6 +275,12 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
         ),
         "library_estimand": library_estimand,
     }
+    if inverse is not None:
+        # Per-cell arrays go back to request order; the estimand label is a string.
+        for key, values in context.items():
+            if isinstance(values, np.ndarray):
+                context[key] = values[inverse]
+    return context
 
 
 def _mapping(model, registry_key: str) -> np.ndarray:
@@ -460,61 +484,95 @@ def _build_context_scenarios(
                     ),
                 )
                 context_weights[key] = context_weights.get(key, 0.0) + row_weight
+        if len(context_weights) > MAX_CONTEXT_SCENARIOS:
+            raise ValueError(
+                f"The marginal reference gives {len(context_weights)} distinct "
+                f"technical contexts (limit {MAX_CONTEXT_SCENARIOS}); each is one "
+                "decode pass. library_policy='sample_balanced_marginal' keys every "
+                "distinct reference library size. Subset marginal_reference_indices."
+            )
 
+        # A field set by the context is a read-only broadcast view, and an observed
+        # field is the shared array, so S scenarios add no n_cells x S copies.
         scenarios = []
         for (context_batch, context_panel, context_library), weight in sorted(
             context_weights.items()
         ):
-            scenario_batch = batch.copy()
-            scenario_panel = panel.copy()
-            scenario_library = library.copy()
-            if batch_marginal:
-                scenario_batch.fill(context_batch)
-                scenario_panel.fill(context_panel)
-            if library_marginal:
-                scenario_library.fill(context_library)
             scenarios.append(
                 {
-                    "batch": scenario_batch,
-                    "panel": scenario_panel,
-                    "library": scenario_library,
-                    "weight": np.full(n_cells, weight, dtype=np.float32),
+                    "batch": (
+                        np.broadcast_to(np.int64(context_batch), (n_cells,))
+                        if batch_marginal
+                        else batch
+                    ),
+                    "panel": (
+                        np.broadcast_to(np.int64(context_panel), (n_cells,))
+                        if batch_marginal
+                        else panel
+                    ),
+                    "library": (
+                        np.broadcast_to(np.float32(context_library), (n_cells,))
+                        if library_marginal
+                        else library
+                    ),
+                    "weight": np.broadcast_to(np.float32(weight), (n_cells,)),
                 }
             )
 
-    context_payload = json.dumps(
-        [
-            {
-                "batch": scenario["batch"].tolist(),
-                "library": [
-                    float(value) for value in scenario["library"]
-                ],
-                "panel": scenario["panel"].tolist(),
-                "weight": [
-                    float(value) for value in scenario["weight"]
-                ],
-            }
-            for scenario in scenarios
-        ],
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return scenarios, hashlib.sha256(context_payload.encode()).hexdigest()
+    # The hash input is the JSON list of scenario tables (sort_keys, compact
+    # separators), fed to sha256 one scenario at a time.
+    context_hash = hashlib.sha256(b"[")
+    for position, scenario in enumerate(scenarios):
+        if position:
+            context_hash.update(b",")
+        context_hash.update(
+            (
+                '{"batch":' + _json_array(scenario["batch"], as_float=False)
+                + ',"library":' + _json_array(scenario["library"], as_float=True)
+                + ',"panel":' + _json_array(scenario["panel"], as_float=False)
+                + ',"weight":' + _json_array(scenario["weight"], as_float=True)
+                + "}"
+            ).encode()
+        )
+    context_hash.update(b"]")
+    return scenarios, context_hash.hexdigest()
+
+
+def _json_array(values: np.ndarray, *, as_float: bool) -> str:
+    """Compact JSON list of a per-cell array; a constant broadcast is written once."""
+    if values.size and values.strides == (0,):
+        value = values[0]
+        token = json.dumps(float(value) if as_float else int(value))
+        return "[" + ",".join([token] * values.size) + "]"
+    items = [float(value) for value in values] if as_float else values.tolist()
+    return json.dumps(items, separators=(",", ":"))
 
 
 def _max_component_log_prob(
-    point: np.ndarray,
+    points: np.ndarray,
     component_loc: np.ndarray,
     component_scale: np.ndarray,
-    keep: np.ndarray,
-) -> float:
-    if not np.any(keep):
-        return math.nan
-    point_tensor = torch.as_tensor(point, dtype=torch.float32)
-    loc_tensor = torch.as_tensor(component_loc[keep], dtype=torch.float32)
-    scale_tensor = torch.as_tensor(component_scale[keep], dtype=torch.float32)
-    values = Normal(loc_tensor, scale_tensor).log_prob(point_tensor).sum(dim=-1)
-    return float(values.max().item())
+    exclude,
+) -> np.ndarray:
+    """Max diagonal-Gaussian component log density for each point, in row chunks.
+
+    ``exclude(start, stop)`` returns a boolean ``(stop - start, n_components)`` mask of
+    components to skip for those points. A point with every component skipped is -inf.
+    """
+    n_components, n_latent = component_loc.shape
+    chunk_size = max(1, 2**24 // max(n_components * n_latent, 1))
+    components = Normal(
+        torch.as_tensor(component_loc, dtype=torch.float32),
+        torch.as_tensor(component_scale, dtype=torch.float32),
+    )
+    scores = np.empty(points.shape[0], dtype=np.float64)
+    for start in range(0, points.shape[0], chunk_size):
+        stop = min(start + chunk_size, points.shape[0])
+        point_tensor = torch.as_tensor(points[start:stop], dtype=torch.float32)
+        values = components.log_prob(point_tensor[:, None, :]).sum(dim=-1)
+        values[torch.as_tensor(exclude(start, stop))] = -math.inf
+        scores[start:stop] = values.max(dim=1).values.numpy()
+    return scores
 
 
 def _support_and_admissibility(
@@ -550,31 +608,29 @@ def _support_and_admissibility(
         loc = reference_loc[target_mask]
         scale = reference_scale[target_mask]
         names = reference_names[target_mask]
-        keep_by_query = [names != query_name for query_name in query_names]
-        for query_position, keep in enumerate(keep_by_query):
-            support[query_position, target_position] = bool(np.any(keep))
+        if names.size == 0:
+            continue
+        # A query cell is never scored against its own component; support needs
+        # at least one other component.
+        unique_names, name_counts = np.unique(names, return_counts=True)
+        lookup = np.minimum(np.searchsorted(unique_names, query_names), unique_names.size - 1)
+        n_self = np.where(unique_names[lookup] == query_names, name_counts[lookup], 0)
+        support[:, target_position] = names.size > n_self
         if loc.shape[0] < 2:
             continue
 
-        reference_scores = np.empty(loc.shape[0], dtype=np.float64)
-        for component_index in range(loc.shape[0]):
-            keep = np.ones(loc.shape[0], dtype=bool)
-            keep[component_index] = False
-            reference_scores[component_index] = _max_component_log_prob(
-                loc[component_index],
-                loc,
-                scale,
-                keep,
-            )
-        threshold = float(np.quantile(reference_scores, support_quantile))
+        def leave_one_out(start, stop, n_components=loc.shape[0]):
+            return np.arange(start, stop)[:, None] == np.arange(n_components)[None, :]
 
-        for query_position, point in enumerate(query_loc):
-            keep = keep_by_query[query_position]
-            score = _max_component_log_prob(point, loc, scale, keep)
-            admissible[query_position, target_position] = bool(
-                np.isfinite(score)
-                and score - threshold > admissibility_threshold
-            )
+        def self_match(start, stop, names=names):
+            return names[None, :] == query_names[start:stop, None]
+
+        reference_scores = _max_component_log_prob(loc, loc, scale, leave_one_out)
+        threshold = float(np.quantile(reference_scores, support_quantile))
+        scores = _max_component_log_prob(query_loc, loc, scale, self_match)
+        admissible[:, target_position] = np.isfinite(scores) & (
+            scores - threshold > admissibility_threshold
+        )
     return support, admissible
 
 
@@ -1966,9 +2022,17 @@ def local_sample_enrichment(
         )
         for group_position, group in enumerate(group_order):
             positions = np.flatnonzero(group_values == group)
-            group_density[..., group_position] = (
-                np.logaddexp.reduce(density[..., positions], axis=-1)
-                - math.log(positions.size)
+            # A sample with no retained reference (a factual singleton) is NaN;
+            # it carries no weight, and a group with no usable sample is NaN.
+            member_density = density[..., positions]
+            usable = ~np.isnan(member_density)
+            n_usable = usable.sum(axis=-1)
+            with np.errstate(divide="ignore"):
+                reduced = np.logaddexp.reduce(
+                    np.where(usable, member_density, -np.inf), axis=-1
+                ) - np.log(np.maximum(n_usable, 1)).astype(np.float32)
+            group_density[..., group_position] = np.where(
+                n_usable > 0, reduced, np.nan
             )
         data_vars["group_log_density"] = (
             ("draw", "cell_name", "group"),
@@ -2044,13 +2108,19 @@ def local_sample_enrichment(
             ("draw", "cell_name", "donor"),
             donor_log_ratio,
         )
+        # A donor whose pair has a NaN sample density is skipped in the summaries;
+        # a cell with no usable donor is NaN.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            donor_mean = np.nanmean(donor_log_ratio, axis=-1, dtype=np.float64)
+            donor_median = np.nanmedian(donor_log_ratio, axis=-1)
         data_vars["donor_log_ratio_mean"] = (
             ("draw", "cell_name"),
-            np.mean(donor_log_ratio, axis=-1, dtype=np.float64).astype(np.float32),
+            donor_mean.astype(np.float32),
         )
         data_vars["donor_log_ratio_median"] = (
             ("draw", "cell_name"),
-            np.median(donor_log_ratio, axis=-1).astype(np.float32),
+            donor_median.astype(np.float32),
         )
         coords["donor"] = donor_order
 

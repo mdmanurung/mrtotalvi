@@ -908,3 +908,21 @@ def test_continuous_covariates_bypass_the_categorical_encoder(adata_basic):
     assert "cont1" not in dm._dataset.encoders
     assert "cont1" not in dm._dataset.categories
     assert "cont1" in dm._dataset._continuous_keys
+
+
+def test_training_and_validation_gene_axes_must_agree_exactly():
+    train = _make_adata(seed=1)
+    validation = _make_adata(seed=2)
+    # Same genes, reversed order; the expected order comes from slicing by name.
+    validation = validation[:, train.var_names[::-1]].copy()
+    assert list(validation.var_names) == list(train.var_names)[::-1]
+    with pytest.raises(ValueError, match="Training and validation.*gene"):
+        MrTotalVIBatchDataModule(
+            train,
+            collection_val=validation,
+            protein_expression_obsm_key="protein_expression",
+            protein_names_uns_key="protein_names",
+            sample_key="sample",
+            batch_key="batch",
+            parallel=False,
+        )
