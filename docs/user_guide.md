@@ -166,6 +166,11 @@ by_cluster = model.get_local_sample_distances(groupby="cluster", keep_cell=False
 by_cluster["cluster_distances"].sel(cluster="B")  # (sample_x, sample_y)
 ```
 
+Both local methods report every cell-sample pair by default, as upstream MrVI. Pass
+`admissibility=model.get_outlier_cell_sample_pairs()["is_admissible"]` to set pairs without
+sample support to NaN; group means then average each sample pair over the supported cells, with
+counts in `<column>_n_cells`.
+
 `model.sample_info` has one row per registered sample, in `sample_order` (the embedding row
 order); use `sample_order` when you need the labels.
 
@@ -398,6 +403,12 @@ Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
   `scale_observations=True` and `hierarchy_mode="legacy"` the per-cell ELBO is divided by the
   sample's cell count while the adversarial loss is not, so the adversary carries a much larger relative weight (inferred from the code, not measured). Pass
   `adversarial_classifier=False` to turn it off.
+- **Opt-in objectives (unvalidated on real data).** `residual_prior_mode="factual"`
+  (`centered_v2` only) scores the cell's factual centered residual instead of the mean over raw
+  residuals, which makes a sample-private residual about `S - 1` times cheaper (ADR-0007
+  amendment). `anneal_protein_likelihood=False` stops scaling the protein likelihood by
+  `kl_weight` during warm-up; by default (upstream TOTALVI) it gets no gradient at
+  `kl_weight=0`. Both change training; compare matched-seed fits before relying on either.
 
 Protein scale in inherited methods. The loss fits protein counts with means
 `per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that
