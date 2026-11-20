@@ -709,6 +709,46 @@ def _estimate_latent_bytes(
     return math.ceil(raw_bytes * 1.2)
 
 
+def _residual_working_bytes(
+    model, *, n_cells: int, n_draws: int, target_chunk_size: int | None
+) -> int:
+    """Peak bytes of one minibatch's all-registered-sample residual pass.
+
+    Centering needs every registered sample's residual, so each minibatch holds
+    ``eps_raw``, ``eps_centered`` and ``z`` for all of them, and the attention block runs
+    on ``draw x cell x target-chunk`` rows. Bytes per attention row are counted from the
+    output sizes of every ``qz`` submodule on one row (measured at about 1.6 times the
+    real peak, so the estimate is conservative).
+    """
+    module = model.module
+    n_samples = int(module._n_sample)
+    chunk = min(int(target_chunk_size or n_samples), n_samples)
+    elements = [0]
+
+    def count(_module, _inputs, output):
+        outputs = output if isinstance(output, tuple) else (output,)
+        elements[0] += sum(t.numel() for t in outputs if torch.is_tensor(t))
+
+    hooks = [sub.register_forward_hook(count) for sub in module.qz.modules() if sub is not module.qz]
+    was_training = module.qz.training
+    module.qz.eval()
+    try:
+        with torch.inference_mode():
+            parameter = next(module.qz.parameters())
+            module.qz(
+                torch.zeros(1, module.n_latent_u, device=parameter.device),
+                torch.zeros(1, 1, dtype=torch.long, device=parameter.device),
+            )
+    finally:
+        for hook in hooks:
+            hook.remove()
+        module.qz.train(was_training)
+    rows = n_draws * n_cells
+    attention = rows * chunk * elements[0]
+    residuals = rows * n_samples * 3 * module.n_latent
+    return 4 * (attention + residuals)
+
+
 def _estimate_expression_bytes(
     *,
     n_cells: int,
@@ -1100,11 +1140,19 @@ def get_counterfactual_latent(
         n_quantiles=quantile_values.size,
         posterior_mc=inference_mode == "posterior_mc",
     )
+    # The all-registered-sample residual pass dominates peak memory with many samples.
+    estimated_bytes += _residual_working_bytes(
+        model,
+        n_cells=min(batch_size, query_indices.size),
+        n_draws=n_draws,
+        target_chunk_size=target_chunk_size,
+    )
     if zarr_path is None and estimated_bytes > MAX_IN_MEMORY_BYTES:
         raise MemoryError(
             f"Estimated in-memory materialization is {estimated_bytes} bytes, "
             f"exceeding the hard 512 MiB ({MAX_IN_MEMORY_BYTES}-byte) limit. "
-            "Subset the request; public streaming/Zarr export is quarantined."
+            "Subset the request (fewer cells per batch_size, draws or registered-sample "
+            "chunks via target_chunk_size); public streaming/Zarr export is quarantined."
         )
     if zarr_path is not None and estimated_bytes > MAX_IN_MEMORY_BYTES:
         per_cell_bytes = _estimate_latent_bytes(
@@ -1398,11 +1446,19 @@ def get_counterfactual_expression(
         n_quantiles=quantile_values.size,
         posterior_mc=inference_mode == "posterior_mc",
     )
+    # The all-registered-sample residual pass dominates peak memory with many samples.
+    estimated_bytes += _residual_working_bytes(
+        model,
+        n_cells=min(batch_size, query_indices.size),
+        n_draws=n_draws,
+        target_chunk_size=target_chunk_size,
+    )
     if zarr_path is None and estimated_bytes > MAX_IN_MEMORY_BYTES:
         raise MemoryError(
             f"Estimated in-memory materialization is {estimated_bytes} bytes, "
             f"exceeding the hard 512 MiB ({MAX_IN_MEMORY_BYTES}-byte) limit. "
-            "Subset the request; public streaming/Zarr export is quarantined."
+            "Subset the request (fewer cells per batch_size, draws or registered-sample "
+            "chunks via target_chunk_size); public streaming/Zarr export is quarantined."
         )
 
     observed_context = _collect_observed_context(

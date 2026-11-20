@@ -998,3 +998,36 @@ def test_specified_batch_also_sets_the_protein_mask_without_a_panel():
             protein_list=proteins[:1], batch_policy="specified", specified_batch="batch_0",
             panel_policy="specified", specified_panel="batch_1",
         )
+
+
+# Memory guard with many registered samples -------------------------------------
+
+
+def test_memory_guard_counts_every_registered_sample():
+    """One target, but centering builds residuals for all 300 registered samples."""
+    import scvi
+
+    adata = scvi.data.synthetic_iid(batch_size=300, n_genes=20, n_proteins=3, n_batches=2)
+    adata.obs["sample"] = [f"s{i % 300}" for i in range(adata.n_obs)]
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        batch_key="batch",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = MrTotalVI(
+            adata, sample_key="sample", n_latent=30, n_latent_u=10, hierarchy_mode="centered_v2",
+            u_encoder_mode="sample_blind",
+        )
+    model.is_trained_ = True
+    # The output alone is small: one target, 256 cells, 32 draws (measured peak ~10 GB).
+    output_only = cf._estimate_latent_bytes(
+        n_cells=256, n_targets=1, n_draws=32, n_latent_u=10, n_latent=30, n_quantiles=3,
+        posterior_mc=True,
+    )
+    assert output_only < cf.MAX_IN_MEMORY_BYTES
+    with pytest.raises(MemoryError, match="512"):
+        model.get_counterfactual_latent(
+            indices=np.arange(256), target_samples=["s0"], inference_mode="posterior_mc",
+            n_draws=32,
+        )

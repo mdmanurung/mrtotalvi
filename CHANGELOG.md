@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- The 512 MiB guard of `get_counterfactual_latent` and `get_counterfactual_expression` sized
+  only the output. Centering builds residuals for every registered sample in each minibatch, so
+  300 registered samples, one target, 256 cells and 32 draws passed an estimate of 5.5 MiB and
+  used about 10 GB. The estimate now adds that working set (attention rows sized from the `qz`
+  layers, about 1.6 times the measured peak), so such requests raise before inference.
 - Counterfactual expression without a registered panel (the panel is the batch):
   `batch_policy="specified"` decoded in the specified batch but masked proteins by the cell's
   observed batch, so a protein never measured in the specified batch got a value from decoder

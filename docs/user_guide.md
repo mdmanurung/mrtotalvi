@@ -259,8 +259,11 @@ Technical contexts are explicit:
   for the library policy, each distinct library size) is one decode pass; more
   than 1024 contexts fail, so subset `marginal_reference_indices`.
 
-In-memory output has a hard 512 MiB estimate including summaries and overhead. Requests above that
-limit must be reduced through explicit cell, target, or feature subsetting. Public `zarr_path` /
+In-memory output has a hard 512 MiB estimate including summaries and overhead. The estimate also
+counts the per-minibatch residual pass, which covers every registered sample (centering needs
+all of them) and grows with `batch_size`, draws and `target_chunk_size`; it overestimates the
+measured peak by about 1.6 times. Requests above the limit must be reduced through explicit cell,
+target, feature, `batch_size` or `target_chunk_size` subsetting. Public `zarr_path` /
 `zarr_chunks` streaming is quarantined and fails before filesystem access.
 
 All targets are limited to registered samples. These datasets are model-based,
