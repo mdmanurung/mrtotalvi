@@ -110,7 +110,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Whether ``pz_scale`` is a learnable parameter. With ``use_map=True`` the
         ``eps`` term is ``-log p(eps)`` at a point, which can be negative, so
         :meth:`get_elbo` values are comparable only within one configuration (same
-        ``use_map``, ``hierarchy_mode``, prior scales and KL weights).
+        ``use_map``, ``hierarchy_mode``, prior scales and KL weights). With
+        ``use_map=True`` the optimizer also shrinks ``pz_scale`` and ``eps`` together
+        until the ``-4`` clamp stops the scale, which removes most of the donor residual
+        (one synthetic run: ``eps`` RMS 0.003 against 0.085 by default after 600 epochs);
+        a warning says so. Upstream MrVI has the same option.
     u_prior
         Resolved prior enum: exactly ``"standard"``, ``"mog"``, or ``"vamp"``.
         New calls default to ``"mog"``.
@@ -342,6 +346,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
         if hierarchy_mode not in {"legacy", "centered_v2"}:
             raise ValueError("hierarchy_mode must be one of {'legacy', 'centered_v2'}.")
+        if learn_z_u_prior_scale and use_map:
+            warnings.warn(
+                "learn_z_u_prior_scale=True with use_map=True shrinks pz_scale and eps "
+                "together until the -4 clamp, which removes most of the donor residual. "
+                "Keep the default fixed scale unless you mean to.",
+                UserWarning,
+                stacklevel=2,
+            )
         if residual_prior_mode == "factual" and hierarchy_mode != "centered_v2":
             raise ValueError("residual_prior_mode='factual' requires hierarchy_mode='centered_v2'.")
         if u_encoder_mode not in {"sample_conditioned", "sample_blind"}:

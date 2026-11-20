@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `learn_z_u_prior_scale=True` with `use_map=True` now warns at construction: the optimizer
+  shrinks `pz_scale` and `eps` together until the `-4` clamp, which removes most of the donor
+  residual (`eps` RMS 0.003 against 0.085 by default in one synthetic run). Training is
+  unchanged (user decision, 2026-11-20). The test that asserted `pz_scale >= -4` after
+  training is fixed; the clamp acts where the scale is used, not on the parameter.
 - `get_normalized_expression` on backed AnnData with non-ascending `indices` returned rows in
   sorted order labelled in request order (upstream behaviour the earlier backed fix missed); it
   now returns them in request order. `get_feature_correlation_matrix(log_transform=True)` raised

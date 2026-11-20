@@ -1064,3 +1064,10 @@ def test_feature_correlation_log_transform_runs():
     corr = model.get_feature_correlation_matrix(adata=adata, n_samples=2, log_transform=True)
     n_features = model.summary_stats.n_vars + model.summary_stats.n_proteins
     assert corr.shape == (n_features, n_features)
+
+
+def test_learnable_prior_scale_with_map_warns():
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    with pytest.warns(UserWarning, match="removes most of the donor residual"):
+        MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", learn_z_u_prior_scale=True)
