@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `train()` warns when it overrides a `plan_kwargs` value (`lr`, `n_steps_kl_warmup`,
+  `n_epochs_kl_warmup`, `reduce_lr_on_plateau`, `adversarial_classifier`). The precedence is
+  unchanged and follows TOTALVI: the `train()` argument wins.
 - `MrTotalVI.load_query_data` and `MrTotalVI.minify_adata` now raise `NotImplementedError`
   pointing to `docs/user_guide.md`. The inherited `load_query_data` loaded a query with new
   samples, froze the sample tables and left the new samples with random embeddings while
@@ -208,7 +211,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
   variances.
 - `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
 - The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
-- `train()` overwrites `lr` and KL warm-up passed through `plan_kwargs`; pass them to `train()`.
 - Local sample distances are not masked for sample support.
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).

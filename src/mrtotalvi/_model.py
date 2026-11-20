@@ -829,6 +829,39 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             adversarial_classifier=adversarial_classifier,
         )
 
+        # TOTALVI.train() overwrites these plan_kwargs keys with its own arguments
+        # (scvi/model/_totalvi.py:321-329). Keep that precedence, but say so.
+        effective = {
+            "lr": lr,
+            "adversarial_classifier": (
+                self._use_adversarial_classifier
+                if adversarial_classifier is None
+                else adversarial_classifier
+            ),
+            "reduce_lr_on_plateau": reduce_lr_on_plateau,
+            "n_epochs_kl_warmup": n_epochs_kl_warmup,
+            "n_steps_kl_warmup": (
+                int(0.75 * self.adata.n_obs)
+                if n_steps_kl_warmup is None
+                else n_steps_kl_warmup
+            ),
+        }
+        ignored = {
+            key: (value, effective[key])
+            for key, value in (plan_kwargs or {}).items()
+            if key in effective and value != effective[key]
+        }
+        if ignored:
+            details = ", ".join(
+                f"{key}={given!r} (used {used!r})" for key, (given, used) in ignored.items()
+            )
+            warnings.warn(
+                f"plan_kwargs values ignored, train() arguments win: {details}. "
+                "Pass these to train() directly.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         plan_kwargs = {**DEFAULT_PLAN_KWARGS, **(plan_kwargs or {})}
 
         return super().train(

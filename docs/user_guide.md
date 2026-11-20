@@ -390,7 +390,8 @@ Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
   `kl_z` and the background KL are down-weighted for the whole run. Pass `max_epochs`,
   `n_steps_kl_warmup` or `n_epochs_kl_warmup` to make it finish. Pass these (and `lr`) to
   `train()` directly: `train()` overwrites the same keys inside `plan_kwargs` with its own
-  defaults, so `plan_kwargs={"n_epochs_kl_warmup": 40}` has no effect.
+  defaults, so `plan_kwargs={"n_epochs_kl_warmup": 40}` has no effect. A `UserWarning` names
+  every such ignored value.
 - **Adversarial batch classifier.** It is on whenever a protein has all-zero counts in some batch
   and `override_missing_proteins=False`. It acts on `z = u + eps`, not on `u` alone, so
   it can penalise donor information in `eps` when donors are nested in batches. With the legacy

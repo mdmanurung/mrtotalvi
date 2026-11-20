@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -161,3 +163,42 @@ def test_load_with_positional_prefix(adata, tmp_path):
     loaded = MrTotalVI.load(tmp_path / "m", adata, "cpu", "auto", "run1_")
     assert loaded.init_params_["non_kwargs"]["spec_defaults"] is True
     assert loaded.module.qz.dropout_rate == 0.03
+
+
+def test_conflicting_plan_values_warn_without_changing_precedence(adata, monkeypatch):
+    """train() arguments still win over plan_kwargs (as TOTALVI), now with a warning."""
+    model = MrTotalVI(
+        adata,
+        sample_key="sample",
+        u_prior="standard",
+        empirical_protein_background_prior=False,
+    )
+    seen = {}
+
+    def runner(_model, **kwargs):
+        seen["plan"] = kwargs["training_plan"]
+        return lambda: None
+
+    monkeypatch.setattr(model, "_train_runner_cls", runner)
+    supplied = {"lr": 0.123, "n_steps_kl_warmup": 7, "n_epochs_kl_warmup": 40}
+    before = supplied.copy()
+    with pytest.warns(UserWarning, match="plan_kwargs values ignored"):
+        model.train(max_epochs=1000, accelerator="cpu", plan_kwargs=supplied)
+
+    # Expected values: the train() defaults and scvi/model/_totalvi.py:315-329.
+    plan = seen["plan"]
+    assert plan.lr == 2e-3
+    assert plan.n_steps_kl_warmup == int(0.75 * adata.n_obs)
+    assert plan.n_epochs_kl_warmup is None
+    assert supplied == before
+
+
+def test_matching_plan_values_do_not_warn(adata, monkeypatch):
+    model = MrTotalVI(
+        adata, sample_key="sample", u_prior="standard", empirical_protein_background_prior=False
+    )
+    monkeypatch.setattr(model, "_train_runner_cls", lambda _model, **kwargs: lambda: None)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.train(max_epochs=1000, accelerator="cpu", plan_kwargs={"lr": 2e-3, "eps": 1e-8})
+    assert not any("plan_kwargs values ignored" in str(w.message) for w in caught)
