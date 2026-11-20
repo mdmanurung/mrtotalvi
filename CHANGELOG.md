@@ -4,6 +4,58 @@
 
 ### Fixed
 
+- Tests: the donor-recovery test now also needs Spearman `rho >= 0.95`. Its exact p reaches
+  the floor 4.96e-5 after 10 epochs, so `p <= 0.01` alone passed an undertrained model (rho
+  0.69-0.93 at 10 epochs, 0.983 at 100, seeds 0-2; user decision, 2026-11-20). New tests
+  cover six code paths a mutation run showed were untested.
+- Small input and doc fixes (no numbers change). Counterfactual methods reject a `random_state`
+  outside `[0, 2**32)` or of a non-integer type, and an empty `indices` selection, before
+  inference. A transfer `adata` missing the protein-names `uns` key now warns that the protein
+  order is unchecked. `get_local_sample_distances(groupby=...)` raises on missing labels. The
+  seed combiner warns when an entry is NaN in only some seeds. The private registry adapter keeps
+  a pandas Categorical's category order, as `setup_anndata` does. Docstrings and the user guide
+  now state: uniform LFC weights over every registered batch; NaN (not `-inf`) for a group with
+  no reference under `"posterior"`; an analytic `kl_u` for the standard prior; nearly identical
+  Vamp components without `init_prior_from_data`; and the kNN small-sample bias.
+- `learn_z_u_prior_scale=True` with `use_map=True` now warns at construction: the optimizer
+  shrinks `pz_scale` and `eps` together until the `-4` clamp, which removes most of the donor
+  residual (`eps` RMS 0.003 against 0.085 by default in one synthetic run). Training is
+  unchanged (user decision, 2026-11-20). The test that asserted `pz_scale >= -4` after
+  training is fixed; the clamp acts where the scale is used, not on the parameter.
+- `get_normalized_expression` on backed AnnData with non-ascending `indices` returned rows in
+  sorted order labelled in request order (upstream behaviour the earlier backed fix missed); it
+  now returns them in request order. `get_feature_correlation_matrix(log_transform=True)` raised
+  `AttributeError` (upstream reads the undefined `self.n_genes`); it now uses the gene count.
+- The 512 MiB guard of `get_counterfactual_latent` and `get_counterfactual_expression` sized
+  only the output. Centering builds residuals for every registered sample in each minibatch, so
+  300 registered samples, one target, 256 cells and 32 draws passed an estimate of 5.5 MiB and
+  used about 10 GB. The estimate now adds that working set (attention rows sized from the `qz`
+  layers, about 1.6 times the measured peak), so such requests raise before inference.
+- Counterfactual expression without a registered panel (the panel is the batch):
+  `batch_policy="specified"` decoded in the specified batch but masked proteins by the cell's
+  observed batch, so a protein never measured in the specified batch got a value from decoder
+  weights the masked likelihood never trained. The mask now follows the specified batch, and a
+  conflicting `specified_panel` raises (user decision, 2026-11-20).
+- A second `train()` call, or `train()` after `load`, ran with the module in eval mode:
+  scvi-tools leaves it there after a fit and after load, and Lightning >= 2.6 no longer
+  switches it back. Dropout was off and the `u_invariance_weight` penalty was skipped.
+  `train()` now sets train mode first, so every fit runs like the first (user decision,
+  2026-11-20). Continued-training results change; stock TOTALVI behaves the old way.
+- Private DE path with `donor_key`: the design dropped the first donor's column and has no
+  intercept, so that donor's residual level leaked into the fixed-effect `beta` (a pure patient
+  offset of 3 gave a time `beta` of 0.9 or -0.3, by donor order). Every donor now gets its own
+  offset column, as upstream MrVI adds batch offsets (user decision, 2026-11-20). `beta`,
+  `effect_size`, p-values and LFC change whenever `donor_key` is set.
+- Regressions from the 2026-11-20 fixes: a boolean `indices` mask on backed AnnData raised
+  `IndexError` (it was passed to `np.unique`); a `residual_prior_mode="factual"` checkpoint
+  loaded with `hierarchy_mode_override="legacy"` could not be reloaded (the override now resets
+  the mode to `"raw_mean"`, with a warning); and an old seed result combined with a new one
+  raised "different estimands" (a setting present in only some results is now reported as
+  unverifiable).
+- The seed combiner also compares the technical context: counterfactual expression records
+  `specified_library_size` and a digest of the marginal reference cells, and enrichment records
+  a digest of its reference cells and `max_reference_cells_per_sample`. Seeds run with library
+  size 1 and 1000 used to pool into one between-seed SD.
 - New known-answer donor-recovery test: 8 donors with planted RNA effects (log-ratio
   -2.8 to 2.8), package defaults, 100 epochs. Donor distances must rank the planted effects
   with an exact donor-permutation p <= 0.01 on each of training seeds 0, 1 and 2. Untrained

@@ -48,9 +48,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         z = z_{\\text{base}}(u) + \\varepsilon,\\quad
         \\varepsilon \\sim \\text{AttentionBlock}(u,\\; e_d)
 
-    Because ``n_latent_u`` is left at its default (isomorphic), ``z_base = u``
-    and the decoder input dimension is identical to stock TotalVI, so the hierarchy
-    itself needs no decoder changes. Setting ``batch_representation="embedding"`` is
+    The decoder input is ``z`` with ``n_latent`` dimensions, as in stock TotalVI, so
+    the hierarchy itself needs no decoder changes. With ``n_latent_u=None`` (the module
+    default) ``z_base = u``; the model default ``n_latent_u=10`` projects ``u`` to
+    ``n_latent`` inside :class:`~._components.EncoderUZ`. Setting ``batch_representation="embedding"`` is
     separate and does change the decoder: it is rebuilt without the batch category,
     widened by the embedding dimension, and wrapped in
     :class:`~._components.BatchEmbeddingDecoderAdapter`. See that parameter.
@@ -713,9 +714,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             z_base, eps = qz(u, cf_sample)              # attention over per-sample embed
             z  = z_base + eps                           # → decoder input
 
-        ``QZ_KEY`` in the returned dict is replaced with ``qu`` so that
-        TotalVI's ``loss()`` computes ``kl_u = KL(qu, N(0,1))`` automatically.
-        Our ``loss()`` override then adds ``kl_z = -log p(eps)``.
+        ``QZ_KEY`` in the returned dict is replaced with ``qu``. Our ``loss()``
+        override computes ``kl_u = KL(qu || p(u))`` with the configured ``u`` prior
+        (standard, MoG or Vamp) and adds ``kl_z`` for ``eps``.
 
         Parameters
         ----------
@@ -889,6 +890,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             + lkl_protein_expressed.sum(dim=-1)
         )
 
+        # loss() rebuilds the training loss from the per-cell terms below, so this
+        # scalar only keeps the LossOutput complete for direct callers.
         protein_weight = kl_weight if self.anneal_protein_likelihood else 1.0
         loss = torch.mean(
             reconst_loss_gene

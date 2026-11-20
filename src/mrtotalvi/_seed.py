@@ -32,7 +32,16 @@ _ESTIMAND_ATTRS = (
     "group_key",
     "contrast",
     "donor_key",
+    "specified_library_size",
+    "marginal_reference",
+    "reference_cells",
+    "max_reference_cells_per_sample",
 )
+
+# Settings added to result attrs after results were already being saved. A result that
+# lacks one cannot be checked against a result that has it, so the pair is reported as
+# unverifiable instead of as a mismatch.
+_LATER_SETTING_ATTRS = frozenset(_ESTIMAND_ATTRS[_ESTIMAND_ATTRS.index("specified_panel") :])
 
 # Outputs that depend on a setting, and the attribute that records it. Results written
 # before the attribute existed lack it, so their settings cannot be compared.
@@ -89,6 +98,11 @@ def combine_mrtotalvi_seed_results(
             if output in dataset.data_vars and setting not in dataset.attrs
         }
         | {
+            key
+            for key in _LATER_SETTING_ATTRS
+            if len({key in dataset.attrs for dataset in datasets}) > 1
+        }
+        | {
             "specified_panel"
             for dataset in datasets
             if dataset.attrs.get("panel_policy") == "specified"
@@ -118,7 +132,11 @@ def combine_mrtotalvi_seed_results(
         mismatched = [
             key
             for key in _ESTIMAND_ATTRS
-            if dataset.attrs.get(key) != template.attrs.get(key)
+            if not (
+                key in _LATER_SETTING_ATTRS
+                and (key not in dataset.attrs or key not in template.attrs)
+            )
+            and dataset.attrs.get(key) != template.attrs.get(key)
         ]
         if mismatched:
             raise ValueError(
@@ -141,6 +159,7 @@ def combine_mrtotalvi_seed_results(
     )
     additions = {}
     skipped_latent: list[str] = []
+    partial_variables: list[str] = []
     for variable_name, variable in combined.data_vars.items():
         if "draw" not in variable.dims or not np.issubdtype(
             variable.dtype,
@@ -173,7 +192,20 @@ def combine_mrtotalvi_seed_results(
             continue
         additions[between_mean_name] = within_mean.mean("training_seed")
         additions[between_sd_name] = within_mean.std("training_seed", ddof=1)
+        n_partial = int(
+            (within_mean.isnull().any("training_seed") & within_mean.notnull().any("training_seed"))
+            .sum()
+        )
+        if n_partial:
+            partial_variables.append(f"{variable_name} ({n_partial})")
 
+    if partial_variables:
+        warnings.warn(
+            "Some entries are NaN in only some seeds; their between-seed mean and SD use the "
+            f"remaining seeds (variable and entry count): {', '.join(partial_variables)}.",
+            UserWarning,
+            stacklevel=2,
+        )
     combined = combined.assign(additions)
     combined.attrs = dict(template.attrs)
     combined.attrs["uncertainty_separation"] = (

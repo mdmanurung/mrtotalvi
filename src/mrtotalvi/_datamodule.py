@@ -179,7 +179,16 @@ class _InMemoryProteinMappedDataset(Dataset):
                 self.categories[key] = np.asarray(list(reference))
                 self.encoders[key] = dict(reference)
                 continue
-            categories = pd.Series(raw).astype("category").cat.categories.to_numpy(copy=True)
+            columns = [a.obs[key] for a in self._adatas]
+            dtypes = [column.dtype for column in columns]
+            if all(isinstance(dtype, pd.CategoricalDtype) for dtype in dtypes) and all(
+                dtype.categories.equals(dtypes[0].categories) for dtype in dtypes
+            ):
+                # A pandas Categorical keeps its own category order (and unused
+                # categories) under astype("category"), as setup_anndata registers it.
+                categories = dtypes[0].categories.to_numpy(copy=True)
+            else:
+                categories = pd.Series(raw).astype("category").cat.categories.to_numpy(copy=True)
             self.categories[key] = categories
             self.encoders[key] = {cls: i for i, cls in enumerate(categories)}
 

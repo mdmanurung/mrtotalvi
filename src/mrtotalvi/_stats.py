@@ -67,7 +67,10 @@ def _loader_order(adata, indices):
     """
     if indices is None or not getattr(adata, "isbacked", False):
         return indices, None
-    unique_indices, inverse = np.unique(np.asarray(indices), return_inverse=True)
+    indices = np.asarray(indices)
+    if indices.dtype == np.bool_:
+        indices = np.flatnonzero(indices)  # a mask selects rows; np.unique would give [F, T]
+    unique_indices, inverse = np.unique(indices, return_inverse=True)
     return unique_indices, inverse
 
 
@@ -337,7 +340,7 @@ def differential_abundance(
           groups of 4000 and 30 cells, ``knn_k=50``: mean log-enrichment +0.65 towards the
           30-cell group); a warning names such groups.
         - A group with no reference cells for a cell (its own sample under
-          ``omit_original_sample=True``) scores NaN, where ``"posterior"`` gives ``-inf``.
+          ``omit_original_sample=True``) scores NaN, as it does under ``"posterior"``.
         - Group scores are sample-size corrected by cell counts (pooled cells), not by the
           equal-sample ``logmeanexp`` that ``"posterior"`` uses. Samples with more cells
           weigh more in a group.
@@ -568,9 +571,9 @@ def differential_abundance(
     def aggregate(samples: np.ndarray) -> np.ndarray:
         if density_estimator == "knn":
             cols = pd.Index(sample_values).get_indexer(samples)
-            return _knn_log_density(
-                knn_counts[:, cols].sum(axis=1), knn_n_ref[:, cols].sum(axis=1)
-            )
+            n_ref = knn_n_ref[:, cols].sum(axis=1)
+            empty_group[n_ref == 0] = True
+            return _knn_log_density(knn_counts[:, cols].sum(axis=1), n_ref)
         sample_log_probs = agg_ds.loc[{"sample": samples}].values
         if omit_original_sample:
             sample_one_hot = np.zeros((adata.n_obs, len(samples)))
@@ -603,6 +606,7 @@ def differential_abundance(
         for key in sample_cov_keys:
             for value in sample_info[key].unique():
                 samples = sample_info.loc[sample_info[key] == value, sample_key]
+                samples = samples[samples.isin(sample_values)]  # analysed samples only
                 n_group = cells_per_sample.reindex(samples).fillna(0).sum()
                 if 0 < knn_k * n_group / n_reference < 1:
                     small_groups.append(f"{key}={value}")
@@ -682,8 +686,9 @@ def _construct_design_matrix(
     normalize_design_matrix
         Min-max normalize each fixed-effect column to [0, 1].
     donor_key
-        Optional column to add donor dummy columns after the fixed effects as
-        nuisance covariates (not normalized, not reported in output betas).
+        Optional column to add one offset column per donor after the fixed effects, as
+        nuisance covariates (not normalized, not reported in output betas). No donor is
+        dropped, so each donor's level is absorbed and does not leak into the fixed betas.
 
     Returns
     -------
@@ -732,7 +737,10 @@ def _construct_design_matrix(
             cov = sample_info[donor_key]
         if hasattr(cov, "cat"):
             cov = cov.cat.remove_unused_categories()
-        donor_dummies = pd.get_dummies(cov, drop_first=True)
+        # One offset column per donor (no drop_first): the design has no intercept, so a
+        # dropped donor's level would be forced to 0 and leak into the fixed betas. This is
+        # how upstream MrVI adds batch offsets (add_batch_specific_offsets).
+        donor_dummies = pd.get_dummies(cov, drop_first=False)
         donor_mat = donor_dummies.values.astype(np.float32)
         donor_names = np.array([f"{donor_key}_{c}" for c in donor_dummies.columns], dtype=str)
         if n_fixed > 0:
@@ -805,14 +813,14 @@ def _differential_expression(
     store_lfc
         If ``True``, compute and store gene/protein log2-fold-changes (LFC) in
         the returned dataset.  Requires ``model.module`` to implement
-        ``compute_h_from_x_eps``.  LFC is batch-marginalized by weighting over
-        unique batch values observed in each mini-batch. ``lfc_std`` is the square
+        ``compute_h_from_x_eps``.  LFC is batch-marginalized with uniform weights
+        over every registered batch, as in upstream MrVI. ``lfc_std`` is the square
         root of the weighted mean of per-batch MC variances, as in upstream MrVI. It
         ignores the between-batch term and the covariance between batches that share
         MC draws, so it is not the SD of the batch-marginal LFC; it is never smaller.
     donor_key
-        Column in ``adata.obs`` identifying the donor.  Adds donor dummy
-        columns as nuisance covariates; only fixed-effect betas are returned.
+        Column in ``adata.obs`` identifying the donor.  Adds one offset column per
+        donor as nuisance covariates; only fixed-effect betas are returned.
     delta
         Effect-size threshold for the posterior-DE probability (PDE):
         ``pde = P(|lfc| >= delta)``.  Only used when ``store_lfc=True``.

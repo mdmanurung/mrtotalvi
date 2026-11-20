@@ -758,27 +758,44 @@ def test_factual_residual_prior_needs_centered_v2():
         MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", residual_prior_mode="factual")
 
 
-@pytest.mark.parametrize("hierarchy_mode", ["legacy", "centered_v2"])
+@pytest.mark.parametrize(
+    "path", ["legacy", "centered_v2", "mc_samples", "scale_observations", "no_hierarchy"]
+)
 @pytest.mark.parametrize("anneal", [True, False])
-def test_protein_likelihood_slope_at_zero_kl_weight(hierarchy_mode, anneal):
-    """d loss / d pro_recons_weight at kl_weight=0 is mean protein NLL, or 0 when annealed."""
+def test_protein_likelihood_slope_at_zero_kl_weight(path, anneal):
+    """d loss / d pro_recons_weight at kl_weight=0 is mean protein NLL, or 0 when annealed.
+
+    Each ``path`` reaches a different branch of ``loss`` that applies the protein weight.
+    """
     from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
 
     adata = _make_v2_adata(n_samples=3)
     model = MrTotalVI(
-        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode=hierarchy_mode,
+        adata, sample_key="sample", n_latent=3, n_latent_u=2,
+        hierarchy_mode="centered_v2" if path == "centered_v2" else "legacy",
+        scale_observations=path == "scale_observations",
         anneal_protein_likelihood=anneal,
     )
     module = model.module.eval()
     tensors = next(iter(model._make_data_loader(adata=adata, batch_size=8)))
-    inference, generative = module(tensors, compute_loss=False)
+    inference_kwargs = {"n_samples": 2} if path == "mc_samples" else {}
+    inference, generative = module(
+        tensors, inference_kwargs=inference_kwargs, compute_loss=False
+    )
+    if path == "no_hierarchy":
+        inference = {k: v for k, v in inference.items() if k != "eps"}
 
     def loss(weight):
         return module.loss(tensors, inference, generative, kl_weight=0.0, pro_recons_weight=weight)
 
     reference = loss(0.0)
     slope = (loss(0.8).loss - reference.loss).item() / 0.8
-    expected = 0.0 if anneal else reference.reconstruction_loss["reconst_loss_protein"].mean().item()
+    protein_nll = reference.reconstruction_loss["reconst_loss_protein"]
+    if path == "scale_observations":
+        # Legacy scale_observations divides each cell's loss by its sample's cell count.
+        counts = module.n_obs_per_sample[tensors["sample"].long().flatten()]
+        protein_nll = protein_nll / counts
+    expected = 0.0 if anneal else protein_nll.mean().item()
     assert slope == pytest.approx(expected, rel=1e-5, abs=1e-5)
 
 
@@ -795,3 +812,449 @@ def test_new_model_flags_survive_save_and_load(tmp_path):
     loaded = MrTotalVI.load(tmp_path / "m", adata=adata)
     assert loaded.module.residual_prior_mode == "factual"
     assert loaded.module.anneal_protein_likelihood is False
+
+
+# Fable review regressions ------------------------------------------------------
+
+
+def test_backed_boolean_mask_selects_rows(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+    model._validate_anndata(backed)
+    mask = np.zeros(backed.n_obs, dtype=bool)
+    mask[[1, 4, 6]] = True
+    got = model.get_latent_representation(adata=backed, indices=mask)
+    expected = model.get_latent_representation(adata=backed, indices=[1, 4, 6])
+    np.testing.assert_allclose(got, expected, atol=1e-6)
+
+
+def test_legacy_override_of_factual_checkpoint_saves_and_reloads(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+        residual_prior_mode="factual",
+    )
+    model.is_trained_ = True
+    model.save(tmp_path / "f", overwrite=True)
+    with pytest.warns(UserWarning, match="resets it to 'raw_mean'"):
+        legacy = MrTotalVI.load(
+            tmp_path / "f", adata=adata, hierarchy_mode_override="legacy",
+            allow_semantic_override=True,
+        )
+    assert legacy.module.residual_prior_mode == "raw_mean"
+    legacy.save(tmp_path / "g", overwrite=True)
+    assert MrTotalVI.load(tmp_path / "g", adata=adata).hierarchy_mode == "legacy"
+
+
+def test_seed_combiner_accepts_an_old_and_a_new_result_with_a_warning():
+    import xarray as xr
+
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    old = xr.Dataset({"v": (("draw",), [1.0, 3.0])})
+    new = xr.Dataset(
+        {"v": (("draw",), [5.0, 7.0])},
+        attrs={"group_key": "", "contrast": "[]", "donor_key": "", "specified_library_size": ""},
+    )
+    with pytest.warns(UserWarning, match="cannot be compared"):
+        result = combine_mrtotalvi_seed_results({0: old, 1: new})
+    assert result.v_between_seed_mean.item() == 4.0
+
+
+def test_seed_combiner_rejects_different_technical_context():
+    from mrtotalvi import combine_mrtotalvi_seed_results
+    from tests.test_mrtotalvi_v2 import _make_context_v2_model
+
+    model, adata = _make_context_v2_model()
+    request = dict(adata=adata, indices=[0, 1], target_samples=["sample_0"],
+                   gene_list=[str(adata.var_names[0])],
+                   protein_list=[str(model.adata_manager.get_state_registry(
+                       REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names[0])],
+                   library_policy="specified", inference_mode="posterior_mc", n_draws=2)
+    small = model.get_counterfactual_expression(specified_library_size=1.0, **request)
+    large = model.get_counterfactual_expression(
+        specified_library_size=1000.0, random_state=1, **request
+    )
+    assert small.attrs["specified_library_size"] != large.attrs["specified_library_size"]
+    with pytest.raises(ValueError, match="specified_library_size"):
+        combine_mrtotalvi_seed_results({0: small, 1: large})
+
+
+@pytest.mark.parametrize(
+    ("offsets", "effect"),
+    [((0.0, 0.0, 0.0, 0.0), 1.0), ((3.0, 0.0, 0.0, 0.0), 0.0), ((0.0, 3.0, 0.0, 0.0), 0.0),
+     ((3.0, -1.0, 2.0, 0.0), 1.0)],
+)
+def test_de_donor_offsets_do_not_leak_into_beta(trained_paired_model, offsets, effect):
+    """eps = patient offset + effect * time, so the time beta must equal the planted effect."""
+    model = trained_paired_model
+    order = list(model.sample_order)
+    level = {f"p{i}": value for i, value in enumerate(offsets)}
+    table = torch.tensor(
+        [[level[s.split("_")[0]] + effect * s.endswith("t1")] for s in order], dtype=torch.float32
+    )
+    scale = torch.arange(1.0, model.module.n_latent + 1)
+
+    def residual(u, sample, deterministic=False):
+        eps = table[sample.flatten().long()] * scale
+        return torch.zeros_like(eps), eps, None
+
+    original = model.module.qz.forward
+    model.module.qz.forward = residual
+    try:
+        de = model._legacy_differential_expression_for_reproducibility(
+            sample_cov_keys=["time"], donor_key="patient", mc_samples=1, batch_size=200,
+            indices=np.arange(50),
+        )
+    finally:
+        model.module.qz.forward = original
+    expected = np.broadcast_to(effect * scale.numpy(), de["beta"].values[:, 0, :].shape)
+    np.testing.assert_allclose(de["beta"].values[:, 0, :], expected, atol=1e-4)
+
+
+@pytest.fixture(scope="module")
+def trained_paired_model():
+    import scvi
+
+    scvi.settings.seed = 0
+    adata = scvi.data.synthetic_iid()
+    patient = np.arange(adata.n_obs) % 4
+    time = (np.arange(adata.n_obs) // 4) % 2
+    adata.obs["patient"] = [f"p{i}" for i in patient]
+    adata.obs["time"] = [f"t{i}" for i in time]
+    adata.obs["sample"] = [f"p{i}_t{j}" for i, j in zip(patient, time)]
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        batch_key="batch",
+    )
+    model = MrTotalVI(adata, sample_key="sample", n_latent=5)
+    model.train(max_epochs=2, accelerator="cpu")
+    return model
+
+
+# Continued training mode ---------------------------------------------------------
+
+
+def test_continued_training_runs_in_train_mode(tmp_path):
+    """The first, a second and a post-load train() all compute the loss in train mode."""
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(adata, sample_key="sample", n_latent=3, n_latent_u=2)
+
+    def modes_during(fit_model):
+        seen = []
+        original = type(fit_model.module).loss
+
+        def recording_loss(self, *args, **kwargs):
+            seen.append(self.training)
+            return original(self, *args, **kwargs)
+
+        fit_model.module.loss = recording_loss.__get__(fit_model.module)
+        try:
+            fit_model.train(
+                max_epochs=1, accelerator="cpu", train_size=1.0, batch_size=8, early_stopping=False
+            )
+        finally:
+            del fit_model.module.loss
+        return set(seen)
+
+    assert True in modes_during(model)
+    assert modes_during(model) == {True}  # second call
+    model.save(tmp_path / "m", overwrite=True)
+    assert modes_during(MrTotalVI.load(tmp_path / "m", adata=adata)) == {True}
+
+
+# Protein availability when the panel is the batch -----------------------------
+
+
+def _batch_only_context_model():
+    """Protein 0 is never measured in batch_0, and no panel is registered."""
+    import scvi
+
+    adata = scvi.data.synthetic_iid(batch_size=6, n_genes=5, n_proteins=3, n_batches=2)
+    adata.obs["sample"] = np.asarray(["sample_0"] * 6 + ["sample_1"] * 6)
+    adata.obs["batch"] = np.asarray(["batch_0", "batch_1"] * 6)
+    protein = np.asarray(adata.obsm["protein_expression"], dtype=np.float32) + 1.0
+    protein[adata.obs["batch"].to_numpy() == "batch_0", 0] = 0.0
+    adata.obsm["protein_expression"] = protein
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        batch_key="batch",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = MrTotalVI(
+            adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+            u_encoder_mode="sample_blind",
+        )
+    model.is_trained_ = True
+    return model, adata
+
+
+def test_specified_batch_also_sets_the_protein_mask_without_a_panel():
+    model, adata = _batch_only_context_model()
+    proteins = [str(p) for p in model.adata_manager.get_state_registry(
+        REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names]
+    batch_1_cells = np.flatnonzero(adata.obs["batch"].to_numpy() == "batch_1")[:2]
+    out = model.get_counterfactual_expression(
+        adata=adata, indices=batch_1_cells, gene_list=[str(adata.var_names[0])],
+        protein_list=proteins[:1], batch_policy="specified", specified_batch="batch_0",
+    )
+    # Decoded in batch_0, where protein 0 was never measured: unavailable, not a value
+    # from decoder weights the masked likelihood never trained.
+    assert not out["protein_available"].values.any()
+    with pytest.raises(ValueError, match="the panel is the batch"):
+        model.get_counterfactual_expression(
+            adata=adata, indices=batch_1_cells, gene_list=[str(adata.var_names[0])],
+            protein_list=proteins[:1], batch_policy="specified", specified_batch="batch_0",
+            panel_policy="specified", specified_panel="batch_1",
+        )
+
+
+# Memory guard with many registered samples -------------------------------------
+
+
+def test_memory_guard_counts_every_registered_sample():
+    """One target, but centering builds residuals for all 300 registered samples."""
+    import scvi
+
+    adata = scvi.data.synthetic_iid(batch_size=300, n_genes=20, n_proteins=3, n_batches=2)
+    adata.obs["sample"] = [f"s{i % 300}" for i in range(adata.n_obs)]
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        batch_key="batch",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = MrTotalVI(
+            adata, sample_key="sample", n_latent=30, n_latent_u=10, hierarchy_mode="centered_v2",
+            u_encoder_mode="sample_blind",
+        )
+    model.is_trained_ = True
+    # The output alone is small: one target, 256 cells, 32 draws (measured peak ~10 GB).
+    output_only = cf._estimate_latent_bytes(
+        n_cells=256, n_targets=1, n_draws=32, n_latent_u=10, n_latent=30, n_quantiles=3,
+        posterior_mc=True,
+    )
+    assert output_only < cf.MAX_IN_MEMORY_BYTES
+    with pytest.raises(MemoryError, match="512"):
+        model.get_counterfactual_latent(
+            indices=np.arange(256), target_samples=["s0"], inference_mode="posterior_mc",
+            n_draws=32,
+        )
+
+
+# Overrides: backed order and log transform -----------------------------------------
+
+
+def test_normalized_expression_keeps_request_order_on_backed_data(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+    model._validate_anndata(backed)
+    request = [7, 2, 5, 0]
+    # The protein foreground mixture is deterministic per cell, so compare by cell.
+    torch.manual_seed(0)
+    reference_rna, reference_protein = model.get_normalized_expression(
+        adata=backed, indices=[0, 2, 5, 7], n_samples=1
+    )
+    torch.manual_seed(0)
+    rna, protein = model.get_normalized_expression(adata=backed, indices=request, n_samples=1)
+    assert list(rna.index) == list(backed.obs_names[request])
+    np.testing.assert_allclose(
+        protein.values, reference_protein.loc[backed.obs_names[request]].values, rtol=1e-5
+    )
+
+
+def test_feature_correlation_log_transform_runs():
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    corr = model.get_feature_correlation_matrix(adata=adata, n_samples=2, log_transform=True)
+    n_features = model.summary_stats.n_vars + model.summary_stats.n_proteins
+    assert corr.shape == (n_features, n_features)
+
+
+def test_learnable_prior_scale_with_map_warns():
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    with pytest.warns(UserWarning, match="removes most of the donor residual"):
+        MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", learn_z_u_prior_scale=True)
+
+
+# Step 9 nits --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [True, -1, 2**32, 1.5, "1"])
+def test_counterfactual_random_state_must_be_a_32_bit_integer(bad):
+    with pytest.raises(ValueError, match="random_state"):
+        cf._validate_random_state(bad)
+
+
+def test_counterfactual_random_state_accepts_numpy_integers():
+    cf._validate_random_state(np.int64(2**32 - 1))
+    cf._validate_random_state(0)
+
+
+def test_counterfactual_indices_reject_an_empty_selection():
+    adata = ad.AnnData(np.zeros((4, 1), dtype=np.float32))
+    with pytest.raises(ValueError, match="at least one observation"):
+        cf._as_indices(adata, np.zeros(4, dtype=bool), name="indices")
+
+
+def test_missing_protein_names_warn_on_transfer():
+    model, adata = _numpy_protein_model()
+    other = adata.copy()
+    del other.uns["prot_names"]
+    with pytest.warns(UserWarning, match="protein axis order cannot be checked"):
+        model._validate_anndata(other)
+
+
+def test_local_sample_distances_reject_missing_group_labels():
+    model, adata = _numpy_protein_model()
+    adata.obs["group"] = pd.Series(["a", None] * (adata.n_obs // 2), index=adata.obs_names)
+    model.is_trained_ = True  # the label check runs before any inference
+    with pytest.raises(ValueError, match="missing labels"):
+        model.get_local_sample_distances(adata=adata, groupby="group")
+
+
+def test_seed_combiner_warns_for_entries_nan_in_some_seeds():
+    import xarray as xr
+
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    first = xr.Dataset({"value": (("draw", "cell"), [[1.0, np.nan], [3.0, np.nan]])})
+    second = xr.Dataset({"value": (("draw", "cell"), [[5.0, 2.0], [7.0, 4.0]])})
+    with pytest.warns(UserWarning, match=r"value \(1\)"):
+        result = combine_mrtotalvi_seed_results({0: first, 1: second})
+    # Cell 0 has both seeds (means 2 and 6); cell 1 only the second seed (mean 3).
+    np.testing.assert_allclose(result.value_between_seed_mean.values, [4.0, 3.0])
+
+
+def test_registry_adapter_keeps_pandas_category_order():
+    from mrtotalvi._datamodule import _MrTotalVIRegistryAdapter
+    from tests.test_datamodule import _make_adata as _make_dm_adata
+
+    adata = _make_dm_adata()
+    order = sorted(adata.obs["sample"].unique(), reverse=True) + ["unused"]
+    adata.obs["sample"] = pd.Categorical(adata.obs["sample"], categories=order)
+    dm = _MrTotalVIRegistryAdapter(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        parallel=False,
+    )
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample"
+    )
+    registered = MrTotalVI(adata, sample_key="sample").adata_manager.get_state_registry(
+        REGISTRY_KEYS.SAMPLE_KEY
+    ).categorical_mapping
+    np.testing.assert_array_equal(registered, order)
+    adapter_mapping = dm.registry["field_registries"][REGISTRY_KEYS.SAMPLE_KEY][
+        "state_registry"
+    ]["categorical_mapping"]
+    np.testing.assert_array_equal(adapter_mapping, order)
+
+
+# Step 10 mutants ----------------------------------------------------------------
+
+
+def test_expression_records_the_built_context_hash(monkeypatch):
+    """The attr is the digest of the scenarios this request built, not a constant."""
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    built = []
+    original = cf._build_context_scenarios
+
+    def spy(**kwargs):
+        scenarios, digest = original(**kwargs)
+        built.append(digest)
+        return scenarios, digest
+
+    monkeypatch.setattr(cf, "_build_context_scenarios", spy)
+    hashes = []
+    for library_size in (10.0, 20.0):
+        result = model.get_counterfactual_expression(
+            adata=adata, indices=[0, 2], target_samples=["sample_0"],
+            gene_list=[str(adata.var_names[0])], inference_mode="latent_mean", n_draws=1,
+            library_policy="specified", specified_library_size=library_size,
+        )
+        hashes.append(result.attrs["context_table_sha256"])
+    assert hashes == built
+    assert hashes[0] != hashes[1]
+
+
+def test_admissibility_rows_align_by_name_not_position():
+    import xarray as xr
+
+    model, adata = _numpy_protein_model()
+    samples = list(model.sample_order)
+    cells = list(adata.obs_names[:2])
+    # Expected rows in request order (cells) and registry order (samples).
+    expected = np.array([[True, False, True], [False, True, True]])
+    frame = pd.DataFrame(expected, index=cells, columns=samples)
+    # Reverse both axes, add a cell the request does not use, and swap the dims.
+    frame = frame.iloc[::-1, ::-1]
+    frame.loc[str(adata.obs_names[5])] = False
+    mask = xr.DataArray(
+        frame.to_numpy().T,
+        dims=("sample", "cell_name"),
+        coords={"sample": list(frame.columns), "cell_name": list(frame.index)},
+    )
+    np.testing.assert_array_equal(model._admissibility_rows(mask, cells), expected)
+
+
+def test_knn_is_silent_when_every_expected_count_is_above_one():
+    """knn_k * n_g / N = 70 * 6 / 406 = 1.03 for the small group: no warning."""
+    from mrtotalvi._stats import differential_abundance
+    from tests.test_da_density_estimator import StubModel
+
+    rng = np.random.default_rng(0)
+    sizes = {"s0": 200, "s1": 200, "s2": 3, "s3": 3}
+    labels = np.concatenate([[name] * n for name, n in sizes.items()])
+    obs = pd.DataFrame(
+        {"sample": labels, "size": np.where(np.isin(labels, ["s0", "s1"]), "big", "small")},
+        index=[f"c{i}" for i in range(labels.size)],
+    )
+    adata = ad.AnnData(np.zeros((labels.size, 1), dtype=np.float32), obs=obs)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        differential_abundance(
+            StubModel(rng.normal(size=(labels.size, 2)), labels),
+            adata=adata,
+            sample_key="sample",
+            sample_cov_keys=["size"],
+            density_estimator="knn",
+            knn_k=70,
+            omit_original_sample=False,
+        )
+    assert not [w for w in caught if "knn group scores" in str(w.message)]
+
+
+def test_de_is_silent_when_no_sample_is_rejected(trained_de_model, monkeypatch):
+    import mrtotalvi._stats as stats
+
+    original = stats.get_outlier_cell_sample_pairs
+
+    def all_admissible(*args, **kwargs):
+        out = original(*args, **kwargs)
+        return out.assign(is_admissible=out["is_admissible"] | True)
+
+    monkeypatch.setattr(stats, "get_outlier_cell_sample_pairs", all_admissible)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trained_de_model._legacy_differential_expression_for_reproducibility(
+            sample_cov_keys=["condition"],
+            mc_samples=1,
+            batch_size=32,
+            filter_inadmissible_samples=True,
+        )
+    assert not [w for w in caught if "Rejected (inadmissible)" in str(w.message)]

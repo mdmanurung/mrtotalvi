@@ -110,7 +110,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Whether ``pz_scale`` is a learnable parameter. With ``use_map=True`` the
         ``eps`` term is ``-log p(eps)`` at a point, which can be negative, so
         :meth:`get_elbo` values are comparable only within one configuration (same
-        ``use_map``, ``hierarchy_mode``, prior scales and KL weights).
+        ``use_map``, ``hierarchy_mode``, prior scales and KL weights). With
+        ``use_map=True`` the optimizer also shrinks ``pz_scale`` and ``eps`` together
+        until the ``-4`` clamp stops the scale, which removes most of the donor residual
+        (one synthetic run: ``eps`` RMS 0.003 against 0.085 by default after 600 epochs);
+        a warning says so. Upstream MrVI has the same option.
     u_prior
         Resolved prior enum: exactly ``"standard"``, ``"mog"``, or ``"vamp"``.
         New calls default to ``"mog"``.
@@ -204,7 +208,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
         only. The seed and ordered training-index digest are persisted before
-        optimization. Non-Vamp use raises.
+        optimization. Non-Vamp use raises. Without it the pseudo-inputs start as
+        ``0.01 * randn``, so all Vamp components start nearly identical.
     freeze_prior_after_init
         If ``True`` and ``u_prior="vamp"``, freeze the VampPrior pseudo-input
         parameters after data-driven initialisation so they do not drift during
@@ -342,6 +347,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
         if hierarchy_mode not in {"legacy", "centered_v2"}:
             raise ValueError("hierarchy_mode must be one of {'legacy', 'centered_v2'}.")
+        if learn_z_u_prior_scale and use_map:
+            warnings.warn(
+                "learn_z_u_prior_scale=True with use_map=True shrinks pz_scale and eps "
+                "together until the -4 clamp, which removes most of the donor residual. "
+                "Keep the default fixed scale unless you mean to.",
+                UserWarning,
+                stacklevel=2,
+            )
         if residual_prior_mode == "factual" and hierarchy_mode != "centered_v2":
             raise ValueError("residual_prior_mode='factual' requires hierarchy_mode='centered_v2'.")
         if u_encoder_mode not in {"sample_conditioned", "sample_blind"}:
@@ -760,6 +773,22 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             model.module.u_vamp_pseudo.requires_grad_(False)
         model.init_params_["non_kwargs"]["hierarchy_mode"] = resolved_hierarchy_mode
         model.init_params_["non_kwargs"]["u_encoder_mode"] = resolved_u_encoder_mode
+        # residual_prior_mode="factual" exists only for centered_v2, and legacy never reads
+        # it; keep it only where the constructor accepts it, so the model saves and reloads.
+        if (
+            resolved_hierarchy_mode != "centered_v2"
+            and getattr(model.module, "residual_prior_mode", "raw_mean") != "raw_mean"
+        ):
+            warnings.warn(
+                "residual_prior_mode='factual' applies only to centered_v2; the legacy "
+                "override resets it to 'raw_mean'.",
+                UserWarning,
+                stacklevel=2,
+            )
+            model.module.residual_prior_mode = "raw_mean"
+            for group in model.init_params_.values():
+                if isinstance(group, dict) and "residual_prior_mode" in group:
+                    group["residual_prior_mode"] = "raw_mean"
         model._refresh_model_summary()
         return model
 
@@ -883,6 +912,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
 
         plan_kwargs = {**DEFAULT_PLAN_KWARGS, **(plan_kwargs or {})}
 
+        # scvi-tools leaves the module in eval mode after a fit and after load, and
+        # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
+        # would then run without dropout and skip the u-invariance penalty.
+        self.module.train()
         return super().train(
             max_epochs=max_epochs,
             lr=lr,
@@ -1574,12 +1607,16 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``library_size`` inside the ``transform_batch`` loop, so two batches at
         ``library_size=1000`` gave row sums near 500500. This runs the upstream method at
         ``library_size=1``, where that loop is exact, and scales the RNA output once.
-        Protein output and ``library_size`` of ``1``, ``None`` or ``"latent"`` are
-        unchanged. See :meth:`scvi.model.TOTALVI.get_normalized_expression`.
+        Protein output and ``library_size`` of ``1`` or ``"latent"`` are unchanged.
+        For backed AnnData, rows come back in the requested order (upstream returns them
+        sorted but labels them in request order). See
+        :meth:`scvi.model.TOTALVI.get_normalized_expression`.
         """
+        resolved = self.adata if adata is None else adata
+        loader_indices, inverse = _loader_order(resolved, indices)
         request = dict(
             adata=adata,
-            indices=indices,
+            indices=loader_indices,
             n_samples_overall=n_samples_overall,
             transform_batch=transform_batch,
             gene_list=gene_list,
@@ -1587,9 +1624,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             **kwargs,
         )
         if library_size is None or isinstance(library_size, str) or library_size == 1:
-            return super().get_normalized_expression(library_size=library_size, **request)
-        rna, protein = super().get_normalized_expression(library_size=1, **request)
-        return rna * library_size, protein
+            rna, protein = super().get_normalized_expression(library_size=library_size, **request)
+        else:
+            rna, protein = super().get_normalized_expression(library_size=1, **request)
+            rna = rna * library_size
+        if inverse is None:
+            return rna, protein
+        requested = np.asarray(indices)
+        if requested.dtype == np.bool_:
+            requested = np.flatnonzero(requested)
+        names = np.asarray(resolved.obs_names)[requested]
+
+        def request_order(values):
+            if hasattr(values, "iloc"):
+                reordered = values.iloc[inverse].copy()
+                reordered.index = names
+                return reordered
+            return values[inverse]
+
+        return request_order(rna), request_order(protein)
 
     @torch.inference_mode()
     def get_feature_correlation_matrix(
@@ -1642,8 +1695,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 [denoised_data[:, :, i] for i in range(n_samples)], axis=0
             ).astype(np.float64)
             if log_transform is True:
-                flattened[:, : self.n_genes] = np.log(flattened[:, : self.n_genes] + 1e-8)
-                flattened[:, self.n_genes :] = np.log1p(flattened[:, self.n_genes :])
+                # Upstream reads self.n_genes, which neither TOTALVI nor MrTotalVI defines.
+                n_genes = self.summary_stats.n_vars
+                flattened[:, :n_genes] = np.log(flattened[:, :n_genes] + 1e-8)
+                flattened[:, n_genes:] = np.log1p(flattened[:, n_genes:])
             if correlation_type == "pearson":
                 corr_matrix = np.corrcoef(flattened, rowvar=False)
             else:
@@ -1898,7 +1953,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         registered order without an error, on transfer and on ``load``.
         """
         names_key = self.adata_manager.registry["setup_args"].get("protein_names_uns_key")
-        if names_key is None or names_key not in adata.uns:
+        if names_key is None:
+            return
+        if names_key not in adata.uns:
+            warnings.warn(
+                f"adata.uns['{names_key}'] is missing, so the protein axis order cannot be "
+                "checked against the registry (ad.concat drops uns by default).",
+                UserWarning,
+                stacklevel=3,
+            )
             return
         registered = list(
             self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names
@@ -2072,6 +2135,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         for key in group_keys:
             if key not in adata.obs:
                 raise KeyError(f"groupby column {key!r} is not in adata.obs.")
+            if adata.obs[key].isna().any():
+                raise ValueError(
+                    f"groupby column {key!r} has missing labels; fill or drop them first."
+                )
         if not keep_cell and not group_keys:
             raise ValueError("keep_cell=False needs groupby; there would be no output.")
 

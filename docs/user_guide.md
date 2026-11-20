@@ -251,15 +251,19 @@ Technical contexts are explicit:
   the default TotalVI setting, or the posterior log-normal mean when
   `use_observed_lib_size=False`.
 - `specified` requires registered batch/panel labels and a positive library
-  scalar or cell-aligned vector.
+  scalar or cell-aligned vector. Without a registered panel the panel is the batch, so a
+  specified batch also sets the protein mask; a different `specified_panel` raises.
 - `sample_balanced_marginal` weights biological samples equally and empirical
   joint batch/panel contexts within each sample. Batch and panel cannot be
   marginalized separately. Each distinct reference context (batch, panel and,
   for the library policy, each distinct library size) is one decode pass; more
   than 1024 contexts fail, so subset `marginal_reference_indices`.
 
-In-memory output has a hard 512 MiB estimate including summaries and overhead. Requests above that
-limit must be reduced through explicit cell, target, or feature subsetting. Public `zarr_path` /
+In-memory output has a hard 512 MiB estimate including summaries and overhead. The estimate also
+counts the per-minibatch residual pass, which covers every registered sample (centering needs
+all of them) and grows with `batch_size`, draws and `target_chunk_size`; it overestimates the
+measured peak by about 1.6 times. Requests above the limit must be reduced through explicit cell,
+target, feature, `batch_size` or `target_chunk_size` subsetting. Public `zarr_path` /
 `zarr_chunks` streaming is quarantined and fails before filesystem access.
 
 All targets are limited to registered samples. These datasets are model-based,
@@ -315,8 +319,10 @@ is `log(k + 0.5) - log(n_reference)`. In a synthetic 2-D check
 (`tests/test_da_density_estimator.py`) both recovered a planted depletion, with a per-cell null sd
 of about 0.2-0.3 (`knn_k=50`, floor 0.4); the posterior estimator's null sd there was about 10.
 Under `"knn"` the per-sample
-`log_probs` are comparable across samples within a cell but not across cells or with `"posterior"`
-values, so read the enrichments. `donor_key` is not available with `"knn"`. Both remain
+`log_probs` are comparable across samples of similar size within a cell, but not across cells or
+with `"posterior"` values, so read the enrichments. Where a sample's expected neighbour count
+`knn_k * n_g / N` is below about 1, the score favours the smaller sample. Group scores share
+the bias; a warning names such groups, but not such samples. `donor_key` is not available with `"knn"`. Both remain
 descriptive. See the `differential_abundance` docstring for the full mapping.
 
 With `omit_original_sample=False` (forced by `donor_key`), `differential_abundance()` removes
@@ -498,7 +504,8 @@ negative. The loss clamps the `eps` prior log-scale below at `-4.0`
 (`pz_scale.clamp(min=-4.0)`). A `z_u_prior_scale` under `-4` therefore acts as `-4`, and with
 `learn_z_u_prior_scale=True` a scale that reaches `-4` receives no gradient.
 
-The `kl_u` term uses a single-sample Monte-Carlo estimate of `KL(q(u)‖p(u))` (unbiased, higher
+The `kl_u` term is analytic for `u_prior="standard"`. For the mixture priors (`"mog"`,
+`"vamp"`) it is a single-sample Monte-Carlo estimate of `KL(q(u)‖p(u))` (unbiased, higher
 variance than analytic).
 
 `differential_abundance` computes no test. The Wald statistic in `differential_expression` (private; the public method refuses) is compared with a Chi²

@@ -49,11 +49,36 @@ def _as_indices(adata, indices, *, name: str) -> np.ndarray:
         result = result.astype(np.int64, copy=False)
     if result.ndim != 1:
         raise ValueError(f"{name} must be one-dimensional.")
+    if result.size == 0:
+        raise ValueError(f"{name} must select at least one observation.")
     if np.any(result < 0) or np.any(result >= adata.n_obs):
         raise IndexError(f"{name} contains an out-of-range observation index.")
     if np.unique(result).size != result.size:
         raise ValueError(f"{name} contains duplicate observation indices.")
     return result
+
+
+def _settings_digest(values) -> str:
+    """Short sha256 of a setting (cell names or numbers) for result attrs; "" for None."""
+    if values is None:
+        return ""
+    values = np.asarray(values)
+    payload = (
+        "\n".join(map(str, values.tolist())).encode()
+        if values.dtype.kind in "OUS"
+        else np.asarray(values, dtype=np.float64).tobytes()
+    )
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _validate_random_state(random_state) -> None:
+    """The seed keys Philox noise as a 32-bit word; anything else would be cast silently."""
+    if (
+        isinstance(random_state, bool)
+        or not isinstance(random_state, (int, np.integer))
+        or not 0 <= int(random_state) < 2**32
+    ):
+        raise ValueError("random_state must be an integer in [0, 2**32).")
 
 
 def _validate_quantiles(quantiles) -> np.ndarray:
@@ -376,6 +401,14 @@ def _validate_context_request(
         )
     if library_policy == "specified":
         _specified_library(specified_library_size, n_cells)
+    if model.module.panel_key != "panel" and panel_policy == "specified" and (
+        batch_policy != "specified" or str(specified_panel) != str(specified_batch)
+    ):
+        raise ValueError(
+            "Without a registered panel the panel is the batch: specify the batch with "
+            "batch_policy='specified', and leave panel_policy='observed' or set the same "
+            "specified_panel."
+        )
 
 
 def _build_context_scenarios(
@@ -440,6 +473,10 @@ def _build_context_scenarios(
         )
     if library_policy == "specified":
         library = _specified_library(specified_library_size, n_cells)
+    if model.module.panel_key != "panel" and batch_policy == "specified":
+        # Without a registered panel the panel is the batch, so the protein mask must
+        # follow the batch the cell is decoded in, not the cell's observed batch.
+        panel = batch.copy()
 
     if not (batch_marginal or library_marginal):
         scenarios = [
@@ -682,6 +719,46 @@ def _estimate_latent_bytes(
         )
     raw_bytes = 4 * float_elements + 2 * n_cells * n_targets
     return math.ceil(raw_bytes * 1.2)
+
+
+def _residual_working_bytes(
+    model, *, n_cells: int, n_draws: int, target_chunk_size: int | None
+) -> int:
+    """Peak bytes of one minibatch's all-registered-sample residual pass.
+
+    Centering needs every registered sample's residual, so each minibatch holds
+    ``eps_raw``, ``eps_centered`` and ``z`` for all of them, and the attention block runs
+    on ``draw x cell x target-chunk`` rows. Bytes per attention row are counted from the
+    output sizes of every ``qz`` submodule on one row (measured at about 1.6 times the
+    real peak, so the estimate is conservative).
+    """
+    module = model.module
+    n_samples = int(module._n_sample)
+    chunk = min(int(target_chunk_size or n_samples), n_samples)
+    elements = [0]
+
+    def count(_module, _inputs, output):
+        outputs = output if isinstance(output, tuple) else (output,)
+        elements[0] += sum(t.numel() for t in outputs if torch.is_tensor(t))
+
+    hooks = [sub.register_forward_hook(count) for sub in module.qz.modules() if sub is not module.qz]
+    was_training = module.qz.training
+    module.qz.eval()
+    try:
+        with torch.inference_mode():
+            parameter = next(module.qz.parameters())
+            module.qz(
+                torch.zeros(1, module.n_latent_u, device=parameter.device),
+                torch.zeros(1, 1, dtype=torch.long, device=parameter.device),
+            )
+    finally:
+        for hook in hooks:
+            hook.remove()
+        module.qz.train(was_training)
+    rows = n_draws * n_cells
+    attention = rows * chunk * elements[0]
+    residuals = rows * n_samples * 3 * module.n_latent
+    return 4 * (attention + residuals)
 
 
 def _estimate_expression_bytes(
@@ -1061,6 +1138,7 @@ def get_counterfactual_latent(
         raise ValueError("batch_size must be a positive integer.")
     _validate_chunk_size(target_chunk_size, name="target_chunk_size")
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
 
     cell_names = np.asarray(adata.obs_names[query_indices], dtype=str)
@@ -1075,11 +1153,19 @@ def get_counterfactual_latent(
         n_quantiles=quantile_values.size,
         posterior_mc=inference_mode == "posterior_mc",
     )
+    # The all-registered-sample residual pass dominates peak memory with many samples.
+    estimated_bytes += _residual_working_bytes(
+        model,
+        n_cells=min(batch_size, query_indices.size),
+        n_draws=n_draws,
+        target_chunk_size=target_chunk_size,
+    )
     if zarr_path is None and estimated_bytes > MAX_IN_MEMORY_BYTES:
         raise MemoryError(
             f"Estimated in-memory materialization is {estimated_bytes} bytes, "
             f"exceeding the hard 512 MiB ({MAX_IN_MEMORY_BYTES}-byte) limit. "
-            "Subset the request; public streaming/Zarr export is quarantined."
+            "Subset the request (fewer cells per batch_size, draws or registered-sample "
+            "chunks via target_chunk_size); public streaming/Zarr export is quarantined."
         )
     if zarr_path is not None and estimated_bytes > MAX_IN_MEMORY_BYTES:
         per_cell_bytes = _estimate_latent_bytes(
@@ -1337,6 +1423,7 @@ def get_counterfactual_expression(
     _validate_chunk_size(feature_chunk_size, name="feature_chunk_size")
 
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
     gene_indices, gene_labels = _validate_features(
         adata.var_names,
@@ -1373,11 +1460,19 @@ def get_counterfactual_expression(
         n_quantiles=quantile_values.size,
         posterior_mc=inference_mode == "posterior_mc",
     )
+    # The all-registered-sample residual pass dominates peak memory with many samples.
+    estimated_bytes += _residual_working_bytes(
+        model,
+        n_cells=min(batch_size, query_indices.size),
+        n_draws=n_draws,
+        target_chunk_size=target_chunk_size,
+    )
     if zarr_path is None and estimated_bytes > MAX_IN_MEMORY_BYTES:
         raise MemoryError(
             f"Estimated in-memory materialization is {estimated_bytes} bytes, "
             f"exceeding the hard 512 MiB ({MAX_IN_MEMORY_BYTES}-byte) limit. "
-            "Subset the request; public streaming/Zarr export is quarantined."
+            "Subset the request (fewer cells per batch_size, draws or registered-sample "
+            "chunks via target_chunk_size); public streaming/Zarr export is quarantined."
         )
 
     observed_context = _collect_observed_context(
@@ -1751,6 +1846,15 @@ def get_counterfactual_expression(
             "estimated_bytes_with_overhead": int(estimated_bytes),
             "registered_target_limitation": "registered samples only; no new-sample extrapolation",
             "interpretation": INTERPRETATION,
+            # The seed combiner compares these technical settings across seeds.
+            "specified_library_size": _settings_digest(
+                specified_library_size if library_policy == "specified" else None
+            ),
+            "marginal_reference": _settings_digest(
+                np.asarray(adata.obs_names[reference_indices], dtype=str)
+                if uses_marginal_context
+                else None
+            ),
         },
     )
     if inference_mode == "posterior_mc":
@@ -1895,6 +1999,7 @@ def local_sample_enrichment(
         )
 
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
     cell_names = np.asarray(adata.obs_names[query_indices], dtype=str)
     if np.unique(cell_names).size != cell_names.size:
@@ -2026,8 +2131,9 @@ def local_sample_enrichment(
         )
         for group_position, group in enumerate(group_order):
             positions = np.flatnonzero(group_values == group)
-            # A sample with no retained reference (a factual singleton) is NaN;
-            # it carries no weight, and a group with no usable sample is NaN.
+            # A sample with no retained reference is NaN: it has no reference cells
+            # in the selection, or it is a factual singleton. It carries no weight,
+            # and a group with no usable sample is NaN.
             member_density = density[..., positions]
             usable = ~np.isnan(member_density)
             n_usable = usable.sum(axis=-1)
@@ -2148,6 +2254,11 @@ def local_sample_enrichment(
                 [] if contrast is None else [str(value) for value in contrast]
             ),
             "donor_key": "" if donor_key is None else str(donor_key),
+            "reference_cells": _settings_digest(reference_names),
+            "max_reference_cells_per_sample": (
+                "" if max_reference_cells_per_sample is None
+                else str(int(max_reference_cells_per_sample))
+            ),
         },
     )
     if inference_mode == "posterior_mc":

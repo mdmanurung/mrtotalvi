@@ -182,8 +182,13 @@ def test_conflicting_plan_values_warn_without_changing_precedence(adata, monkeyp
     monkeypatch.setattr(model, "_train_runner_cls", runner)
     supplied = {"lr": 0.123, "n_steps_kl_warmup": 7, "n_epochs_kl_warmup": 40}
     before = supplied.copy()
-    with pytest.warns(UserWarning, match="plan_kwargs values ignored"):
+    with pytest.warns(UserWarning, match="plan_kwargs values ignored") as record:
         model.train(max_epochs=1000, accelerator="cpu", plan_kwargs=supplied)
+    message = next(str(w.message) for w in record if "plan_kwargs" in str(w.message))
+    # Each overridden key is named with the value train() used instead.
+    assert "lr=0.123 (used 0.002)" in message
+    assert f"n_steps_kl_warmup=7 (used {int(0.75 * adata.n_obs)})" in message
+    assert "n_epochs_kl_warmup=40 (used None)" in message
 
     # Expected values: the train() defaults and scvi/model/_totalvi.py:315-329.
     plan = seen["plan"]
