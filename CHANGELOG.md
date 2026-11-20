@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- `get_local_sample_representation` and `get_local_sample_distances` take an opt-in
+  `admissibility=` boolean `(cell_name, sample)` mask, for example
+  `get_outlier_cell_sample_pairs()["is_admissible"]`. Unsupported entries become NaN, group
+  means average each sample pair over the cells with support in it, and
+  `<column>_n_cells` holds those counts. Without the argument the output is unchanged, as
+  upstream MrVI (user decision, 2026-11-20).
 - `combine_mrtotalvi_seed_results` now compares `specified_panel` and the enrichment settings
   `group_key`, `contrast` (in numerator, denominator order) and `donor_key` across seeds and
   raises on a mismatch; before, a reversed contrast pooled opposite log-ratios into one mean.
@@ -217,7 +223,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
   variances.
 - `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
 - The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
-- Local sample distances are not masked for sample support.
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).
 - Test gaps: the hierarchy tests pass on an untrained model (now named `*_wiring`; no

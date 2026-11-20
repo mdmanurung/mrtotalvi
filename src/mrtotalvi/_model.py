@@ -1890,6 +1890,33 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "and order; reorder the protein matrix to the registry."
             )
 
+    def _admissibility_rows(self, admissibility, cell_names) -> np.ndarray:
+        """Boolean ``(n_cell, n_sample)`` support rows, aligned by cell and sample name."""
+        if not isinstance(admissibility, xr.DataArray) or set(admissibility.dims) != {
+            "cell_name",
+            "sample",
+        }:
+            raise ValueError("admissibility must be an xarray.DataArray over (cell_name, sample).")
+        if admissibility.dtype != bool:
+            raise ValueError("admissibility must be boolean.")
+        for dim in ("cell_name", "sample"):
+            if admissibility.indexes[dim].has_duplicates:
+                raise ValueError(f"admissibility has duplicate {dim} labels.")
+        missing_cells = np.setdiff1d(np.asarray(cell_names), admissibility["cell_name"].values)
+        missing_samples = np.setdiff1d(
+            np.asarray(self.sample_order), admissibility["sample"].values
+        )
+        if missing_cells.size or missing_samples.size:
+            raise ValueError(
+                "admissibility must cover every requested cell and registered sample; "
+                f"missing {missing_cells.size} cell(s) and samples {missing_samples.tolist()}."
+            )
+        return (
+            admissibility.sel(cell_name=list(cell_names), sample=list(self.sample_order))
+            .transpose("cell_name", "sample")
+            .values
+        )
+
     def get_local_sample_representation(
         self,
         adata: AnnData | None = None,
@@ -1897,6 +1924,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size: int = 256,
         use_mean: bool = True,
         max_gb: float | None = 4.0,
+        *,
+        admissibility: xr.DataArray | None = None,
     ) -> xr.DataArray:
         """Compute the local per-donor latent representation.
 
@@ -1918,6 +1947,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             (``n_cell * n_sample * n_latent`` float32). ``None`` disables the check.
             Pass fewer ``indices`` or use :meth:`get_local_sample_distances` with
             ``groupby`` to stay under it.
+        admissibility
+            Optional boolean ``(cell_name, sample)`` support mask, for example
+            ``get_outlier_cell_sample_pairs()["is_admissible"]``. A cell's
+            representation for a sample it has no support in is set to NaN. ``None``
+            (default) masks nothing, as upstream MrVI.
 
         Returns
         -------
@@ -1937,6 +1971,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         reps, cell_names = self._compute_cf_representations(
             adata, indices, batch_size, use_mean=use_mean
         )
+        if admissibility is not None:
+            reps = reps.copy()
+            reps[~self._admissibility_rows(admissibility, cell_names)] = np.nan
         return xr.DataArray(
             reps,
             dims=["cell_name", "sample", "latent_dim"],
@@ -1957,6 +1994,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         groupby: str | list[str] | None = None,
         keep_cell: bool = True,
         max_gb: float | None = 4.0,
+        *,
+        admissibility: xr.DataArray | None = None,
     ) -> xr.DataArray | xr.Dataset:
         """Compute cell-specific pairwise donor distance matrices.
 
@@ -1991,6 +2030,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             Raise before encoding when the per-cell output (``n_cell * n_sample^2``
             float32) would exceed this many GiB. ``None`` disables the check. Use
             ``groupby`` with ``keep_cell=False``, or fewer ``indices``, to stay under it.
+        admissibility
+            Optional boolean ``(cell_name, sample)`` support mask, for example
+            ``get_outlier_cell_sample_pairs()["is_admissible"]``. A cell's distance
+            between two samples is NaN unless it has support in both. Group means then
+            average each sample pair over the cells with support in that pair, and a
+            ``<column>_n_cells`` variable holds those counts. ``None`` (default) masks
+            nothing, as upstream MrVI.
 
         Returns
         -------
@@ -2030,15 +2076,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             batch_d = torch.cdist(
                 chunk, chunk, p=p, compute_mode="donot_use_mm_for_euclid_dist"
             ).numpy()
-            cell_names.extend(adata.obs_names[positions].tolist())
+            batch_names = adata.obs_names[positions].tolist()
+            cell_names.extend(batch_names)
+            # A pair counts for a cell only where the cell has support in both samples.
+            pair_ok = np.ones(batch_d.shape, dtype=bool)
+            if admissibility is not None:
+                support = self._admissibility_rows(admissibility, batch_names)
+                pair_ok = support[:, :, None] & support[:, None, :]
+                batch_d = np.where(pair_ok, batch_d, np.nan)
             if keep_cell:
                 dists[start : start + len(positions)] = batch_d
             start += len(positions)
             for key in group_keys:
                 labels = adata.obs[key].to_numpy()[positions]
                 for label in np.unique(labels):
-                    total = batch_d[labels == label].sum(axis=0, dtype=np.float64)
-                    count = int((labels == label).sum())
+                    in_group = labels == label
+                    total = np.where(pair_ok[in_group], batch_d[in_group], 0.0).sum(
+                        axis=0, dtype=np.float64
+                    )
+                    count = pair_ok[in_group].sum(axis=0)
                     prior = sums[key].get(label, [0.0, 0])
                     sums[key][label] = [prior[0] + total, prior[1] + count]
 
@@ -2055,8 +2111,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             data_vars["cell"] = (["cell_name", "sample_x", "sample_y"], dists)
         for key in group_keys:
             labels = list(sums[key])
-            means = np.stack([sums[key][g][0] / sums[key][g][1] for g in labels])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                means = np.stack([sums[key][g][0] / sums[key][g][1] for g in labels])
             data_vars[f"{key}_distances"] = ([key, "sample_x", "sample_y"], means.astype(np.float32))
+            if admissibility is not None:
+                counts = np.stack([sums[key][g][1] for g in labels]).astype(np.int64)
+                data_vars[f"{key}_n_cells"] = ([key, "sample_x", "sample_y"], counts)
         group_coords = {key: list(sums[key]) for key in group_keys}
         if keep_cell:
             group_coords["cell_name"] = cell_names
