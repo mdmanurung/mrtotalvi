@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- A second `train()` call, or `train()` after `load`, ran with the module in eval mode:
+  scvi-tools leaves it there after a fit and after load, and Lightning >= 2.6 no longer
+  switches it back. Dropout was off and the `u_invariance_weight` penalty was skipped.
+  `train()` now sets train mode first, so every fit runs like the first (user decision,
+  2026-11-20). Continued-training results change; stock TOTALVI behaves the old way.
 - Private DE path with `donor_key`: the design dropped the first donor's column and has no
   intercept, so that donor's residual level leaked into the fixed-effect `beta` (a pure patient
   offset of 3 gave a time `beta` of 0.9 or -0.3, by donor order). Every donor now gets its own

@@ -899,6 +899,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
 
         plan_kwargs = {**DEFAULT_PLAN_KWARGS, **(plan_kwargs or {})}
 
+        # scvi-tools leaves the module in eval mode after a fit and after load, and
+        # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
+        # would then run without dropout and skip the u-invariance penalty.
+        self.module.train()
         return super().train(
             max_epochs=max_epochs,
             lr=lr,

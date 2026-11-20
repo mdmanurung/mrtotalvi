@@ -918,3 +918,36 @@ def trained_paired_model():
     model = MrTotalVI(adata, sample_key="sample", n_latent=5)
     model.train(max_epochs=2, accelerator="cpu")
     return model
+
+
+# Continued training mode ---------------------------------------------------------
+
+
+def test_continued_training_runs_in_train_mode(tmp_path):
+    """The first, a second and a post-load train() all compute the loss in train mode."""
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(adata, sample_key="sample", n_latent=3, n_latent_u=2)
+
+    def modes_during(fit_model):
+        seen = []
+        original = type(fit_model.module).loss
+
+        def recording_loss(self, *args, **kwargs):
+            seen.append(self.training)
+            return original(self, *args, **kwargs)
+
+        fit_model.module.loss = recording_loss.__get__(fit_model.module)
+        try:
+            fit_model.train(
+                max_epochs=1, accelerator="cpu", train_size=1.0, batch_size=8, early_stopping=False
+            )
+        finally:
+            del fit_model.module.loss
+        return set(seen)
+
+    assert True in modes_during(model)
+    assert modes_during(model) == {True}  # second call
+    model.save(tmp_path / "m", overwrite=True)
+    assert modes_during(MrTotalVI.load(tmp_path / "m", adata=adata)) == {True}
