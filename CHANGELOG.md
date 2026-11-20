@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- New known-answer donor-recovery test: 8 donors with planted RNA effects (log-ratio
+  -2.8 to 2.8), package defaults, 100 epochs. Donor distances must rank the planted effects
+  with an exact donor-permutation p <= 0.01 on each of training seeds 0, 1 and 2. Untrained
+  models fail it (p = 0.07, 0.23, 0.77); the `*_wiring` tests do not.
 - Two opt-in training flags; the defaults are unchanged (user decisions, 2026-11-20).
   `residual_prior_mode="factual"` (centered_v2 only) scores the factual centered residual
   instead of the mean over raw residuals, which made a sample-private residual about `S - 1`
@@ -231,7 +235,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
   variances.
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).
-- Test gaps: the hierarchy tests pass on an untrained model (now named `*_wiring`; no
-  donor-recovery test exists yet), no known-answer test covers DA on the
-  default `omit_original_sample=True` path, and the shared training helper passes `lr` through
-  `plan_kwargs`, so it is ignored.
+- Test gaps: no known-answer test covers DA on the default `omit_original_sample=True` path,
+  and the shared training helper passes `lr` through `plan_kwargs`, so it is ignored (now
+  with a warning).
