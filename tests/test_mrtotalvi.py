@@ -2618,7 +2618,7 @@ def test_donor_recovery_score_oracle():
 
 @pytest.mark.parametrize("training_seed", DONOR_RECOVERY_SEEDS)
 def test_known_answer_donor_recovery(donor_recovery_adata, training_seed):
-    """A trained model's donor distances rank the planted donor effects (p <= 0.01)."""
+    """A trained model's donor distances rank the planted donor effects (p <= 0.01, rho >= 0.95)."""
     import torch
 
     adata = donor_recovery_adata.copy()
@@ -2647,3 +2647,7 @@ def test_known_answer_donor_recovery(donor_recovery_adata, training_seed):
         torch.set_num_threads(threads)
     rho, p = _donor_recovery_score(distances, DONOR_LEVELS)
     assert p <= 0.01, (training_seed, rho, p)
+    # p reaches its floor (4.96e-5) after 10 epochs for seed 2, so it cannot tell a short
+    # fit from a full one. rho can: 0.69-0.93 at 10 epochs, 0.983 at 100 for seeds 0-2
+    # (sweep 2026-11-20). The bound sits 0.033 below the trained value (user decision).
+    assert rho >= 0.95, (training_seed, rho, p)

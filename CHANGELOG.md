@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Tests: the donor-recovery test now also needs Spearman `rho >= 0.95`. Its exact p reaches
+  the floor 4.96e-5 after 10 epochs, so `p <= 0.01` alone passed an undertrained model (rho
+  0.69-0.93 at 10 epochs, 0.983 at 100, seeds 0-2; user decision, 2026-11-20). New tests
+  cover six code paths a mutation run showed were untested.
 - Small input and doc fixes (no numbers change). Counterfactual methods reject a `random_state`
   outside `[0, 2**32)` or of a non-integer type, and an empty `indices` selection, before
   inference. A transfer `adata` missing the protein-names `uns` key now warns that the protein
