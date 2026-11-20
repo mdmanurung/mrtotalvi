@@ -4,6 +4,33 @@
 
 ### Fixed
 
+- New known-answer donor-recovery test: 8 donors with planted RNA effects (log-ratio
+  -2.8 to 2.8), package defaults, 100 epochs. Donor distances must rank the planted effects
+  with an exact donor-permutation p <= 0.01 on each of training seeds 0, 1 and 2. Untrained
+  models fail it (p = 0.07, 0.23, 0.77); the `*_wiring` tests do not.
+- Two opt-in training flags; the defaults are unchanged (user decisions, 2026-11-20).
+  `residual_prior_mode="factual"` (centered_v2 only) scores the factual centered residual
+  instead of the mean over raw residuals, which made a sample-private residual about `S - 1`
+  times cheaper than in `legacy` (ADR-0007 amendment). `anneal_protein_likelihood=False`
+  stops scaling the protein likelihood by `kl_weight` during warm-up, as the TOTALVI paper
+  describes; upstream TOTALVI scales it, so at `kl_weight=0` the protein term gave no
+  gradient. Both are saved with the model; older checkpoints load with the defaults. Neither
+  is validated on real data.
+- `get_local_sample_representation` and `get_local_sample_distances` take an opt-in
+  `admissibility=` boolean `(cell_name, sample)` mask, for example
+  `get_outlier_cell_sample_pairs()["is_admissible"]`. Unsupported entries become NaN, group
+  means average each sample pair over the cells with support in it, and
+  `<column>_n_cells` holds those counts. Without the argument the output is unchanged, as
+  upstream MrVI (user decision, 2026-11-20).
+- `combine_mrtotalvi_seed_results` now compares `specified_panel` and the enrichment settings
+  `group_key`, `contrast` (in numerator, denominator order) and `donor_key` across seeds and
+  raises on a mismatch; before, a reversed contrast pooled opposite log-ratios into one mean.
+  `local_sample_enrichment` records these settings. Results written before this change lack
+  them: they still combine, with a warning that the settings cannot be checked (user decision,
+  2026-11-20).
+- `train()` warns when it overrides a `plan_kwargs` value (`lr`, `n_steps_kl_warmup`,
+  `n_epochs_kl_warmup`, `reduce_lr_on_plateau`, `adversarial_classifier`). The precedence is
+  unchanged and follows TOTALVI: the `train()` argument wins.
 - `MrTotalVI.load_query_data` and `MrTotalVI.minify_adata` now raise `NotImplementedError`
   pointing to `docs/user_guide.md`. The inherited `load_query_data` loaded a query with new
   samples, froze the sample tables and left the new samples with random embeddings while
@@ -206,14 +233,8 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
   path's per-covariate Wald statistic mixes correlated covariates (sqrt(X^T M X) prefactor),
   rejected samples still enter the eps standardisation, and `lfc_std` averages per-batch
   variances.
-- `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
-- The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
-- `train()` overwrites `lr` and KL warm-up passed through `plan_kwargs`; pass them to `train()`.
-- Local sample distances are not masked for sample support.
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).
-- The seed combiner does not compare `specified_panel` or the enrichment contrast settings.
-- Test gaps: the hierarchy tests pass on an untrained model (now named `*_wiring`; no
-  donor-recovery test exists yet), no known-answer test covers DA on the
-  default `omit_original_sample=True` path, and the shared training helper passes `lr` through
-  `plan_kwargs`, so it is ignored.
+- Test gaps: no known-answer test covers DA on the default `omit_original_sample=True` path,
+  and the shared training helper passes `lr` through `plan_kwargs`, so it is ignored (now
+  with a warning).

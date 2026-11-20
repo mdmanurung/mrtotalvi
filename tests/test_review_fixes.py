@@ -646,3 +646,152 @@ def test_stochastic_residual_scale_has_a_floor(log_scale):
     # Closed form for KL(N(0, s) || N(0, 1)) per dimension: -log s + s^2 / 2 - 1/2.
     kl = kl_divergence(eps_dist, Normal(0.0, 1.0))
     np.testing.assert_allclose(kl.numpy(), -math.log(1e-3) + 0.5e-6 - 0.5, rtol=1e-5)
+
+
+# Seed combiner settings -------------------------------------------------------
+
+
+def _seed_pair(**attrs):
+    import xarray as xr
+
+    base = {"specified_panel": "p0", "group_key": "condition", "contrast": '["A","B"]',
+            "donor_key": "patient", **attrs}
+    first = xr.Dataset({"value": (("draw",), [1.0, 3.0])}, attrs=dict(base))
+    second = xr.Dataset({"value": (("draw",), [5.0, 7.0])}, attrs={**base, "random_state": 99})
+    return first, second
+
+
+@pytest.mark.parametrize(
+    ("key", "changed"),
+    [
+        ("specified_panel", "p1"),
+        ("group_key", "other_condition"),
+        ("contrast", '["B","A"]'),
+        ("donor_key", "other_patient"),
+    ],
+)
+def test_seed_combiner_rejects_different_settings(key, changed):
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    first, second = _seed_pair()
+    result = combine_mrtotalvi_seed_results({0: first, 1: second})
+    # Hand calculation: seed means 2 and 6, so mean 4 and sample variance 8.
+    assert result.value_between_seed_mean.item() == 4.0
+    assert result.value_between_seed_sd.item() == pytest.approx(8**0.5)
+    second.attrs[key] = changed
+    with pytest.raises(ValueError, match=key):
+        combine_mrtotalvi_seed_results({0: first, 1: second})
+
+
+def test_seed_combiner_warns_for_results_without_setting_attrs():
+    import xarray as xr
+
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    old = [
+        xr.Dataset({"log_ratio": (("draw",), values)}, attrs={"random_state": seed})
+        for seed, values in enumerate(([1.0, 3.0], [5.0, 7.0]))
+    ]
+    with pytest.warns(UserWarning, match="contrast"):
+        result = combine_mrtotalvi_seed_results({0: old[0], 1: old[1]})
+    assert result.log_ratio_between_seed_mean.item() == 4.0
+
+
+def test_enrichment_records_contrast_settings_for_the_combiner():
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    model, adata = _make_enrichment_v2_model()
+    request = dict(adata=adata, indices=[0, 1], group_key="group", donor_key="donor",
+                   inference_mode="posterior_mc", n_draws=2)
+    forward = model.local_sample_enrichment(contrast=("numerator", "denominator"), **request)
+    assert forward.attrs["group_key"] == "group"
+    assert forward.attrs["contrast"] == '["numerator", "denominator"]'
+    assert forward.attrs["donor_key"] == "donor"
+    reverse = model.local_sample_enrichment(
+        contrast=("denominator", "numerator"), random_state=1, **request
+    )
+    with pytest.raises(ValueError, match="contrast"):
+        combine_mrtotalvi_seed_results({0: forward, 1: reverse})
+
+
+# centered_v2 residual prior modes and protein annealing ------------------------
+
+
+def _residual_cost_delta(mode):
+    """Residual-prior cost of cell 0 for raw residuals [1, -0.5, -0.5] on one axis."""
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    module = model.module.eval()
+    module.residual_prior_mode = mode
+    tensors = next(iter(model._make_data_loader(adata=adata, indices=np.arange(2), batch_size=2)))
+    assert tensors[REGISTRY_KEYS.SAMPLE_KEY].flatten()[0] == 0  # cell 0 is in sample 0
+    inference, generative = module(tensors, compute_loss=False)
+    raw = torch.zeros_like(inference["eps_raw_all"])  # (cell, sample, latent)
+    raw[0, :, 0] = torch.tensor([1.0, -0.5, -0.5])
+
+    def cost(values):
+        centered = values - values.mean(1, keepdim=True)
+        factual = module._gather_sample(centered, tensors[REGISTRY_KEYS.SAMPLE_KEY])
+        outputs = dict(
+            inference, eps_raw_all=values, eps_centered_all=centered, eps=factual,
+            z=inference["z_base"] + factual,
+        )
+        return module.loss(tensors, outputs, generative).kl_local["kl_div_z"]
+
+    # u and the likelihood are held fixed, so the difference is the residual penalty.
+    return (cost(raw) - cost(torch.zeros_like(raw)))[0].item()
+
+
+def test_residual_prior_modes_have_closed_form_costs():
+    # sigma = exp(pz_scale) = 1. raw_mean: mean over samples of r^2 / 2 per sample,
+    # (0.5 + 0.125 + 0.125) / 3 = 0.25. factual: the centered factual eps is [1, 0, 0],
+    # cost 1^2 / 2 = 0.5, the same as a legacy private residual.
+    assert _residual_cost_delta("raw_mean") == pytest.approx(0.25, abs=1e-6)
+    assert _residual_cost_delta("factual") == pytest.approx(0.5, abs=1e-6)
+
+
+def test_factual_residual_prior_needs_centered_v2():
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    with pytest.raises(ValueError, match="requires hierarchy_mode='centered_v2'"):
+        MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", residual_prior_mode="factual")
+
+
+@pytest.mark.parametrize("hierarchy_mode", ["legacy", "centered_v2"])
+@pytest.mark.parametrize("anneal", [True, False])
+def test_protein_likelihood_slope_at_zero_kl_weight(hierarchy_mode, anneal):
+    """d loss / d pro_recons_weight at kl_weight=0 is mean protein NLL, or 0 when annealed."""
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode=hierarchy_mode,
+        anneal_protein_likelihood=anneal,
+    )
+    module = model.module.eval()
+    tensors = next(iter(model._make_data_loader(adata=adata, batch_size=8)))
+    inference, generative = module(tensors, compute_loss=False)
+
+    def loss(weight):
+        return module.loss(tensors, inference, generative, kl_weight=0.0, pro_recons_weight=weight)
+
+    reference = loss(0.0)
+    slope = (loss(0.8).loss - reference.loss).item() / 0.8
+    expected = 0.0 if anneal else reference.reconstruction_loss["reconst_loss_protein"].mean().item()
+    assert slope == pytest.approx(expected, rel=1e-5, abs=1e-5)
+
+
+def test_new_model_flags_survive_save_and_load(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+        residual_prior_mode="factual", anneal_protein_likelihood=False,
+    )
+    model.is_trained_ = True
+    model.save(tmp_path / "m", overwrite=True)
+    loaded = MrTotalVI.load(tmp_path / "m", adata=adata)
+    assert loaded.module.residual_prior_mode == "factual"
+    assert loaded.module.anneal_protein_likelihood is False

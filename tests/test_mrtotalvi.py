@@ -2531,3 +2531,123 @@ def test_use_vmap_true_is_rejected_by_differential_expression(adata_basic):
     model, _ = _untrained_model(adata_basic)
     with pytest.raises(NotImplementedError, match="use_vmap=True"):
         model.differential_expression(use_vmap=True)
+
+
+# ---------------------------------------------------------------------------
+# Known-answer donor recovery (the wiring tests above pass untrained)
+# ---------------------------------------------------------------------------
+
+# Planted donor levels; the donor effect on the RNA log-ratio of two gene blocks is
+# 2 * 0.2 * level, from -2.8 to 2.8 natural-log units.
+DONOR_LEVELS = np.array([-1, 7, -7, 3, -5, 5, -3, 1])
+# Every seed must pass; seeds are never retried or selected.
+DONOR_RECOVERY_SEEDS = (0, 1, 2)
+
+
+@pytest.fixture(scope="module")
+def donor_recovery_adata():
+    """8 donors x 2 states x 32 cells; 48 genes, 1200 RNA counts per cell, 8 proteins.
+
+    Genes 0-11 have logit theta_d and genes 12-23 have -theta_d, so
+    log(E[block 1] / E[block 2]) = 2 * theta_d exactly. Genes 24-47 and proteins carry
+    only the state, balanced across donors.
+    """
+    import anndata as ad
+    import pandas as pd
+
+    rng = np.random.default_rng(149488)
+    theta = 0.2 * DONOR_LEVELS
+    counts, proteins, donors, states = [], [], [], []
+    for donor, level in enumerate(theta):
+        for state in (0, 1):
+            logits = np.concatenate(
+                [
+                    np.full(12, level),
+                    np.full(12, -level),
+                    np.full(12, 1.0 if state == 0 else -1.0),
+                    np.full(12, 1.0 if state == 1 else -1.0),
+                ]
+            )
+            probabilities = np.exp(logits) / np.exp(logits).sum()
+            counts.append(rng.multinomial(1200, probabilities, size=32))
+            protein_mean = np.where((np.arange(8) % 2) == state, 30.0, 5.0)
+            proteins.append(rng.poisson(protein_mean, size=(32, 8)))
+            donors += [f"d{donor}"] * 32
+            states += [f"s{state}"] * 32
+    obs = pd.DataFrame(
+        {"sample": donors, "state": states, "batch": "b0"},
+        index=[f"c{i}" for i in range(len(donors))],
+    )
+    adata = ad.AnnData(np.vstack(counts).astype(np.float32), obs=obs)
+    adata.obsm["protein_expression"] = np.vstack(proteins).astype(np.float32)
+    return adata
+
+
+def _donor_recovery_score(distances, levels):
+    """Spearman rho of donor distances vs |level differences|, exact permutation p.
+
+    Donor identities are permuted jointly (all 8! orders), never individual distances.
+    """
+    import itertools
+
+    from scipy.stats import rankdata
+
+    i, j = np.triu_indices(len(levels), 1)
+    truth = np.abs(levels[:, None] - levels)
+    orders = np.array(list(itertools.permutations(range(len(levels)))))
+
+    def unit_ranks(values):
+        ranks = rankdata(values, axis=-1)
+        ranks -= ranks.mean(axis=-1, keepdims=True)
+        norms = np.linalg.norm(ranks, axis=-1, keepdims=True)
+        if not (np.isfinite(ranks).all() and (norms > 0).all()):
+            raise ValueError("distances must be finite and not constant")
+        return ranks / norms
+
+    observed = unit_ranks(distances[i, j])
+    null = unit_ranks(truth[orders[:, i], orders[:, j]])
+    rho = float(observed @ unit_ranks(truth[i, j]))
+    return rho, float(np.mean(null @ observed >= rho - 1e-12))
+
+
+def test_donor_recovery_score_oracle():
+    """The true distances score rho 1; only identity and reflection reach it: p = 2 / 8!."""
+    import math
+
+    truth = np.abs(DONOR_LEVELS[:, None] - DONOR_LEVELS).astype(float)
+    rho, p = _donor_recovery_score(truth, DONOR_LEVELS)
+    assert rho == pytest.approx(1.0)
+    assert p == pytest.approx(2 / math.factorial(8))
+
+
+@pytest.mark.parametrize("training_seed", DONOR_RECOVERY_SEEDS)
+def test_known_answer_donor_recovery(donor_recovery_adata, training_seed):
+    """A trained model's donor distances rank the planted donor effects (p <= 0.01)."""
+    import torch
+
+    adata = donor_recovery_adata.copy()
+    MrTotalVI.setup_anndata(
+        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        batch_key="batch",
+    )
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        scvi.settings.seed = training_seed
+        model = MrTotalVI(adata, sample_key="sample")
+        # Upstream MrVI defaults: 100 epochs with a 20-epoch KL warm-up.
+        model.train(
+            max_epochs=100, n_epochs_kl_warmup=20, accelerator="cpu", devices=1,
+            batch_size=128, train_size=1.0, early_stopping=False,
+            enable_progress_bar=False, logger=False, enable_checkpointing=False,
+        )
+        donors = [f"d{i}" for i in range(8)]
+        distances = (
+            model.get_local_sample_distances(indices=np.arange(0, adata.n_obs, 8), use_mean=True)
+            .sel(sample_x=donors, sample_y=donors)
+            .values.mean(axis=0)
+        )
+    finally:
+        torch.set_num_threads(threads)
+    rho, p = _donor_recovery_score(distances, DONOR_LEVELS)
+    assert p <= 0.01, (training_seed, rho, p)

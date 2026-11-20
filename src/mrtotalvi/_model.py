@@ -187,6 +187,19 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     kl_z_weight
         Static scalar weight applied to ``KL(q_z ‖ p_z)`` before the global
         ``kl_weight`` annealing.  Default ``1.0`` preserves prior behaviour.
+    residual_prior_mode
+        ``centered_v2`` residual prior. ``"raw_mean"`` (default, ADR-0007) averages
+        ``-log p(eps)`` over every registered sample's raw residual, which makes a
+        sample-private residual about ``S - 1`` times cheaper than in ``legacy``.
+        ``"factual"`` scores only the cell's centered factual residual, as upstream MrVI
+        scores its ``eps``. It changes training; it is opt-in and unvalidated on real data.
+        It requires ``hierarchy_mode="centered_v2"``. Checkpoints without it load with
+        ``"raw_mean"``.
+    anneal_protein_likelihood
+        ``True`` (default, upstream TOTALVI) multiplies the protein likelihood by
+        ``kl_weight`` during warm-up, so it gives no gradient at ``kl_weight=0``.
+        ``False`` anneals only the KL terms, as the TOTALVI paper describes. It changes
+        training; it is opt-in. Checkpoints without it load with ``True``.
     init_prior_from_data
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
@@ -270,6 +283,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         u_encoder_sample_embedding_prior_scale: float | None = None,
         kl_u_weight: float = 1.0,
         kl_z_weight: float = 1.0,
+        residual_prior_mode: Literal["raw_mean", "factual"] = "raw_mean",
+        anneal_protein_likelihood: bool = True,
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -327,6 +342,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
         if hierarchy_mode not in {"legacy", "centered_v2"}:
             raise ValueError("hierarchy_mode must be one of {'legacy', 'centered_v2'}.")
+        if residual_prior_mode == "factual" and hierarchy_mode != "centered_v2":
+            raise ValueError("residual_prior_mode='factual' requires hierarchy_mode='centered_v2'.")
         if u_encoder_mode not in {"sample_conditioned", "sample_blind"}:
             raise ValueError(
                 "u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}."
@@ -379,6 +396,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             u_encoder_mode=u_encoder_mode,
             kl_u_weight=kl_u_weight,
             kl_z_weight=kl_z_weight,
+            residual_prior_mode=residual_prior_mode,
+            anneal_protein_likelihood=anneal_protein_likelihood,
             use_batch_norm=use_batch_norm,
             use_layer_norm=use_layer_norm,
             batch_representation=batch_representation,
@@ -828,6 +847,39 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_epochs_kl_warmup=n_epochs_kl_warmup,
             adversarial_classifier=adversarial_classifier,
         )
+
+        # TOTALVI.train() overwrites these plan_kwargs keys with its own arguments
+        # (scvi/model/_totalvi.py:321-329). Keep that precedence, but say so.
+        effective = {
+            "lr": lr,
+            "adversarial_classifier": (
+                self._use_adversarial_classifier
+                if adversarial_classifier is None
+                else adversarial_classifier
+            ),
+            "reduce_lr_on_plateau": reduce_lr_on_plateau,
+            "n_epochs_kl_warmup": n_epochs_kl_warmup,
+            "n_steps_kl_warmup": (
+                int(0.75 * self.adata.n_obs)
+                if n_steps_kl_warmup is None
+                else n_steps_kl_warmup
+            ),
+        }
+        ignored = {
+            key: (value, effective[key])
+            for key, value in (plan_kwargs or {}).items()
+            if key in effective and value != effective[key]
+        }
+        if ignored:
+            details = ", ".join(
+                f"{key}={given!r} (used {used!r})" for key, (given, used) in ignored.items()
+            )
+            warnings.warn(
+                f"plan_kwargs values ignored, train() arguments win: {details}. "
+                "Pass these to train() directly.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         plan_kwargs = {**DEFAULT_PLAN_KWARGS, **(plan_kwargs or {})}
 
@@ -1857,6 +1909,33 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "and order; reorder the protein matrix to the registry."
             )
 
+    def _admissibility_rows(self, admissibility, cell_names) -> np.ndarray:
+        """Boolean ``(n_cell, n_sample)`` support rows, aligned by cell and sample name."""
+        if not isinstance(admissibility, xr.DataArray) or set(admissibility.dims) != {
+            "cell_name",
+            "sample",
+        }:
+            raise ValueError("admissibility must be an xarray.DataArray over (cell_name, sample).")
+        if admissibility.dtype != bool:
+            raise ValueError("admissibility must be boolean.")
+        for dim in ("cell_name", "sample"):
+            if admissibility.indexes[dim].has_duplicates:
+                raise ValueError(f"admissibility has duplicate {dim} labels.")
+        missing_cells = np.setdiff1d(np.asarray(cell_names), admissibility["cell_name"].values)
+        missing_samples = np.setdiff1d(
+            np.asarray(self.sample_order), admissibility["sample"].values
+        )
+        if missing_cells.size or missing_samples.size:
+            raise ValueError(
+                "admissibility must cover every requested cell and registered sample; "
+                f"missing {missing_cells.size} cell(s) and samples {missing_samples.tolist()}."
+            )
+        return (
+            admissibility.sel(cell_name=list(cell_names), sample=list(self.sample_order))
+            .transpose("cell_name", "sample")
+            .values
+        )
+
     def get_local_sample_representation(
         self,
         adata: AnnData | None = None,
@@ -1864,6 +1943,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size: int = 256,
         use_mean: bool = True,
         max_gb: float | None = 4.0,
+        *,
+        admissibility: xr.DataArray | None = None,
     ) -> xr.DataArray:
         """Compute the local per-donor latent representation.
 
@@ -1885,6 +1966,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             (``n_cell * n_sample * n_latent`` float32). ``None`` disables the check.
             Pass fewer ``indices`` or use :meth:`get_local_sample_distances` with
             ``groupby`` to stay under it.
+        admissibility
+            Optional boolean ``(cell_name, sample)`` support mask, for example
+            ``get_outlier_cell_sample_pairs()["is_admissible"]``. A cell's
+            representation for a sample it has no support in is set to NaN. ``None``
+            (default) masks nothing, as upstream MrVI.
 
         Returns
         -------
@@ -1904,6 +1990,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         reps, cell_names = self._compute_cf_representations(
             adata, indices, batch_size, use_mean=use_mean
         )
+        if admissibility is not None:
+            reps = reps.copy()
+            reps[~self._admissibility_rows(admissibility, cell_names)] = np.nan
         return xr.DataArray(
             reps,
             dims=["cell_name", "sample", "latent_dim"],
@@ -1924,6 +2013,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         groupby: str | list[str] | None = None,
         keep_cell: bool = True,
         max_gb: float | None = 4.0,
+        *,
+        admissibility: xr.DataArray | None = None,
     ) -> xr.DataArray | xr.Dataset:
         """Compute cell-specific pairwise donor distance matrices.
 
@@ -1958,6 +2049,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             Raise before encoding when the per-cell output (``n_cell * n_sample^2``
             float32) would exceed this many GiB. ``None`` disables the check. Use
             ``groupby`` with ``keep_cell=False``, or fewer ``indices``, to stay under it.
+        admissibility
+            Optional boolean ``(cell_name, sample)`` support mask, for example
+            ``get_outlier_cell_sample_pairs()["is_admissible"]``. A cell's distance
+            between two samples is NaN unless it has support in both. Group means then
+            average each sample pair over the cells with support in that pair, and a
+            ``<column>_n_cells`` variable holds those counts. ``None`` (default) masks
+            nothing, as upstream MrVI.
 
         Returns
         -------
@@ -1997,15 +2095,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             batch_d = torch.cdist(
                 chunk, chunk, p=p, compute_mode="donot_use_mm_for_euclid_dist"
             ).numpy()
-            cell_names.extend(adata.obs_names[positions].tolist())
+            batch_names = adata.obs_names[positions].tolist()
+            cell_names.extend(batch_names)
+            # A pair counts for a cell only where the cell has support in both samples.
+            pair_ok = np.ones(batch_d.shape, dtype=bool)
+            if admissibility is not None:
+                support = self._admissibility_rows(admissibility, batch_names)
+                pair_ok = support[:, :, None] & support[:, None, :]
+                batch_d = np.where(pair_ok, batch_d, np.nan)
             if keep_cell:
                 dists[start : start + len(positions)] = batch_d
             start += len(positions)
             for key in group_keys:
                 labels = adata.obs[key].to_numpy()[positions]
                 for label in np.unique(labels):
-                    total = batch_d[labels == label].sum(axis=0, dtype=np.float64)
-                    count = int((labels == label).sum())
+                    in_group = labels == label
+                    total = np.where(pair_ok[in_group], batch_d[in_group], 0.0).sum(
+                        axis=0, dtype=np.float64
+                    )
+                    count = pair_ok[in_group].sum(axis=0)
                     prior = sums[key].get(label, [0.0, 0])
                     sums[key][label] = [prior[0] + total, prior[1] + count]
 
@@ -2022,8 +2130,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             data_vars["cell"] = (["cell_name", "sample_x", "sample_y"], dists)
         for key in group_keys:
             labels = list(sums[key])
-            means = np.stack([sums[key][g][0] / sums[key][g][1] for g in labels])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                means = np.stack([sums[key][g][0] / sums[key][g][1] for g in labels])
             data_vars[f"{key}_distances"] = ([key, "sample_x", "sample_y"], means.astype(np.float32))
+            if admissibility is not None:
+                counts = np.stack([sums[key][g][1] for g in labels]).astype(np.int64)
+                data_vars[f"{key}_n_cells"] = ([key, "sample_x", "sample_y"], counts)
         group_coords = {key: list(sums[key]) for key in group_keys}
         if keep_cell:
             group_coords["cell_name"] = cell_names

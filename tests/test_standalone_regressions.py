@@ -127,3 +127,62 @@ def test_seed_combiner_skips_between_seed_summary_for_latent_coordinates():
     assert "z_between_seed_mean" not in combined
     assert "z_within_seed_posterior_mean" in combined
     assert combined.attrs["between_seed_skipped_latent_variables"] == "z"
+
+
+def test_local_outputs_apply_an_admissibility_mask(trained_legacy, monkeypatch):
+    """Masked pairs are NaN and group means use per-pair cell counts (hand geometry)."""
+    model, adata = trained_legacy
+    samples = list(model.sample_order)
+    assert len(samples) == 4
+    reps = np.zeros((2, 4, model.module.n_latent), dtype=np.float32)
+    reps[0, :, :2] = [[0, 0], [3, 4], [6, 8], [0, 8]]
+    reps[1] = 2 * reps[0]
+    positions = np.array([0, 1])
+    monkeypatch.setattr(
+        model,
+        "_iter_cf_representations",
+        lambda *args, **kwargs: iter([(reps.copy(), positions)]),
+    )
+    names = list(adata.obs_names[:2])
+    # Cell 1 has no support in the second sample.
+    mask = xr.DataArray(
+        [[True, True, True, True], [True, False, True, True]],
+        dims=("cell_name", "sample"),
+        coords={"cell_name": names, "sample": samples},
+    )
+    adata.obs["one_group"] = "g"
+    request = dict(adata=adata, indices=positions, admissibility=mask)
+
+    local = model.get_local_sample_representation(**request)
+    expected_reps = reps.copy()
+    expected_reps[1, 1, :] = np.nan
+    np.testing.assert_allclose(local.values, expected_reps, equal_nan=True)
+
+    # Euclidean distances between the four points, by hand; cell 1 is twice cell 0.
+    base = np.array([[0, 5, 10, 8], [5, 0, 5, 5], [10, 5, 0, 6], [8, 5, 6, 0]], np.float32)
+    expected = np.stack([base, 2 * base])
+    expected[1, 1, :] = np.nan
+    expected[1, :, 1] = np.nan
+    distances = model.get_local_sample_distances(groupby="one_group", **request)
+    np.testing.assert_allclose(distances["cell"].values, expected, rtol=1e-6, equal_nan=True)
+    grouped = distances["one_group_distances"].sel(one_group="g").values
+    # Pair (0, 1): only cell 0 has support, so the mean is 5, not (5 + 10) / 2.
+    assert grouped[0, 1] == pytest.approx(5.0)
+    assert grouped[0, 2] == pytest.approx(15.0)  # both cells: (10 + 20) / 2
+    assert distances["one_group_n_cells"].sel(one_group="g").values[0, 1] == 1
+
+    # Without a mask nothing changes: no NaN, the plain mean, no count variable.
+    plain = model.get_local_sample_distances(adata=adata, indices=positions, groupby="one_group")
+    assert plain["one_group_distances"].sel(one_group="g").values[0, 1] == pytest.approx(7.5)
+    assert "one_group_n_cells" not in plain
+
+
+def test_admissibility_mask_must_cover_cells_and_samples(trained_legacy):
+    model, adata = trained_legacy
+    mask = xr.DataArray(
+        np.ones((1, len(model.sample_order)), dtype=bool),
+        dims=("cell_name", "sample"),
+        coords={"cell_name": [adata.obs_names[0]], "sample": list(model.sample_order)},
+    )
+    with pytest.raises(ValueError, match="cover every requested cell"):
+        model.get_local_sample_distances(adata=adata, indices=[0, 1], admissibility=mask)
