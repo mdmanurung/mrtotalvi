@@ -28,7 +28,19 @@ _ESTIMAND_ATTRS = (
     "density",
     "group_density",
     "self_exclusion",
+    "specified_panel",
+    "group_key",
+    "contrast",
+    "donor_key",
 )
+
+# Outputs that depend on a setting, and the attribute that records it. Results written
+# before the attribute existed lack it, so their settings cannot be compared.
+_SETTING_FOR_OUTPUT = {
+    "group_log_density": "group_key",
+    "log_ratio": "contrast",
+    "donor_log_ratio": "donor_key",
+}
 
 
 def combine_mrtotalvi_seed_results(
@@ -69,6 +81,27 @@ def combine_mrtotalvi_seed_results(
                     UserWarning,
                     stacklevel=2,
                 )
+    unverified = sorted(
+        {
+            setting
+            for dataset in datasets
+            for output, setting in _SETTING_FOR_OUTPUT.items()
+            if output in dataset.data_vars and setting not in dataset.attrs
+        }
+        | {
+            "specified_panel"
+            for dataset in datasets
+            if dataset.attrs.get("panel_policy") == "specified"
+            and "specified_panel" not in dataset.attrs
+        }
+    )
+    if unverified:
+        warnings.warn(
+            f"Seed results lack the {unverified} attribute(s), so those settings cannot be "
+            "compared across seeds. Regenerate them with the current package to check.",
+            UserWarning,
+            stacklevel=2,
+        )
     for dataset in datasets[1:]:
         if set(dataset.data_vars) != set(template.data_vars):
             raise ValueError("Seed results must contain identical data variables.")

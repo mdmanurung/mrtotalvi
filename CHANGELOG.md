@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- `combine_mrtotalvi_seed_results` now compares `specified_panel` and the enrichment settings
+  `group_key`, `contrast` (in numerator, denominator order) and `donor_key` across seeds and
+  raises on a mismatch; before, a reversed contrast pooled opposite log-ratios into one mean.
+  `local_sample_enrichment` records these settings. Results written before this change lack
+  them: they still combine, with a warning that the settings cannot be checked (user decision,
+  2026-11-20).
 - `train()` warns when it overrides a `plan_kwargs` value (`lr`, `n_steps_kl_warmup`,
   `n_epochs_kl_warmup`, `reduce_lr_on_plateau`, `adversarial_classifier`). The precedence is
   unchanged and follows TOTALVI: the `train()` argument wins.
@@ -214,7 +220,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
 - Local sample distances are not masked for sample support.
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).
-- The seed combiner does not compare `specified_panel` or the enrichment contrast settings.
 - Test gaps: the hierarchy tests pass on an untrained model (now named `*_wiring`; no
   donor-recovery test exists yet), no known-answer test covers DA on the
   default `omit_original_sample=True` path, and the shared training helper passes `lr` through

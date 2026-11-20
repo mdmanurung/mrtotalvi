@@ -2138,6 +2138,12 @@ def local_sample_enrichment(
             "group_density": "equal-sample logmeanexp; no cell-count weighting",
             "self_exclusion": "query cell excluded only from its factual sample mixture",
             "interpretation": INTERPRETATION,
+            # The seed combiner compares these; contrast keeps numerator, denominator order.
+            "group_key": "" if group_key is None else str(group_key),
+            "contrast": json.dumps(
+                [] if contrast is None else [str(value) for value in contrast]
+            ),
+            "donor_key": "" if donor_key is None else str(donor_key),
         },
     )
     if inference_mode == "posterior_mc":

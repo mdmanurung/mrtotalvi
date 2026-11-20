@@ -646,3 +646,69 @@ def test_stochastic_residual_scale_has_a_floor(log_scale):
     # Closed form for KL(N(0, s) || N(0, 1)) per dimension: -log s + s^2 / 2 - 1/2.
     kl = kl_divergence(eps_dist, Normal(0.0, 1.0))
     np.testing.assert_allclose(kl.numpy(), -math.log(1e-3) + 0.5e-6 - 0.5, rtol=1e-5)
+
+
+# Seed combiner settings -------------------------------------------------------
+
+
+def _seed_pair(**attrs):
+    import xarray as xr
+
+    base = {"specified_panel": "p0", "group_key": "condition", "contrast": '["A","B"]',
+            "donor_key": "patient", **attrs}
+    first = xr.Dataset({"value": (("draw",), [1.0, 3.0])}, attrs=dict(base))
+    second = xr.Dataset({"value": (("draw",), [5.0, 7.0])}, attrs={**base, "random_state": 99})
+    return first, second
+
+
+@pytest.mark.parametrize(
+    ("key", "changed"),
+    [
+        ("specified_panel", "p1"),
+        ("group_key", "other_condition"),
+        ("contrast", '["B","A"]'),
+        ("donor_key", "other_patient"),
+    ],
+)
+def test_seed_combiner_rejects_different_settings(key, changed):
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    first, second = _seed_pair()
+    result = combine_mrtotalvi_seed_results({0: first, 1: second})
+    # Hand calculation: seed means 2 and 6, so mean 4 and sample variance 8.
+    assert result.value_between_seed_mean.item() == 4.0
+    assert result.value_between_seed_sd.item() == pytest.approx(8**0.5)
+    second.attrs[key] = changed
+    with pytest.raises(ValueError, match=key):
+        combine_mrtotalvi_seed_results({0: first, 1: second})
+
+
+def test_seed_combiner_warns_for_results_without_setting_attrs():
+    import xarray as xr
+
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    old = [
+        xr.Dataset({"log_ratio": (("draw",), values)}, attrs={"random_state": seed})
+        for seed, values in enumerate(([1.0, 3.0], [5.0, 7.0]))
+    ]
+    with pytest.warns(UserWarning, match="contrast"):
+        result = combine_mrtotalvi_seed_results({0: old[0], 1: old[1]})
+    assert result.log_ratio_between_seed_mean.item() == 4.0
+
+
+def test_enrichment_records_contrast_settings_for_the_combiner():
+    from mrtotalvi import combine_mrtotalvi_seed_results
+
+    model, adata = _make_enrichment_v2_model()
+    request = dict(adata=adata, indices=[0, 1], group_key="group", donor_key="donor",
+                   inference_mode="posterior_mc", n_draws=2)
+    forward = model.local_sample_enrichment(contrast=("numerator", "denominator"), **request)
+    assert forward.attrs["group_key"] == "group"
+    assert forward.attrs["contrast"] == '["numerator", "denominator"]'
+    assert forward.attrs["donor_key"] == "donor"
+    reverse = model.local_sample_enrichment(
+        contrast=("denominator", "numerator"), random_state=1, **request
+    )
+    with pytest.raises(ValueError, match="contrast"):
+        combine_mrtotalvi_seed_results({0: forward, 1: reverse})
