@@ -86,6 +86,14 @@ mean_registered_sample(
 `kl_z_weight` and global KL annealing apply after the equal-sample mean. With one registered sample,
 `eps_centered` is exactly zero while the raw residual penalty remains active.
 
+Amendment (2026-11-20, user decision). For a factual centered residual `a` the cheapest raw
+residuals are `[a, -a/(S-1), ...]`, so this penalty costs `a^2 / (2 sigma^2 (S-1))`, about
+`S - 1` times less than the legacy cost for a sample-private effect. The penalty above stays the
+default (`residual_prior_mode="raw_mean"`). `residual_prior_mode="factual"` is an opt-in that
+scores only the factual centered residual, `sum_latent(-log Normal(eps_centered[s_obs]))`, as
+upstream MrVI scores its `eps`; the raw common shift is then unpenalized. It changes training
+and is not validated on real data.
+
 Target chunking may change memory use but not values or gradients. Every registered residual
 embedding row must receive finite, nonzero gradients even when its sample is absent from the
 factual minibatch.

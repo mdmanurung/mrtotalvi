@@ -187,6 +187,19 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     kl_z_weight
         Static scalar weight applied to ``KL(q_z ‖ p_z)`` before the global
         ``kl_weight`` annealing.  Default ``1.0`` preserves prior behaviour.
+    residual_prior_mode
+        ``centered_v2`` residual prior. ``"raw_mean"`` (default, ADR-0007) averages
+        ``-log p(eps)`` over every registered sample's raw residual, which makes a
+        sample-private residual about ``S - 1`` times cheaper than in ``legacy``.
+        ``"factual"`` scores only the cell's centered factual residual, as upstream MrVI
+        scores its ``eps``. It changes training; it is opt-in and unvalidated on real data.
+        It requires ``hierarchy_mode="centered_v2"``. Checkpoints without it load with
+        ``"raw_mean"``.
+    anneal_protein_likelihood
+        ``True`` (default, upstream TOTALVI) multiplies the protein likelihood by
+        ``kl_weight`` during warm-up, so it gives no gradient at ``kl_weight=0``.
+        ``False`` anneals only the KL terms, as the TOTALVI paper describes. It changes
+        training; it is opt-in. Checkpoints without it load with ``True``.
     init_prior_from_data
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
@@ -270,6 +283,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         u_encoder_sample_embedding_prior_scale: float | None = None,
         kl_u_weight: float = 1.0,
         kl_z_weight: float = 1.0,
+        residual_prior_mode: Literal["raw_mean", "factual"] = "raw_mean",
+        anneal_protein_likelihood: bool = True,
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -327,6 +342,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
         if hierarchy_mode not in {"legacy", "centered_v2"}:
             raise ValueError("hierarchy_mode must be one of {'legacy', 'centered_v2'}.")
+        if residual_prior_mode == "factual" and hierarchy_mode != "centered_v2":
+            raise ValueError("residual_prior_mode='factual' requires hierarchy_mode='centered_v2'.")
         if u_encoder_mode not in {"sample_conditioned", "sample_blind"}:
             raise ValueError(
                 "u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}."
@@ -379,6 +396,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             u_encoder_mode=u_encoder_mode,
             kl_u_weight=kl_u_weight,
             kl_z_weight=kl_z_weight,
+            residual_prior_mode=residual_prior_mode,
+            anneal_protein_likelihood=anneal_protein_likelihood,
             use_batch_norm=use_batch_norm,
             use_layer_norm=use_layer_norm,
             batch_representation=batch_representation,

@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- Two opt-in training flags; the defaults are unchanged (user decisions, 2026-11-20).
+  `residual_prior_mode="factual"` (centered_v2 only) scores the factual centered residual
+  instead of the mean over raw residuals, which made a sample-private residual about `S - 1`
+  times cheaper than in `legacy` (ADR-0007 amendment). `anneal_protein_likelihood=False`
+  stops scaling the protein likelihood by `kl_weight` during warm-up, as the TOTALVI paper
+  describes; upstream TOTALVI scales it, so at `kl_weight=0` the protein term gave no
+  gradient. Both are saved with the model; older checkpoints load with the defaults. Neither
+  is validated on real data.
 - `get_local_sample_representation` and `get_local_sample_distances` take an opt-in
   `admissibility=` boolean `(cell_name, sample)` mask, for example
   `get_outlier_cell_sample_pairs()["is_admissible"]`. Unsupported entries become NaN, group
@@ -221,8 +229,6 @@ largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
   path's per-covariate Wald statistic mixes correlated covariates (sqrt(X^T M X) prefactor),
   rejected samples still enter the eps standardisation, and `lfc_std` averages per-batch
   variances.
-- `centered_v2` weakens the residual prior by about (S - 1) in sample-private regions.
-- The protein likelihood is scaled by `kl_weight` (inherited from upstream TOTALVI).
 - `library_policy="sample_balanced_marginal"` still keys each distinct library value as its own
   context; above 1024 contexts it now fails rather than running (no binning, by design).
 - Test gaps: the hierarchy tests pass on an untrained model (now named `*_wiring`; no

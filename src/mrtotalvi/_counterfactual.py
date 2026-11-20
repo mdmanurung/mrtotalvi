@@ -1249,7 +1249,11 @@ def get_counterfactual_latent(
             "rng": "numpy.Philox keyed by seed, cell ID, draw, and latent coordinate",
             "random_state": int(random_state),
             "centering": "full registered sample universe in registry order",
-            "raw_residual_penalty": "mean_sample(sum_latent(-log Normal(eps_raw)))",
+            "raw_residual_penalty": (
+                "sum_latent(-log Normal(eps_centered_factual))"
+                if getattr(model.module, "residual_prior_mode", "raw_mean") == "factual"
+                else "mean_sample(sum_latent(-log Normal(eps_raw)))"
+            ),
             "dtype": "float32",
             "chunks": json.dumps(
                 {

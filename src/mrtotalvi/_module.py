@@ -130,6 +130,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         scale_observations: bool = False,
         kl_u_weight: float = 1.0,
         kl_z_weight: float = 1.0,
+        residual_prior_mode: str = "raw_mean",
+        anneal_protein_likelihood: bool = True,
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
@@ -192,6 +194,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # A separate per-term annealing schedule would require training-plan changes.
         self.kl_u_weight = float(kl_u_weight)
         self.kl_z_weight = float(kl_z_weight)
+        # centered_v2 residual prior: "raw_mean" (ADR-0007) averages -log p over every
+        # sample's raw residual; "factual" scores only the cell's centered factual eps,
+        # as upstream MrVI does for its eps.
+        if residual_prior_mode not in {"raw_mean", "factual"}:
+            raise ValueError("residual_prior_mode must be one of {'raw_mean', 'factual'}.")
+        self.residual_prior_mode = residual_prior_mode
+        # True (upstream TOTALVI) scales the protein likelihood by kl_weight during
+        # warm-up; False anneals only the KL terms, as the TOTALVI paper describes.
+        self.anneal_protein_likelihood = bool(anneal_protein_likelihood)
         # Counterfactual u-invariance penalty (see u_invariance_penalty); 0 disables it.
         self.u_invariance_weight = float(u_invariance_weight)
         if self.u_invariance_weight < 0:
@@ -878,9 +889,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             + lkl_protein_expressed.sum(dim=-1)
         )
 
+        protein_weight = kl_weight if self.anneal_protein_likelihood else 1.0
         loss = torch.mean(
             reconst_loss_gene
-            + kl_weight * pro_recons_weight * reconst_loss_protein
+            + protein_weight * pro_recons_weight * reconst_loss_protein
             + kl_weight * kl_div_z
             + kl_div_l_gene
             + kl_weight * kl_div_back_pro
@@ -1002,8 +1014,14 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 pro_recons_weight, kl_weight,
             )
 
+        protein_weight = kl_weight if self.anneal_protein_likelihood else 1.0
         if "eps" not in inference_outputs:
-            # Hierarchy not built (n_sample=0 placeholder).
+            # Hierarchy not built (n_sample=0 placeholder). The parent loss annealed the
+            # protein term with kl_weight; add the rest back when it should not.
+            if not self.anneal_protein_likelihood:
+                loss_out.loss = loss_out.loss + (1 - kl_weight) * pro_recons_weight * (
+                    loss_out.reconstruction_loss["reconst_loss_protein"].mean()
+                )
             return loss_out
 
         label_index = tensors[REGISTRY_KEYS.LABELS_KEY]
@@ -1015,7 +1033,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
 
         if self.z_u_prior:
             peps = Normal(0.0, torch.exp(self.pz_scale.clamp(min=-4.0)))
-            if self.hierarchy_mode == "centered_v2":
+            if self.hierarchy_mode == "centered_v2" and self.residual_prior_mode == "factual":
+                kl_z = -peps.log_prob(inference_outputs["eps"]).sum(dim=-1)
+                if kl_z.ndim > 1:
+                    kl_z = kl_z.mean(dim=0)
+            elif self.hierarchy_mode == "centered_v2":
                 eps_raw_all = inference_outputs["eps_raw_all"]
                 sample_dim = 1 if eps_raw_all.ndim == 3 else 2
                 kl_z = -peps.log_prob(eps_raw_all).sum(dim=-1).mean(dim=sample_dim)
@@ -1048,7 +1070,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             prefactors = self.n_obs_per_sample[sample_index]  # (batch,)
             per_cell = (
                 loss_out.reconstruction_loss["reconst_loss_gene"]
-                + kl_weight
+                + protein_weight
                 * pro_recons_weight
                 * loss_out.reconstruction_loss["reconst_loss_protein"]
                 + kl_weight * kl_local["kl_div_z"]
@@ -1072,7 +1094,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 )
             loss = (
                 loss_out.reconstruction_loss["reconst_loss_gene"]
-                + kl_weight * pro_recons_weight * loss_out.reconstruction_loss[
+                + protein_weight * pro_recons_weight * loss_out.reconstruction_loss[
                     "reconst_loss_protein"
                 ]
                 + kl_weight * kl_local["kl_div_z"]

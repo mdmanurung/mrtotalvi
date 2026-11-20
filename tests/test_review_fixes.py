@@ -712,3 +712,86 @@ def test_enrichment_records_contrast_settings_for_the_combiner():
     )
     with pytest.raises(ValueError, match="contrast"):
         combine_mrtotalvi_seed_results({0: forward, 1: reverse})
+
+
+# centered_v2 residual prior modes and protein annealing ------------------------
+
+
+def _residual_cost_delta(mode):
+    """Residual-prior cost of cell 0 for raw residuals [1, -0.5, -0.5] on one axis."""
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    module = model.module.eval()
+    module.residual_prior_mode = mode
+    tensors = next(iter(model._make_data_loader(adata=adata, indices=np.arange(2), batch_size=2)))
+    assert tensors[REGISTRY_KEYS.SAMPLE_KEY].flatten()[0] == 0  # cell 0 is in sample 0
+    inference, generative = module(tensors, compute_loss=False)
+    raw = torch.zeros_like(inference["eps_raw_all"])  # (cell, sample, latent)
+    raw[0, :, 0] = torch.tensor([1.0, -0.5, -0.5])
+
+    def cost(values):
+        centered = values - values.mean(1, keepdim=True)
+        factual = module._gather_sample(centered, tensors[REGISTRY_KEYS.SAMPLE_KEY])
+        outputs = dict(
+            inference, eps_raw_all=values, eps_centered_all=centered, eps=factual,
+            z=inference["z_base"] + factual,
+        )
+        return module.loss(tensors, outputs, generative).kl_local["kl_div_z"]
+
+    # u and the likelihood are held fixed, so the difference is the residual penalty.
+    return (cost(raw) - cost(torch.zeros_like(raw)))[0].item()
+
+
+def test_residual_prior_modes_have_closed_form_costs():
+    # sigma = exp(pz_scale) = 1. raw_mean: mean over samples of r^2 / 2 per sample,
+    # (0.5 + 0.125 + 0.125) / 3 = 0.25. factual: the centered factual eps is [1, 0, 0],
+    # cost 1^2 / 2 = 0.5, the same as a legacy private residual.
+    assert _residual_cost_delta("raw_mean") == pytest.approx(0.25, abs=1e-6)
+    assert _residual_cost_delta("factual") == pytest.approx(0.5, abs=1e-6)
+
+
+def test_factual_residual_prior_needs_centered_v2():
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    with pytest.raises(ValueError, match="requires hierarchy_mode='centered_v2'"):
+        MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", residual_prior_mode="factual")
+
+
+@pytest.mark.parametrize("hierarchy_mode", ["legacy", "centered_v2"])
+@pytest.mark.parametrize("anneal", [True, False])
+def test_protein_likelihood_slope_at_zero_kl_weight(hierarchy_mode, anneal):
+    """d loss / d pro_recons_weight at kl_weight=0 is mean protein NLL, or 0 when annealed."""
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode=hierarchy_mode,
+        anneal_protein_likelihood=anneal,
+    )
+    module = model.module.eval()
+    tensors = next(iter(model._make_data_loader(adata=adata, batch_size=8)))
+    inference, generative = module(tensors, compute_loss=False)
+
+    def loss(weight):
+        return module.loss(tensors, inference, generative, kl_weight=0.0, pro_recons_weight=weight)
+
+    reference = loss(0.0)
+    slope = (loss(0.8).loss - reference.loss).item() / 0.8
+    expected = 0.0 if anneal else reference.reconstruction_loss["reconst_loss_protein"].mean().item()
+    assert slope == pytest.approx(expected, rel=1e-5, abs=1e-5)
+
+
+def test_new_model_flags_survive_save_and_load(tmp_path):
+    from tests.test_mrtotalvi_v2 import _make_adata as _make_v2_adata
+
+    adata = _make_v2_adata(n_samples=3)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+        residual_prior_mode="factual", anneal_protein_likelihood=False,
+    )
+    model.is_trained_ = True
+    model.save(tmp_path / "m", overwrite=True)
+    loaded = MrTotalVI.load(tmp_path / "m", adata=adata)
+    assert loaded.module.residual_prior_mode == "factual"
+    assert loaded.module.anneal_protein_likelihood is False
