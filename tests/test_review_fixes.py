@@ -1161,3 +1161,100 @@ def test_registry_adapter_keeps_pandas_category_order():
         "state_registry"
     ]["categorical_mapping"]
     np.testing.assert_array_equal(adapter_mapping, order)
+
+
+# Step 10 mutants ----------------------------------------------------------------
+
+
+def test_expression_records_the_built_context_hash(monkeypatch):
+    """The attr is the digest of the scenarios this request built, not a constant."""
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    built = []
+    original = cf._build_context_scenarios
+
+    def spy(**kwargs):
+        scenarios, digest = original(**kwargs)
+        built.append(digest)
+        return scenarios, digest
+
+    monkeypatch.setattr(cf, "_build_context_scenarios", spy)
+    hashes = []
+    for library_size in (10.0, 20.0):
+        result = model.get_counterfactual_expression(
+            adata=adata, indices=[0, 2], target_samples=["sample_0"],
+            gene_list=[str(adata.var_names[0])], inference_mode="latent_mean", n_draws=1,
+            library_policy="specified", specified_library_size=library_size,
+        )
+        hashes.append(result.attrs["context_table_sha256"])
+    assert hashes == built
+    assert hashes[0] != hashes[1]
+
+
+def test_admissibility_rows_align_by_name_not_position():
+    import xarray as xr
+
+    model, adata = _numpy_protein_model()
+    samples = list(model.sample_order)
+    cells = list(adata.obs_names[:2])
+    # Expected rows in request order (cells) and registry order (samples).
+    expected = np.array([[True, False, True], [False, True, True]])
+    frame = pd.DataFrame(expected, index=cells, columns=samples)
+    # Reverse both axes, add a cell the request does not use, and swap the dims.
+    frame = frame.iloc[::-1, ::-1]
+    frame.loc[str(adata.obs_names[5])] = False
+    mask = xr.DataArray(
+        frame.to_numpy().T,
+        dims=("sample", "cell_name"),
+        coords={"sample": list(frame.columns), "cell_name": list(frame.index)},
+    )
+    np.testing.assert_array_equal(model._admissibility_rows(mask, cells), expected)
+
+
+def test_knn_is_silent_when_every_expected_count_is_above_one():
+    """knn_k * n_g / N = 70 * 6 / 406 = 1.03 for the small group: no warning."""
+    from mrtotalvi._stats import differential_abundance
+    from tests.test_da_density_estimator import StubModel
+
+    rng = np.random.default_rng(0)
+    sizes = {"s0": 200, "s1": 200, "s2": 3, "s3": 3}
+    labels = np.concatenate([[name] * n for name, n in sizes.items()])
+    obs = pd.DataFrame(
+        {"sample": labels, "size": np.where(np.isin(labels, ["s0", "s1"]), "big", "small")},
+        index=[f"c{i}" for i in range(labels.size)],
+    )
+    adata = ad.AnnData(np.zeros((labels.size, 1), dtype=np.float32), obs=obs)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        differential_abundance(
+            StubModel(rng.normal(size=(labels.size, 2)), labels),
+            adata=adata,
+            sample_key="sample",
+            sample_cov_keys=["size"],
+            density_estimator="knn",
+            knn_k=70,
+            omit_original_sample=False,
+        )
+    assert not [w for w in caught if "knn group scores" in str(w.message)]
+
+
+def test_de_is_silent_when_no_sample_is_rejected(trained_de_model, monkeypatch):
+    import mrtotalvi._stats as stats
+
+    original = stats.get_outlier_cell_sample_pairs
+
+    def all_admissible(*args, **kwargs):
+        out = original(*args, **kwargs)
+        return out.assign(is_admissible=out["is_admissible"] | True)
+
+    monkeypatch.setattr(stats, "get_outlier_cell_sample_pairs", all_admissible)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trained_de_model._legacy_differential_expression_for_reproducibility(
+            sample_cov_keys=["condition"],
+            mc_samples=1,
+            batch_size=32,
+            filter_inadmissible_samples=True,
+        )
+    assert not [w for w in caught if "Rejected (inadmissible)" in str(w.message)]

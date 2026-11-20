@@ -890,6 +890,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             + lkl_protein_expressed.sum(dim=-1)
         )
 
+        # loss() rebuilds the training loss from the per-cell terms below, so this
+        # scalar only keeps the LossOutput complete for direct callers.
         protein_weight = kl_weight if self.anneal_protein_likelihood else 1.0
         loss = torch.mean(
             reconst_loss_gene
