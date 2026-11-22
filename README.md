@@ -1,35 +1,24 @@
 # mrtotalvi
 
-MrTotalVI is TOTALVI (Gayoso et al. 2021) with the sample-aware two-level latent space of
-MrVI (Boyeau et al. 2024), for CITE-seq RNA + protein data.
+[![Tests][badge-tests]][tests]
+[![Documentation][badge-docs]][documentation]
 
-- `u`: per-cell state from an encoder conditioned on sample (`u_encoder_mode="sample_conditioned"`).
-- `z = z_base(u) + eps(u, sample)`: sample-specific residual from an attention module.
+[badge-tests]: https://img.shields.io/github/actions/workflow/status/mdmanurung/mrtotalvi/test.yaml?branch=main
+[badge-docs]: https://app.readthedocs.org/projects/mrtotalvi/badge/
+
+MrTotalVI models CITE-seq RNA and protein counts with a sample-aware latent space.
+It combines TOTALVI ([Gayoso et al. 2021][totalvi]) with the two-level latent space of MrVI ([Boyeau et al. 2025][mrvi]):
+
+- `u` is the per-cell state, from an encoder conditioned on sample.
+- `z = z_base(u) + eps(u, sample)` adds a sample-specific residual from an attention module.
 - The TOTALVI decoder reads `z`, batch and library size.
 
-Built on upstream `scvi-tools` (>= 1.5.2). The code derives from scvi-tools' TOTALVI and MrVI
-implementations (BSD-3, see `LICENSE`).
+mrtotalvi builds on [scvi-tools][] (>= 1.5.2).
 
-## Migrating from the `mdmanurung/scvi-tools` fork
+## Getting started
 
-- Change `from scvi.external import MrTotalVI` to `from mrtotalvi import MrTotalVI`.
-- MrMultiVI and CytoANVI are not included; they stay in the fork.
-- Checkpoints saved by the fork store only the class name `MrTotalVI`, so they load with
-  `mrtotalvi.MrTotalVI.load`. The test suite loads the fork's oracle checkpoint this way.
-- `tests/legacy_oracle/` holds a frozen regression oracle produced by the fork (commit `d8c8e997`).
-  The test suite replays it under upstream scvi-tools on CPU. Its generator script
-  (`generate_legacy_oracle.py`) imports the fork and is kept, checksum-sealed, as provenance only.
-- `tests/engineering/run_bounded_human_comparator.py` needs private study data and a git checkout; it
-  is not collected by pytest.
-
-## Install
-
-```bash
-pip install -e ".[test]"
-pytest
-```
-
-## Use
+Read the [documentation][], in particular the [user guide][] and the [API documentation][].
+Users of the `mdmanurung/scvi-tools` fork should read the [migration notes][].
 
 ```python
 from mrtotalvi import MrTotalVI
@@ -41,17 +30,48 @@ MrTotalVI.setup_anndata(
     sample_key="donor_timepoint",
     batch_key="batch",
 )
-# Defaults follow released MrVI: n_latent=30, n_latent_u=10,
-# residual network with stop_gradients_mlp=True and dropout_rate=0.03, two-layer u encoder.
 model = MrTotalVI(adata, sample_key="donor_timepoint")
-# train() defaults follow MrVI: Adam eps=1e-8, weight_decay=1e-8, lr=2e-3, no plateau schedule.
 model.train(n_epochs_kl_warmup=40)  # pass warm-up to train(); plan_kwargs values are overwritten
 u = model.get_latent_representation(give_z=False)
 z = model.get_latent_representation(give_z=True)
 ```
 
-See `docs/user_guide.md` and the design records in `docs/adr/`.
+## Installation
+
+mrtotalvi needs Python 3.12 or newer and is not on PyPI yet.
+Add `git+https://github.com/mdmanurung/mrtotalvi.git` to your dependencies.
+For more details, see the [installation][] section in the docs.
+
+## Release notes
+
+See the [changelog][].
+
+## Contact
+
+If you found a bug, please use the [issue tracker][].
+
+## Citation
+
+> t.b.a
+
+Until then, please cite the two methods mrtotalvi combines:
+
+- Gayoso A, Steier Z, Lopez R, et al. Joint probabilistic modeling of single-cell multi-omic data with totalVI. *Nature Methods* 18, 272–282 (2021). [doi:10.1038/s41592-020-01050-x][totalvi]
+- Boyeau P, Hong J, Gayoso A, et al. Deep generative modeling of sample-level heterogeneity in single-cell genomics. *Nature Methods* 22, 2264–2274 (2025). [doi:10.1038/s41592-025-02808-x][mrvi]
 
 ## License
 
 BSD 3-Clause, inherited from scvi-tools.
+The code derives from the scvi-tools TOTALVI and MrVI implementations; see `LICENSE`.
+
+[totalvi]: https://doi.org/10.1038/s41592-020-01050-x
+[mrvi]: https://doi.org/10.1038/s41592-025-02808-x
+[scvi-tools]: https://scvi-tools.org/
+[issue tracker]: https://github.com/mdmanurung/mrtotalvi/issues
+[tests]: https://github.com/mdmanurung/mrtotalvi/actions/workflows/test.yaml
+[documentation]: https://mrtotalvi.readthedocs.io
+[installation]: https://mrtotalvi.readthedocs.io/page/installation.html
+[user guide]: https://mrtotalvi.readthedocs.io/page/user_guide.html
+[migration notes]: https://mrtotalvi.readthedocs.io/page/migration.html
+[changelog]: https://mrtotalvi.readthedocs.io/page/changelog.html
+[api documentation]: https://mrtotalvi.readthedocs.io/page/api.html
