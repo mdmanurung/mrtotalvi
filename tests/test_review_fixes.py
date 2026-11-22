@@ -23,7 +23,6 @@ from tests.test_minor_batch import _OutlierStub
 from tests.test_mrtotalvi import MAX_EPOCHS_QUICK, N_LATENT, _make_adata
 from tests.test_mrtotalvi_v2 import _make_context_v2_model, _make_enrichment_v2_model
 
-
 # Enrichment group and donor summaries ----------------------------------------
 
 
@@ -49,9 +48,7 @@ def test_group_and_donor_summaries_skip_nan_sample_densities():
     numerator = out["group_log_density"].sel(group="numerator")
     denominator = out["group_log_density"].sel(group="denominator")
     np.testing.assert_allclose(numerator, d2, rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        denominator, np.logaddexp(d1, d3) - np.log(2.0), rtol=1e-6, atol=1e-6
-    )
+    np.testing.assert_allclose(denominator, np.logaddexp(d1, d3) - np.log(2.0), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(out["log_ratio"], numerator - denominator, rtol=1e-6, atol=1e-6)
     assert np.isnan(out["donor_log_ratio"].sel(donor="donor_0")).all()
     for name in ("donor_log_ratio_mean", "donor_log_ratio_median"):
@@ -65,10 +62,7 @@ def test_counterfactual_marginal_context_cap(monkeypatch):
     """Too many distinct marginal contexts raise; at the cap the call still runs."""
     model, adata = _make_context_v2_model()
     protein_names = [
-        str(name)
-        for name in model.adata_manager.get_state_registry(
-            REGISTRY_KEYS.PROTEIN_EXP_KEY
-        ).column_names
+        str(name) for name in model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names
     ]
     request = {
         "adata": adata,
@@ -97,9 +91,7 @@ def test_da_donor_centering_ignores_one_cell_sample():
     keep = ~is_d0
     keep[np.flatnonzero(is_d0)[0]] = True  # donor_0 keeps one cell
     adata = adata[keep].copy()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     adata.obs["patient"] = adata.obs["condition"]
     MrTotalVI.setup_anndata(
         adata,
@@ -163,9 +155,7 @@ def _outlier_data():
 
 def test_outlier_subsample_is_independent_of_loader_order():
     u, labels, adata = _outlier_data()
-    request = dict(
-        adata=adata, sample_key="sample", subsample_size=10, random_state=0, batch_size=50
-    )
+    request = {"adata": adata, "sample_key": "sample", "subsample_size": 10, "random_state": 0, "batch_size": 50}
     as_given = get_outlier_cell_sample_pairs(_OutlierStub(u, labels), **request)
     sorted_loader = get_outlier_cell_sample_pairs(_SortingLoaderStub(u, labels), **request)
     np.testing.assert_array_equal(as_given["log_probs"].values, sorted_loader["log_probs"].values)
@@ -175,14 +165,12 @@ def test_outlier_pairs_absent_registered_sample_is_nan_inadmissible():
     u, labels, adata = _outlier_data()
     stub = _OutlierStub(u, labels)
     stub.sample_order = ["s0", "s1", "s2", "s_missing"]
-    request = dict(adata=adata, sample_key="sample", subsample_size=None, batch_size=50)
+    request = {"adata": adata, "sample_key": "sample", "subsample_size": None, "batch_size": 50}
     out = get_outlier_cell_sample_pairs(stub, **request)
     assert out["log_probs"].sel(sample="s_missing").isnull().all()
     assert not out["is_admissible"].sel(sample="s_missing").any()
     reference = get_outlier_cell_sample_pairs(_OutlierStub(u, labels), **request)
-    np.testing.assert_array_equal(
-        out["log_probs"].sel(sample=["s0", "s1", "s2"]).values, reference["log_probs"].values
-    )
+    np.testing.assert_array_equal(out["log_probs"].sel(sample=["s0", "s1", "s2"]).values, reference["log_probs"].values)
 
 
 # DE p-values ------------------------------------------------------------------
@@ -191,9 +179,7 @@ def test_outlier_pairs_absent_registered_sample_is_nan_inadmissible():
 def test_de_pvalue_is_float64_chi2_survival():
     """p-values are chi2.sf of the Wald statistic in float64, df = analysed samples."""
     adata = _make_adata()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     MrTotalVI.setup_anndata(
         adata,
         protein_expression_obsm_key="protein_expression",
@@ -244,20 +230,15 @@ def test_max_component_log_prob_matches_pairwise_loop_across_chunks():
     names = np.array([f"c{i % 1400}" for i in range(n_components)])  # duplicate names
     query_names = np.array([f"c{i % 1400}" for i in range(n_query)])
 
-    got = _max_component_log_prob(
-        points, loc, scale, lambda a, b: names[None, :] == query_names[a:b, None]
-    )
-    expected = np.array(
-        [_pairwise_score(points[i], loc, scale, names != query_names[i]) for i in range(n_query)]
-    )
+    got = _max_component_log_prob(points, loc, scale, lambda a, b: names[None, :] == query_names[a:b, None])
+    expected = np.array([_pairwise_score(points[i], loc, scale, names != query_names[i]) for i in range(n_query)])
     np.testing.assert_array_equal(got, expected)
 
     leave_one_out = _max_component_log_prob(
         loc, loc, scale, lambda a, b: np.arange(a, b)[:, None] == np.arange(n_components)[None, :]
     )
     expected_loo = np.array(
-        [_pairwise_score(loc[i], loc, scale, np.arange(n_components) != i)
-         for i in range(n_components)]
+        [_pairwise_score(loc[i], loc, scale, np.arange(n_components) != i) for i in range(n_components)]
     )
     np.testing.assert_array_equal(leave_one_out, expected_loo)
 
@@ -311,9 +292,7 @@ def test_backed_adata_returns_rows_in_request_order(tmp_path, batch_size):
         )
         np.testing.assert_allclose(latent, ref_latent[BACKED_REQUEST], atol=1e-6)
 
-    posterior_loc, _ = collect_u_posterior(
-        model, adata=backed, indices=BACKED_REQUEST, batch_size=batch_size
-    )
+    posterior_loc, _ = collect_u_posterior(model, adata=backed, indices=BACKED_REQUEST, batch_size=batch_size)
     np.testing.assert_allclose(posterior_loc.numpy(), ref_loc[BACKED_REQUEST], atol=1e-6)
 
 
@@ -343,17 +322,17 @@ def _marginal_request(n_query, n_ref, *, library_policy="sample_balanced_margina
         "panel": np.arange(n_query) % 3,
         "library": np.linspace(100, 200, n_query).astype(np.float32),
     }
-    return dict(
-        model=_ContextStubModel,
-        observed_context=query,
-        batch_policy="sample_balanced_marginal",
-        specified_batch=None,
-        panel_policy="sample_balanced_marginal",
-        specified_panel=None,
-        library_policy=library_policy,
-        specified_library_size=None,
-        reference_context=reference,
-    )
+    return {
+        "model": _ContextStubModel,
+        "observed_context": query,
+        "batch_policy": "sample_balanced_marginal",
+        "specified_batch": None,
+        "panel_policy": "sample_balanced_marginal",
+        "specified_panel": None,
+        "library_policy": library_policy,
+        "specified_library_size": None,
+        "reference_context": reference,
+    }
 
 
 @pytest.mark.parametrize("library_policy", ["sample_balanced_marginal", "observed"])
@@ -362,9 +341,7 @@ def test_context_hash_matches_full_json_payload(library_policy):
     import hashlib
     import json
 
-    scenarios, digest = cf._build_context_scenarios(
-        **_marginal_request(7, 5, library_policy=library_policy)
-    )
+    scenarios, digest = cf._build_context_scenarios(**_marginal_request(7, 5, library_policy=library_policy))
     payload = json.dumps(
         [
             {
@@ -462,22 +439,16 @@ def test_reordered_protein_names_are_rejected_on_load(tmp_path):
 # Inherited TOTALVI methods ----------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "transform_batch", [["batch_0", "batch_1"], ["batch_0", "batch_1", "batch_0"]]
-)
+@pytest.mark.parametrize("transform_batch", [["batch_0", "batch_1"], ["batch_0", "batch_1", "batch_0"]])
 def test_normalized_expression_library_size_scales_once(transform_batch):
     """Scale rows sum to 1, so a batch mean scaled by L sums to L per cell."""
     from tests.test_mrtotalvi_v2 import _make_v2_model
 
     model, _ = _make_v2_model()
     torch.manual_seed(0)
-    unit, _ = model.get_normalized_expression(
-        transform_batch=transform_batch, library_size=1, return_numpy=True
-    )
+    unit, _ = model.get_normalized_expression(transform_batch=transform_batch, library_size=1, return_numpy=True)
     torch.manual_seed(0)
-    scaled, _ = model.get_normalized_expression(
-        transform_batch=transform_batch, library_size=1000.0, return_numpy=True
-    )
+    scaled, _ = model.get_normalized_expression(transform_batch=transform_batch, library_size=1000.0, return_numpy=True)
     np.testing.assert_allclose(scaled.sum(1), 1000.0, rtol=1e-4)
     np.testing.assert_allclose(scaled, 1000.0 * unit, rtol=1e-4)
 
@@ -530,17 +501,12 @@ def test_one_cell_sample_has_no_own_support():
     assert np.isnan(out["log_probs"].sel(sample="A", cell_name="c0"))
     assert not out["is_admissible"].sel(sample="A", cell_name="c0")
     # Another cell still scores against A's single component (d = 1 for c1).
-    np.testing.assert_allclose(
-        out["log_probs"].sel(sample="A", cell_name="c1"), _LOG_NORMAL_D0 - 2.0, atol=1e-5
-    )
+    np.testing.assert_allclose(out["log_probs"].sel(sample="A", cell_name="c1"), _LOG_NORMAL_D0 - 2.0, atol=1e-5)
     # The pooled threshold holds only B's and C's leave-one-out scores, by hand:
     # B: d = 1, 1; C: d = 0.5, 0.5, 1.5 (c5 nearest c4).
     pool = _LOG_NORMAL_D0 - 2.0 * np.array([1.0, 1.0, 0.25, 0.25, 2.25])
     expected = np.quantile(pool, 0.05)
-    got = float(
-        out["log_probs"].sel(sample="A", cell_name="c1")
-        - out["log_ratios"].sel(sample="A", cell_name="c1")
-    )
+    got = float(out["log_probs"].sel(sample="A", cell_name="c1") - out["log_ratios"].sel(sample="A", cell_name="c1"))
     np.testing.assert_allclose(got, expected, atol=1e-5)
 
 
@@ -589,9 +555,7 @@ def test_knn_warns_for_groups_with_expected_count_below_one():
 @pytest.fixture(scope="module")
 def trained_de_model():
     adata = _make_adata()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     adata.obs["site"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_2"]), "x", "y")
     MrTotalVI.setup_anndata(
         adata,
@@ -654,8 +618,7 @@ def test_stochastic_residual_scale_has_a_floor(log_scale):
 def _seed_pair(**attrs):
     import xarray as xr
 
-    base = {"specified_panel": "p0", "group_key": "condition", "contrast": '["A","B"]',
-            "donor_key": "patient", **attrs}
+    base = {"specified_panel": "p0", "group_key": "condition", "contrast": '["A","B"]', "donor_key": "patient", **attrs}
     first = xr.Dataset({"value": (("draw",), [1.0, 3.0])}, attrs=dict(base))
     second = xr.Dataset({"value": (("draw",), [5.0, 7.0])}, attrs={**base, "random_state": 99})
     return first, second
@@ -701,15 +664,19 @@ def test_enrichment_records_contrast_settings_for_the_combiner():
     from mrtotalvi import combine_mrtotalvi_seed_results
 
     model, adata = _make_enrichment_v2_model()
-    request = dict(adata=adata, indices=[0, 1], group_key="group", donor_key="donor",
-                   inference_mode="posterior_mc", n_draws=2)
+    request = {
+        "adata": adata,
+        "indices": [0, 1],
+        "group_key": "group",
+        "donor_key": "donor",
+        "inference_mode": "posterior_mc",
+        "n_draws": 2,
+    }
     forward = model.local_sample_enrichment(contrast=("numerator", "denominator"), **request)
     assert forward.attrs["group_key"] == "group"
     assert forward.attrs["contrast"] == '["numerator", "denominator"]'
     assert forward.attrs["donor_key"] == "donor"
-    reverse = model.local_sample_enrichment(
-        contrast=("denominator", "numerator"), random_state=1, **request
-    )
+    reverse = model.local_sample_enrichment(contrast=("denominator", "numerator"), random_state=1, **request)
     with pytest.raises(ValueError, match="contrast"):
         combine_mrtotalvi_seed_results({0: forward, 1: reverse})
 
@@ -734,7 +701,10 @@ def _residual_cost_delta(mode):
         centered = values - values.mean(1, keepdim=True)
         factual = module._gather_sample(centered, tensors[REGISTRY_KEYS.SAMPLE_KEY])
         outputs = dict(
-            inference, eps_raw_all=values, eps_centered_all=centered, eps=factual,
+            inference,
+            eps_raw_all=values,
+            eps_centered_all=centered,
+            eps=factual,
             z=inference["z_base"] + factual,
         )
         return module.loss(tensors, outputs, generative).kl_local["kl_div_z"]
@@ -758,9 +728,7 @@ def test_factual_residual_prior_needs_centered_v2():
         MrTotalVI(_make_v2_adata(n_samples=3), sample_key="sample", residual_prior_mode="factual")
 
 
-@pytest.mark.parametrize(
-    "path", ["legacy", "centered_v2", "mc_samples", "scale_observations", "no_hierarchy"]
-)
+@pytest.mark.parametrize("path", ["legacy", "centered_v2", "mc_samples", "scale_observations", "no_hierarchy"])
 @pytest.mark.parametrize("anneal", [True, False])
 def test_protein_likelihood_slope_at_zero_kl_weight(path, anneal):
     """d loss / d pro_recons_weight at kl_weight=0 is mean protein NLL, or 0 when annealed.
@@ -771,7 +739,10 @@ def test_protein_likelihood_slope_at_zero_kl_weight(path, anneal):
 
     adata = _make_v2_adata(n_samples=3)
     model = MrTotalVI(
-        adata, sample_key="sample", n_latent=3, n_latent_u=2,
+        adata,
+        sample_key="sample",
+        n_latent=3,
+        n_latent_u=2,
         hierarchy_mode="centered_v2" if path == "centered_v2" else "legacy",
         scale_observations=path == "scale_observations",
         anneal_protein_likelihood=anneal,
@@ -779,9 +750,7 @@ def test_protein_likelihood_slope_at_zero_kl_weight(path, anneal):
     module = model.module.eval()
     tensors = next(iter(model._make_data_loader(adata=adata, batch_size=8)))
     inference_kwargs = {"n_samples": 2} if path == "mc_samples" else {}
-    inference, generative = module(
-        tensors, inference_kwargs=inference_kwargs, compute_loss=False
-    )
+    inference, generative = module(tensors, inference_kwargs=inference_kwargs, compute_loss=False)
     if path == "no_hierarchy":
         inference = {k: v for k, v in inference.items() if k != "eps"}
 
@@ -804,8 +773,13 @@ def test_new_model_flags_survive_save_and_load(tmp_path):
 
     adata = _make_v2_adata(n_samples=3)
     model = MrTotalVI(
-        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
-        residual_prior_mode="factual", anneal_protein_likelihood=False,
+        adata,
+        sample_key="sample",
+        n_latent=3,
+        n_latent_u=2,
+        hierarchy_mode="centered_v2",
+        residual_prior_mode="factual",
+        anneal_protein_likelihood=False,
     )
     model.is_trained_ = True
     model.save(tmp_path / "m", overwrite=True)
@@ -836,14 +810,20 @@ def test_legacy_override_of_factual_checkpoint_saves_and_reloads(tmp_path):
 
     adata = _make_v2_adata(n_samples=3)
     model = MrTotalVI(
-        adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+        adata,
+        sample_key="sample",
+        n_latent=3,
+        n_latent_u=2,
+        hierarchy_mode="centered_v2",
         residual_prior_mode="factual",
     )
     model.is_trained_ = True
     model.save(tmp_path / "f", overwrite=True)
     with pytest.warns(UserWarning, match="resets it to 'raw_mean'"):
         legacy = MrTotalVI.load(
-            tmp_path / "f", adata=adata, hierarchy_mode_override="legacy",
+            tmp_path / "f",
+            adata=adata,
+            hierarchy_mode_override="legacy",
             allow_semantic_override=True,
         )
     assert legacy.module.residual_prior_mode == "raw_mean"
@@ -871,15 +851,18 @@ def test_seed_combiner_rejects_different_technical_context():
     from tests.test_mrtotalvi_v2 import _make_context_v2_model
 
     model, adata = _make_context_v2_model()
-    request = dict(adata=adata, indices=[0, 1], target_samples=["sample_0"],
-                   gene_list=[str(adata.var_names[0])],
-                   protein_list=[str(model.adata_manager.get_state_registry(
-                       REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names[0])],
-                   library_policy="specified", inference_mode="posterior_mc", n_draws=2)
+    request = {
+        "adata": adata,
+        "indices": [0, 1],
+        "target_samples": ["sample_0"],
+        "gene_list": [str(adata.var_names[0])],
+        "protein_list": [str(model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names[0])],
+        "library_policy": "specified",
+        "inference_mode": "posterior_mc",
+        "n_draws": 2,
+    }
     small = model.get_counterfactual_expression(specified_library_size=1.0, **request)
-    large = model.get_counterfactual_expression(
-        specified_library_size=1000.0, random_state=1, **request
-    )
+    large = model.get_counterfactual_expression(specified_library_size=1000.0, random_state=1, **request)
     assert small.attrs["specified_library_size"] != large.attrs["specified_library_size"]
     with pytest.raises(ValueError, match="specified_library_size"):
         combine_mrtotalvi_seed_results({0: small, 1: large})
@@ -887,17 +870,19 @@ def test_seed_combiner_rejects_different_technical_context():
 
 @pytest.mark.parametrize(
     ("offsets", "effect"),
-    [((0.0, 0.0, 0.0, 0.0), 1.0), ((3.0, 0.0, 0.0, 0.0), 0.0), ((0.0, 3.0, 0.0, 0.0), 0.0),
-     ((3.0, -1.0, 2.0, 0.0), 1.0)],
+    [
+        ((0.0, 0.0, 0.0, 0.0), 1.0),
+        ((3.0, 0.0, 0.0, 0.0), 0.0),
+        ((0.0, 3.0, 0.0, 0.0), 0.0),
+        ((3.0, -1.0, 2.0, 0.0), 1.0),
+    ],
 )
 def test_de_donor_offsets_do_not_leak_into_beta(trained_paired_model, offsets, effect):
     """eps = patient offset + effect * time, so the time beta must equal the planted effect."""
     model = trained_paired_model
     order = list(model.sample_order)
     level = {f"p{i}": value for i, value in enumerate(offsets)}
-    table = torch.tensor(
-        [[level[s.split("_")[0]] + effect * s.endswith("t1")] for s in order], dtype=torch.float32
-    )
+    table = torch.tensor([[level[s.split("_")[0]] + effect * s.endswith("t1")] for s in order], dtype=torch.float32)
     scale = torch.arange(1.0, model.module.n_latent + 1)
 
     def residual(u, sample, deterministic=False):
@@ -908,7 +893,10 @@ def test_de_donor_offsets_do_not_leak_into_beta(trained_paired_model, offsets, e
     model.module.qz.forward = residual
     try:
         de = model._legacy_differential_expression_for_reproducibility(
-            sample_cov_keys=["time"], donor_key="patient", mc_samples=1, batch_size=200,
+            sample_cov_keys=["time"],
+            donor_key="patient",
+            mc_samples=1,
+            batch_size=200,
             indices=np.arange(50),
         )
     finally:
@@ -927,9 +915,11 @@ def trained_paired_model():
     time = (np.arange(adata.n_obs) // 4) % 2
     adata.obs["patient"] = [f"p{i}" for i in patient]
     adata.obs["time"] = [f"t{i}" for i in time]
-    adata.obs["sample"] = [f"p{i}_t{j}" for i, j in zip(patient, time)]
+    adata.obs["sample"] = [f"p{i}_t{j}" for i, j in zip(patient, time, strict=True)]
     MrTotalVI.setup_anndata(
-        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        sample_key="sample",
         batch_key="batch",
     )
     model = MrTotalVI(adata, sample_key="sample", n_latent=5)
@@ -957,9 +947,7 @@ def test_continued_training_runs_in_train_mode(tmp_path):
 
         fit_model.module.loss = recording_loss.__get__(fit_model.module)
         try:
-            fit_model.train(
-                max_epochs=1, accelerator="cpu", train_size=1.0, batch_size=8, early_stopping=False
-            )
+            fit_model.train(max_epochs=1, accelerator="cpu", train_size=1.0, batch_size=8, early_stopping=False)
         finally:
             del fit_model.module.loss
         return set(seen)
@@ -984,13 +972,19 @@ def _batch_only_context_model():
     protein[adata.obs["batch"].to_numpy() == "batch_0", 0] = 0.0
     adata.obsm["protein_expression"] = protein
     MrTotalVI.setup_anndata(
-        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        sample_key="sample",
         batch_key="batch",
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         model = MrTotalVI(
-            adata, sample_key="sample", n_latent=3, n_latent_u=2, hierarchy_mode="centered_v2",
+            adata,
+            sample_key="sample",
+            n_latent=3,
+            n_latent_u=2,
+            hierarchy_mode="centered_v2",
             u_encoder_mode="sample_blind",
         )
     model.is_trained_ = True
@@ -999,21 +993,29 @@ def _batch_only_context_model():
 
 def test_specified_batch_also_sets_the_protein_mask_without_a_panel():
     model, adata = _batch_only_context_model()
-    proteins = [str(p) for p in model.adata_manager.get_state_registry(
-        REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names]
+    proteins = [str(p) for p in model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names]
     batch_1_cells = np.flatnonzero(adata.obs["batch"].to_numpy() == "batch_1")[:2]
     out = model.get_counterfactual_expression(
-        adata=adata, indices=batch_1_cells, gene_list=[str(adata.var_names[0])],
-        protein_list=proteins[:1], batch_policy="specified", specified_batch="batch_0",
+        adata=adata,
+        indices=batch_1_cells,
+        gene_list=[str(adata.var_names[0])],
+        protein_list=proteins[:1],
+        batch_policy="specified",
+        specified_batch="batch_0",
     )
     # Decoded in batch_0, where protein 0 was never measured: unavailable, not a value
     # from decoder weights the masked likelihood never trained.
     assert not out["protein_available"].values.any()
     with pytest.raises(ValueError, match="the panel is the batch"):
         model.get_counterfactual_expression(
-            adata=adata, indices=batch_1_cells, gene_list=[str(adata.var_names[0])],
-            protein_list=proteins[:1], batch_policy="specified", specified_batch="batch_0",
-            panel_policy="specified", specified_panel="batch_1",
+            adata=adata,
+            indices=batch_1_cells,
+            gene_list=[str(adata.var_names[0])],
+            protein_list=proteins[:1],
+            batch_policy="specified",
+            specified_batch="batch_0",
+            panel_policy="specified",
+            specified_panel="batch_1",
         )
 
 
@@ -1027,25 +1029,38 @@ def test_memory_guard_counts_every_registered_sample():
     adata = scvi.data.synthetic_iid(batch_size=300, n_genes=20, n_proteins=3, n_batches=2)
     adata.obs["sample"] = [f"s{i % 300}" for i in range(adata.n_obs)]
     MrTotalVI.setup_anndata(
-        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        sample_key="sample",
         batch_key="batch",
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         model = MrTotalVI(
-            adata, sample_key="sample", n_latent=30, n_latent_u=10, hierarchy_mode="centered_v2",
+            adata,
+            sample_key="sample",
+            n_latent=30,
+            n_latent_u=10,
+            hierarchy_mode="centered_v2",
             u_encoder_mode="sample_blind",
         )
     model.is_trained_ = True
     # The output alone is small: one target, 256 cells, 32 draws (measured peak ~10 GB).
     output_only = cf._estimate_latent_bytes(
-        n_cells=256, n_targets=1, n_draws=32, n_latent_u=10, n_latent=30, n_quantiles=3,
+        n_cells=256,
+        n_targets=1,
+        n_draws=32,
+        n_latent_u=10,
+        n_latent=30,
+        n_quantiles=3,
         posterior_mc=True,
     )
     assert output_only < cf.MAX_IN_MEMORY_BYTES
     with pytest.raises(MemoryError, match="512"):
         model.get_counterfactual_latent(
-            indices=np.arange(256), target_samples=["s0"], inference_mode="posterior_mc",
+            indices=np.arange(256),
+            target_samples=["s0"],
+            inference_mode="posterior_mc",
             n_draws=32,
         )
 
@@ -1063,15 +1078,11 @@ def test_normalized_expression_keeps_request_order_on_backed_data(tmp_path):
     request = [7, 2, 5, 0]
     # The protein foreground mixture is deterministic per cell, so compare by cell.
     torch.manual_seed(0)
-    reference_rna, reference_protein = model.get_normalized_expression(
-        adata=backed, indices=[0, 2, 5, 7], n_samples=1
-    )
+    reference_rna, reference_protein = model.get_normalized_expression(adata=backed, indices=[0, 2, 5, 7], n_samples=1)
     torch.manual_seed(0)
     rna, protein = model.get_normalized_expression(adata=backed, indices=request, n_samples=1)
     assert list(rna.index) == list(backed.obs_names[request])
-    np.testing.assert_allclose(
-        protein.values, reference_protein.loc[backed.obs_names[request]].values, rtol=1e-5
-    )
+    np.testing.assert_allclose(protein.values, reference_protein.loc[backed.obs_names[request]].values, rtol=1e-5)
 
 
 def test_feature_correlation_log_transform_runs():
@@ -1147,19 +1158,19 @@ def test_registry_adapter_keeps_pandas_category_order():
     order = sorted(adata.obs["sample"].unique(), reverse=True) + ["unused"]
     adata.obs["sample"] = pd.Categorical(adata.obs["sample"], categories=order)
     dm = _MrTotalVIRegistryAdapter(
-        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        sample_key="sample",
         parallel=False,
     )
-    MrTotalVI.setup_anndata(
-        adata, protein_expression_obsm_key="protein_expression", sample_key="sample"
+    MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein_expression", sample_key="sample")
+    registered = (
+        MrTotalVI(adata, sample_key="sample")
+        .adata_manager.get_state_registry(REGISTRY_KEYS.SAMPLE_KEY)
+        .categorical_mapping
     )
-    registered = MrTotalVI(adata, sample_key="sample").adata_manager.get_state_registry(
-        REGISTRY_KEYS.SAMPLE_KEY
-    ).categorical_mapping
     np.testing.assert_array_equal(registered, order)
-    adapter_mapping = dm.registry["field_registries"][REGISTRY_KEYS.SAMPLE_KEY][
-        "state_registry"
-    ]["categorical_mapping"]
+    adapter_mapping = dm.registry["field_registries"][REGISTRY_KEYS.SAMPLE_KEY]["state_registry"]["categorical_mapping"]
     np.testing.assert_array_equal(adapter_mapping, order)
 
 
@@ -1183,9 +1194,14 @@ def test_expression_records_the_built_context_hash(monkeypatch):
     hashes = []
     for library_size in (10.0, 20.0):
         result = model.get_counterfactual_expression(
-            adata=adata, indices=[0, 2], target_samples=["sample_0"],
-            gene_list=[str(adata.var_names[0])], inference_mode="latent_mean", n_draws=1,
-            library_policy="specified", specified_library_size=library_size,
+            adata=adata,
+            indices=[0, 2],
+            target_samples=["sample_0"],
+            gene_list=[str(adata.var_names[0])],
+            inference_mode="latent_mean",
+            n_draws=1,
+            library_policy="specified",
+            specified_library_size=library_size,
         )
         hashes.append(result.attrs["context_table_sha256"])
     assert hashes == built

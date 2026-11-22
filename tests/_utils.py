@@ -12,7 +12,5 @@ def get_elbo_key(history: dict) -> str:
         (k for k in ("elbo_train", "train_loss_epoch", "train_elbo_train") if k in history),
         None,
     )
-    assert key is not None, (
-        f"No ELBO history key found. Available keys: {list(history.keys())}"
-    )
+    assert key is not None, f"No ELBO history key found. Available keys: {list(history.keys())}"
     return key

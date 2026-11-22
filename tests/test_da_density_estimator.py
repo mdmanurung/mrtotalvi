@@ -209,9 +209,7 @@ def test_default_outputs_match_pre_fix_golden():
             **kw,
         )
         for name in da.data_vars:
-            np.testing.assert_allclose(
-                da[name].values, golden[f"{est}__{name}"], rtol=1e-5, atol=1e-6, equal_nan=True
-            )
+            np.testing.assert_allclose(da[name].values, golden[f"{est}__{name}"], rtol=1e-5, atol=1e-6, equal_nan=True)
             n_checked += 1
     assert n_checked == len(golden.files)
 
@@ -287,9 +285,9 @@ def test_loo_removes_exactly_the_own_component():
     obs = pd.DataFrame({"sample": names}, index=[f"c{i}" for i in range(5)])
     adata = ad.AnnData(np.zeros((5, 1), dtype=np.float32), obs=obs)
     model = StubModel(x, names, scale=0.7)
-    lp = differential_abundance(
-        model, adata=adata, sample_key="sample", omit_original_sample=False, batch_size=2
-    )["log_probs"].values.astype(float)
+    lp = differential_abundance(model, adata=adata, sample_key="sample", omit_original_sample=False, batch_size=2)[
+        "log_probs"
+    ].values.astype(float)
 
     def density(at, locs):
         return np.mean(np.exp(-0.5 * ((at - locs) / 0.7) ** 2) / (0.7 * np.sqrt(2 * np.pi)))

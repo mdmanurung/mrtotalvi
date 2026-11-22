@@ -97,16 +97,11 @@ def combine_mrtotalvi_seed_results(
             for output, setting in _SETTING_FOR_OUTPUT.items()
             if output in dataset.data_vars and setting not in dataset.attrs
         }
-        | {
-            key
-            for key in _LATER_SETTING_ATTRS
-            if len({key in dataset.attrs for dataset in datasets}) > 1
-        }
+        | {key for key in _LATER_SETTING_ATTRS if len({key in dataset.attrs for dataset in datasets}) > 1}
         | {
             "specified_panel"
             for dataset in datasets
-            if dataset.attrs.get("panel_policy") == "specified"
-            and "specified_panel" not in dataset.attrs
+            if dataset.attrs.get("panel_policy") == "specified" and "specified_panel" not in dataset.attrs
         }
     )
     if unverified:
@@ -119,23 +114,16 @@ def combine_mrtotalvi_seed_results(
     for dataset in datasets[1:]:
         if set(dataset.data_vars) != set(template.data_vars):
             raise ValueError("Seed results must contain identical data variables.")
-        if {
-            name: variable.dims for name, variable in dataset.data_vars.items()
-        } != {
+        if {name: variable.dims for name, variable in dataset.data_vars.items()} != {
             name: variable.dims for name, variable in template.data_vars.items()
         }:
             raise ValueError("Seed result variable dimensions must match exactly.")
-        if dataset.attrs.get("schema_version") != template.attrs.get(
-            "schema_version"
-        ):
+        if dataset.attrs.get("schema_version") != template.attrs.get("schema_version"):
             raise ValueError("Seed result schema_version attributes must match.")
         mismatched = [
             key
             for key in _ESTIMAND_ATTRS
-            if not (
-                key in _LATER_SETTING_ATTRS
-                and (key not in dataset.attrs or key not in template.attrs)
-            )
+            if not (key in _LATER_SETTING_ATTRS and (key not in dataset.attrs or key not in template.attrs))
             and dataset.attrs.get(key) != template.attrs.get(key)
         ]
         if mismatched:
@@ -177,10 +165,7 @@ def combine_mrtotalvi_seed_results(
             between_sd_name,
         } & set(combined.data_vars)
         if conflicts:
-            raise ValueError(
-                "Seed summary variable name conflict(s): "
-                f"{sorted(conflicts)}."
-            )
+            raise ValueError(f"Seed summary variable name conflict(s): {sorted(conflicts)}.")
         within_mean = variable.mean("draw")
         additions[within_mean_name] = within_mean
         additions[within_sd_name] = variable.std("draw", ddof=1)
@@ -192,10 +177,7 @@ def combine_mrtotalvi_seed_results(
             continue
         additions[between_mean_name] = within_mean.mean("training_seed")
         additions[between_sd_name] = within_mean.std("training_seed", ddof=1)
-        n_partial = int(
-            (within_mean.isnull().any("training_seed") & within_mean.notnull().any("training_seed"))
-            .sum()
-        )
+        n_partial = int((within_mean.isnull().any("training_seed") & within_mean.notnull().any("training_seed")).sum())
         if n_partial:
             partial_variables.append(f"{variable_name} ({n_partial})")
 
@@ -209,8 +191,7 @@ def combine_mrtotalvi_seed_results(
     combined = combined.assign(additions)
     combined.attrs = dict(template.attrs)
     combined.attrs["uncertainty_separation"] = (
-        "within-seed posterior draws and between-seed training variation "
-        "are reported separately and never pooled"
+        "within-seed posterior draws and between-seed training variation are reported separately and never pooled"
     )
     combined.attrs["training_seed_order"] = ",".join(map(str, seeds))
     combined.attrs["between_seed_skipped_latent_variables"] = ",".join(skipped_latent)

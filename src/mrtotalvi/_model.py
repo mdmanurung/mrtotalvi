@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 import xarray as xr
-from tqdm import tqdm
-
 from scvi import REGISTRY_KEYS, settings
 from scvi.data import AnnDataManager, fields
 from scvi.data._utils import _check_if_view
@@ -18,6 +16,7 @@ from scvi.model._utils import get_max_epochs_heuristic
 from scvi.model.base import EmbeddingMixin
 from scvi.module._constants import MODULE_KEYS
 from scvi.utils import setup_anndata_dsp
+from tqdm import tqdm
 
 from ._contracts import (
     ordered_indices_sha256,
@@ -326,11 +325,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         )
         resolved_u_prior_mixture_k = int(u_prior_mixture_k)
         registered_n_labels = int(manager.summary_stats.get("n_labels", 0))
-        if (
-            u_prior_mixture is not None
-            and resolved_u_prior == "vamp"
-            and registered_n_labels > 1
-        ):
+        if u_prior_mixture is not None and resolved_u_prior == "vamp" and registered_n_labels > 1:
             # Historical labelled Vamp checkpoints used one global mixture
             # with K equal to the registered label count. Preserve both K and
             # the unconditioned (one-dimensional) categorical weights.
@@ -339,12 +334,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             raise TypeError("u_prior_init_seed must be an integer.")
         if init_prior_from_data and resolved_u_prior != "vamp":
             raise ValueError("init_prior_from_data=True requires u_prior='vamp'.")
-        if freeze_prior_after_init and (
-            resolved_u_prior != "vamp" or not init_prior_from_data
-        ):
-            raise ValueError(
-                "freeze_prior_after_init=True requires data-initialized u_prior='vamp'."
-            )
+        if freeze_prior_after_init and (resolved_u_prior != "vamp" or not init_prior_from_data):
+            raise ValueError("freeze_prior_after_init=True requires data-initialized u_prior='vamp'.")
         if hierarchy_mode not in {"legacy", "centered_v2"}:
             raise ValueError("hierarchy_mode must be one of {'legacy', 'centered_v2'}.")
         if learn_z_u_prior_scale and use_map:
@@ -358,9 +349,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         if residual_prior_mode == "factual" and hierarchy_mode != "centered_v2":
             raise ValueError("residual_prior_mode='factual' requires hierarchy_mode='centered_v2'.")
         if u_encoder_mode not in {"sample_conditioned", "sample_blind"}:
-            raise ValueError(
-                "u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}."
-            )
+            raise ValueError("u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}.")
         if hierarchy_mode == "centered_v2" and not use_map:
             raise ValueError("hierarchy_mode='centered_v2' requires use_map=True.")
         if hierarchy_mode == "centered_v2" and not z_u_prior:
@@ -421,12 +410,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # At this point self.summary_stats is populated from the registry.
         n_sample = self.summary_stats.n_sample
 
-        counts = (
-            adata.obs["_scvi_sample"]
-            .value_counts()
-            .reindex(range(n_sample), fill_value=0)
-            .sort_index()
-        )
+        counts = adata.obs["_scvi_sample"].value_counts().reindex(range(n_sample), fill_value=0).sort_index()
         missing = counts[counts == 0].index.tolist()
         self._empty_sample_positions = missing
         # A checkpoint load rebuilds the model on the AnnData passed to ``load``, which
@@ -464,9 +448,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             float(n_obs_per_sample.sum()),
         )
 
-        registered_sample_key = (
-            self.adata_manager.registry.get("setup_args", {}).get("sample_key")
-        )
+        registered_sample_key = self.adata_manager.registry.get("setup_args", {}).get("sample_key")
         if registered_sample_key is not None and registered_sample_key != sample_key:
             raise ValueError(
                 f"sample_key={sample_key!r} differs from the sample_key registered in "
@@ -486,23 +468,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self._init_prior_from_data = bool(init_prior_from_data)
         self._freeze_prior_after_init = bool(freeze_prior_after_init)
         self.vamp_training_indices_sha256_ = None
-        self.vamp_initialization_seed_ = (
-            u_prior_init_seed if init_prior_from_data else None
-        )
-        self.sample_order = (
-            self.adata_manager.get_state_registry(REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
-        )
-        self.label_order = (
-            self.adata_manager.get_state_registry(REGISTRY_KEYS.LABELS_KEY).categorical_mapping
-        )
+        self.vamp_initialization_seed_ = u_prior_init_seed if init_prior_from_data else None
+        self.sample_order = self.adata_manager.get_state_registry(REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
+        self.label_order = self.adata_manager.get_state_registry(REGISTRY_KEYS.LABELS_KEY).categorical_mapping
         # One row per registered sample, in ``sample_order`` (the embedding row order),
         # as in MrVI. ``drop_duplicates`` alone follows the order of first appearance.
         self.sample_info = (
             self.adata.obs[[sample_key]]
             .drop_duplicates()
-            .assign(_order=lambda d: d[sample_key].map(
-                {s: i for i, s in enumerate(self.sample_order)}
-            ))
+            .assign(_order=lambda d: d[sample_key].map({s: i for i, s in enumerate(self.sample_order)}))
             .sort_values("_order")
             .drop(columns="_order")
             .reset_index(drop=True)
@@ -608,9 +582,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             torch.log(torch.expm1(safe)),
         )
         if not torch.isfinite(pseudo).all():
-            raise RuntimeError(
-                "Training-only VampPrior initialization produced non-finite values."
-            )
+            raise RuntimeError("Training-only VampPrior initialization produced non-finite values.")
         with torch.no_grad():
             self.module.u_vamp_pseudo.copy_(
                 pseudo.to(
@@ -653,9 +625,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         dir_path,
         *args,
         hierarchy_mode_override: Literal["legacy", "centered_v2"] | None = None,
-        u_encoder_mode_override: Literal[
-            "sample_conditioned", "sample_blind"
-        ] | None = None,
+        u_encoder_mode_override: Literal["sample_conditioned", "sample_blind"] | None = None,
         allow_semantic_override: bool = False,
         **kwargs,
     ):
@@ -666,18 +636,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         changes model meaning without changing tensor topology.
         """
         if hierarchy_mode_override not in {None, "legacy", "centered_v2"}:
-            raise ValueError(
-                "hierarchy_mode_override must be one of {None, 'legacy', 'centered_v2'}."
-            )
+            raise ValueError("hierarchy_mode_override must be one of {None, 'legacy', 'centered_v2'}.")
         if u_encoder_mode_override not in {
             None,
             "sample_conditioned",
             "sample_blind",
         }:
-            raise ValueError(
-                "u_encoder_mode_override must be one of "
-                "{None, 'sample_conditioned', 'sample_blind'}."
-            )
+            raise ValueError("u_encoder_mode_override must be one of {None, 'sample_conditioned', 'sample_blind'}.")
 
         MrTotalVI._loading_checkpoint = True
         try:
@@ -687,8 +652,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         model._check_protein_names(model.adata)
         module = model.module
         if (
-            module.sample_embedding_prior_scale is not None
-            or module.u_encoder_sample_embedding_prior_scale is not None
+            module.sample_embedding_prior_scale is not None or module.u_encoder_sample_embedding_prior_scale is not None
         ) and module.n_obs_per_sample is not None:
             n_trained = float(module.n_obs_per_sample.sum())
             if abs(n_trained - module._n_obs_total) > 0.5:
@@ -703,20 +667,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 )
         loaded_hierarchy_mode = model.hierarchy_mode
         loaded_u_encoder_mode = model.u_encoder_mode
-        resolved_hierarchy_mode = (
-            loaded_hierarchy_mode
-            if hierarchy_mode_override is None
-            else hierarchy_mode_override
-        )
-        resolved_u_encoder_mode = (
-            loaded_u_encoder_mode
-            if u_encoder_mode_override is None
-            else u_encoder_mode_override
-        )
-        changed = (
-            resolved_hierarchy_mode != loaded_hierarchy_mode
-            or resolved_u_encoder_mode != loaded_u_encoder_mode
-        )
+        resolved_hierarchy_mode = loaded_hierarchy_mode if hierarchy_mode_override is None else hierarchy_mode_override
+        resolved_u_encoder_mode = loaded_u_encoder_mode if u_encoder_mode_override is None else u_encoder_mode_override
+        changed = resolved_hierarchy_mode != loaded_hierarchy_mode or resolved_u_encoder_mode != loaded_u_encoder_mode
         if changed and not allow_semantic_override:
             raise ValueError(
                 "A differing MrTotalVI mode override changes checkpoint semantics. "
@@ -745,10 +698,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         model.module.hierarchy_mode = resolved_hierarchy_mode
         model.module.u_encoder_mode = resolved_u_encoder_mode
         model.module.qu.u_encoder_mode = resolved_u_encoder_mode
-        if (
-            resolved_u_encoder_mode == "sample_blind"
-            and module.u_encoder_sample_embedding_prior_scale is not None
-        ):
+        if resolved_u_encoder_mode == "sample_blind" and module.u_encoder_sample_embedding_prior_scale is not None:
             # The sample_blind encoder has no tables for this penalty, and the
             # constructor rejects the pair, so drop the penalty from the module and from
             # init_params_ (a re-saved checkpoint would otherwise fail to load).
@@ -762,14 +712,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
             module.u_encoder_sample_embedding_prior_scale = None
             for group in model.init_params_.values():
-                if isinstance(group, dict) and (
-                    "u_encoder_sample_embedding_prior_scale" in group
-                ):
+                if isinstance(group, dict) and ("u_encoder_sample_embedding_prior_scale" in group):
                     group["u_encoder_sample_embedding_prior_scale"] = None
-        if (
-            model._freeze_prior_after_init
-            and model.vamp_training_indices_sha256_ is not None
-        ):
+        if model._freeze_prior_after_init and model.vamp_training_indices_sha256_ is not None:
             model.module.u_vamp_pseudo.requires_grad_(False)
         model.init_params_["non_kwargs"]["hierarchy_mode"] = resolved_hierarchy_mode
         model.init_params_["non_kwargs"]["u_encoder_mode"] = resolved_u_encoder_mode
@@ -882,17 +827,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         effective = {
             "lr": lr,
             "adversarial_classifier": (
-                self._use_adversarial_classifier
-                if adversarial_classifier is None
-                else adversarial_classifier
+                self._use_adversarial_classifier if adversarial_classifier is None else adversarial_classifier
             ),
             "reduce_lr_on_plateau": reduce_lr_on_plateau,
             "n_epochs_kl_warmup": n_epochs_kl_warmup,
-            "n_steps_kl_warmup": (
-                int(0.75 * self.adata.n_obs)
-                if n_steps_kl_warmup is None
-                else n_steps_kl_warmup
-            ),
+            "n_steps_kl_warmup": (int(0.75 * self.adata.n_obs) if n_steps_kl_warmup is None else n_steps_kl_warmup),
         }
         ignored = {
             key: (value, effective[key])
@@ -900,12 +839,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             if key in effective and value != effective[key]
         }
         if ignored:
-            details = ", ".join(
-                f"{key}={given!r} (used {used!r})" for key, (given, used) in ignored.items()
-            )
+            details = ", ".join(f"{key}={given!r} (used {used!r})" for key, (given, used) in ignored.items())
             warnings.warn(
-                f"plan_kwargs values ignored, train() arguments win: {details}. "
-                "Pass these to train() directly.",
+                f"plan_kwargs values ignored, train() arguments win: {details}. Pass these to train() directly.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -948,11 +884,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         adversarial_classifier: bool | None,
     ) -> None:
         """Warn about two TOTALVI training defaults that act on the u/z hierarchy."""
-        use_adversary = (
-            self._use_adversarial_classifier
-            if adversarial_classifier is None
-            else adversarial_classifier
-        )
+        use_adversary = self._use_adversarial_classifier if adversarial_classifier is None else adversarial_classifier
         if use_adversary:
             warnings.warn(
                 "The TOTALVI adversarial batch classifier is on and acts on z = u + eps, "
@@ -971,9 +903,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 epochs = get_max_epochs_heuristic(n_obs)
         else:
             epochs = max_epochs
-        steps_per_epoch = int(
-            np.ceil(n_obs * (train_size or 0.9) / (batch_size or settings.batch_size))
-        )
+        steps_per_epoch = int(np.ceil(n_obs * (train_size or 0.9) / (batch_size or settings.batch_size)))
         # The plan tests truthiness, so n_epochs_kl_warmup=0 falls back to steps. The
         # epoch schedule reaches 1 at epoch index n_epochs_kl_warmup, and the last
         # epoch index is max_epochs - 1.
@@ -1064,15 +994,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             fields.CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
-            fields.NumericalObsField(
-                REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False
-            ),
-            fields.CategoricalJointObsField(
-                REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys
-            ),
-            fields.NumericalJointObsField(
-                REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys
-            ),
+            fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
+            fields.CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
+            fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
             fields.ProteinObsmField(
                 REGISTRY_KEYS.PROTEIN_EXP_KEY,
                 protein_expression_obsm_key,
@@ -1456,9 +1380,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         calibrated inferential API.
         """
         if use_vmap:
-            raise NotImplementedError(
-                "use_vmap=True is not implemented for MrTotalVI statistics."
-            )
+            raise NotImplementedError("use_vmap=True is not implemented for MrTotalVI statistics.")
         raise RuntimeError(
             "MrTotalVI.differential_expression() is disabled: legacy and "
             "centered-v2 cell-level p-values/LFC are not validated for biological "
@@ -1533,13 +1455,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             Forwarded to :meth:`get_outlier_cell_sample_pairs`.
         """
         if use_vmap:
-            raise NotImplementedError(
-                "use_vmap=True is not implemented for MrTotalVI statistics."
-            )
+            raise NotImplementedError("use_vmap=True is not implemented for MrTotalVI statistics.")
         if self.hierarchy_mode == "centered_v2":
             raise RuntimeError(
-                "The historical differential-expression implementation is not "
-                "available for centered_v2 models."
+                "The historical differential-expression implementation is not available for centered_v2 models."
             )
         adata = self._validate_anndata(adata)
         selected_samples, _ = validate_sample_metadata(
@@ -1572,12 +1491,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         )
         if store_lfc and "feature" in ds.coords:
             n_genes = self.summary_stats.n_vars
-            ds = ds.assign_coords(
-                feature=(
-                    ["gene"] * n_genes
-                    + ["protein"] * (ds.sizes["feature"] - n_genes)
-                )
-            )
+            ds = ds.assign_coords(feature=(["gene"] * n_genes + ["protein"] * (ds.sizes["feature"] - n_genes)))
         ds.attrs.update(
             {
                 "interpretation": "historical_private_non_inferential",
@@ -1691,9 +1605,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 indices=indices,
             )
             # Stack the posterior samples as extra rows: (cells * samples, features).
-            flattened = np.concatenate(
-                [denoised_data[:, :, i] for i in range(n_samples)], axis=0
-            ).astype(np.float64)
+            flattened = np.concatenate([denoised_data[:, :, i] for i in range(n_samples)], axis=0).astype(np.float64)
             if log_transform is True:
                 # Upstream reads self.n_genes, which neither TOTALVI nor MrTotalVI defines.
                 n_genes = self.summary_stats.n_vars
@@ -1764,9 +1676,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
         loader_indices, inverse = _loader_order(adata, indices)
-        scdl = self._make_data_loader(
-            adata=adata, indices=loader_indices, batch_size=batch_size
-        )
+        scdl = self._make_data_loader(adata=adata, indices=loader_indices, batch_size=batch_size)
 
         was_training = self.module.training
         self.module.eval()
@@ -1790,9 +1700,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                         u_mean = out["qz"].loc
                         with torch.inference_mode():
                             if self.hierarchy_mode == "centered_v2":
-                                _, _, _, z_all = (
-                                    self.module._all_sample_residuals(u_mean)
-                                )
+                                _, _, _, z_all = self.module._all_sample_residuals(u_mean)
                                 rep = self.module._gather_sample(
                                     z_all,
                                     sample_index,
@@ -1858,7 +1766,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                     if use_mean:
                         u = base_out["qz"].loc  # posterior mean of qu: (batch, n_latent)
                     else:
-                        u = base_out["u"]       # reparameterised sample from qu
+                        u = base_out["u"]  # reparameterised sample from qu
 
                     n_cells = u.shape[0]
                     dev = u.device
@@ -1876,16 +1784,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                                 dtype=torch.long,
                                 device=dev,
                             )
-                            z_base, eps, _ = self.module.qz(
-                                u, cf_sample, deterministic=use_mean
-                            )
+                            z_base, eps, _ = self.module.qz(u, cf_sample, deterministic=use_mean)
                             cf_zs.append((z_base + eps).detach().cpu())
 
-                        batch_reps = (
-                            torch.stack(cf_zs, dim=0)
-                            .permute(1, 0, 2)
-                            .numpy()
-                        )
+                        batch_reps = torch.stack(cf_zs, dim=0).permute(1, 0, 2).numpy()
                     yield batch_reps, cell_idx.numpy()
         finally:
             self.module.train(was_training)
@@ -1919,9 +1821,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         """
         all_reps = []
         all_cell_names = []
-        for batch_reps, cell_positions in self._iter_cf_representations(
-            adata, indices, batch_size, use_mean=use_mean
-        ):
+        for batch_reps, cell_positions in self._iter_cf_representations(adata, indices, batch_size, use_mean=use_mean):
             all_cell_names.extend(adata.obs_names[cell_positions].tolist())
             all_reps.append(batch_reps)
         return np.concatenate(all_reps, axis=0), all_cell_names
@@ -1963,9 +1863,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 stacklevel=3,
             )
             return
-        registered = list(
-            self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names
-        )
+        registered = list(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
         if list(adata.uns[names_key]) != registered:
             raise ValueError(
                 f"adata.uns['{names_key}'] does not match the registered protein names "
@@ -1985,9 +1883,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             if admissibility.indexes[dim].has_duplicates:
                 raise ValueError(f"admissibility has duplicate {dim} labels.")
         missing_cells = np.setdiff1d(np.asarray(cell_names), admissibility["cell_name"].values)
-        missing_samples = np.setdiff1d(
-            np.asarray(self.sample_order), admissibility["sample"].values
-        )
+        missing_samples = np.setdiff1d(np.asarray(self.sample_order), admissibility["sample"].values)
         if missing_cells.size or missing_samples.size:
             raise ValueError(
                 "admissibility must cover every requested cell and registered sample; "
@@ -2042,17 +1938,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
         self._check_output_size(
-            4 * self._n_selected_cells(adata, indices)
-            * self.summary_stats.n_sample
-            * self.module.n_latent,
+            4 * self._n_selected_cells(adata, indices) * self.summary_stats.n_sample * self.module.n_latent,
             max_gb,
             "The local sample representation",
             "Pass fewer indices.",
         )
 
-        reps, cell_names = self._compute_cf_representations(
-            adata, indices, batch_size, use_mean=use_mean
-        )
+        reps, cell_names = self._compute_cf_representations(adata, indices, batch_size, use_mean=use_mean)
         if admissibility is not None:
             reps = reps.copy()
             reps[~self._admissibility_rows(admissibility, cell_names)] = np.nan
@@ -2136,9 +2028,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             if key not in adata.obs:
                 raise KeyError(f"groupby column {key!r} is not in adata.obs.")
             if adata.obs[key].isna().any():
-                raise ValueError(
-                    f"groupby column {key!r} has missing labels; fill or drop them first."
-                )
+                raise ValueError(f"groupby column {key!r} has missing labels; fill or drop them first.")
         if not keep_cell and not group_keys:
             raise ValueError("keep_cell=False needs groupby; there would be no output.")
 
@@ -2155,13 +2045,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         cell_names: list[str] = []
         sums = {key: {} for key in group_keys}  # key -> group -> [sum matrix, n cells]
         start = 0
-        for batch_reps, positions in self._iter_cf_representations(
-            adata, indices, batch_size, use_mean=use_mean
-        ):
+        for batch_reps, positions in self._iter_cf_representations(adata, indices, batch_size, use_mean=use_mean):
             chunk = torch.as_tensor(batch_reps, dtype=torch.float32)
-            batch_d = torch.cdist(
-                chunk, chunk, p=p, compute_mode="donot_use_mm_for_euclid_dist"
-            ).numpy()
+            batch_d = torch.cdist(chunk, chunk, p=p, compute_mode="donot_use_mm_for_euclid_dist").numpy()
             batch_names = adata.obs_names[positions].tolist()
             cell_names.extend(batch_names)
             # A pair counts for a cell only where the cell has support in both samples.
@@ -2177,9 +2063,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 labels = adata.obs[key].to_numpy()[positions]
                 for label in np.unique(labels):
                     in_group = labels == label
-                    total = np.where(pair_ok[in_group], batch_d[in_group], 0.0).sum(
-                        axis=0, dtype=np.float64
-                    )
+                    total = np.where(pair_ok[in_group], batch_d[in_group], 0.0).sum(axis=0, dtype=np.float64)
                     count = pair_ok[in_group].sum(axis=0)
                     prior = sums[key].get(label, [0.0, 0])
                     sums[key][label] = [prior[0] + total, prior[1] + count]

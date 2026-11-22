@@ -10,10 +10,9 @@ import pandas as pd
 import torch
 import xarray as xr
 from scipy.special import logsumexp
+from scvi import settings
 from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
 from tqdm import tqdm
-
-from scvi import settings
 
 
 def _validate_sample_level_covariates(obs, sample_key: str, cov_keys: list[str]) -> None:
@@ -46,9 +45,7 @@ def _rowwise_max_excluding_diagonal(matrix: torch.Tensor) -> torch.Tensor:
     if n_cols == 1:
         return matrix[:, 0]
     mask = ~torch.eye(n_cols, dtype=torch.bool, device=matrix.device)
-    return torch.where(mask, matrix, torch.tensor(-float("inf"), device=matrix.device)).max(
-        dim=1
-    ).values
+    return torch.where(mask, matrix, torch.tensor(-float("inf"), device=matrix.device)).max(dim=1).values
 
 
 def _as_indices(adata, indices):
@@ -79,9 +76,7 @@ def collect_u_posterior(model, adata=None, indices=None, batch_size: int = 256):
     adata = model._validate_anndata(adata)
     indices = _as_indices(adata, indices)
     loader_indices, inverse = _loader_order(adata, indices)
-    dataloader = model._make_data_loader(
-        adata=adata, indices=loader_indices, batch_size=batch_size
-    )
+    dataloader = model._make_data_loader(adata=adata, indices=loader_indices, batch_size=batch_size)
 
     locs = []
     scales = []
@@ -212,12 +207,7 @@ def _sqrtm_batch(xtmx: torch.Tensor) -> torch.Tensor:
     import scipy.linalg
 
     root = torch.stack(
-        [
-            torch.from_numpy(
-                scipy.linalg.sqrtm(m.cpu().numpy()).real.astype(np.float32)
-            )
-            for m in xtmx
-        ]
+        [torch.from_numpy(scipy.linalg.sqrtm(m.cpu().numpy()).real.astype(np.float32)) for m in xtmx]
     ).to(xtmx.device)
     return torch.nan_to_num(root, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -246,9 +236,7 @@ def _leave_one_cell_out(ap, u_tensor, lp: np.ndarray, own: np.ndarray) -> np.nda
         lp[hit] = np.nan
         return lp
     comp = ap.component_distribution.log_prob(u_tensor[hit].unsqueeze(-2))
-    comp[torch.arange(hit.size, device=comp.device), torch.as_tensor(own[hit], device=comp.device)] = (
-        -float("inf")
-    )
+    comp[torch.arange(hit.size, device=comp.device), torch.as_tensor(own[hit], device=comp.device)] = -float("inf")
     lp[hit] = (torch.logsumexp(comp, dim=-1) - np.log(n_comp - 1)).detach().cpu().numpy()
     return lp
 
@@ -383,10 +371,7 @@ def differential_abundance(
     if n_mc_samples < 1:
         raise ValueError("n_mc_samples must be >= 1.")
     if density_estimator not in ("posterior", "knn", "scale_floor"):
-        raise ValueError(
-            "density_estimator must be 'posterior', 'knn' or 'scale_floor'; "
-            f"got {density_estimator!r}."
-        )
+        raise ValueError(f"density_estimator must be 'posterior', 'knn' or 'scale_floor'; got {density_estimator!r}.")
     if density_estimator == "scale_floor":
         if scale_floor is None or not scale_floor > 0:
             raise ValueError("density_estimator='scale_floor' needs scale_floor > 0.")
@@ -406,8 +391,8 @@ def differential_abundance(
     if validated_sample_order is not None:
         sample_values = list(validated_sample_order)
     else:
-        sample_values = list(model.sample_order) if hasattr(model, "sample_order") else list(
-            adata.obs[sample_key].unique()
+        sample_values = (
+            list(model.sample_order) if hasattr(model, "sample_order") else list(adata.obs[sample_key].unique())
         )
         if sample_subset is not None:
             sample_values = [s for s in sample_values if s in set(sample_subset)]
@@ -428,16 +413,10 @@ def differential_abundance(
                 UserWarning,
                 stacklevel=2,
             )
-        sample_info_da = (
-            adata.obs[[sample_key, donor_key]]
-            .drop_duplicates(subset=sample_key)
-            .set_index(sample_key)
-        )
+        sample_info_da = adata.obs[[sample_key, donor_key]].drop_duplicates(subset=sample_key).set_index(sample_key)
         single_sample_donors = []
         for donor_id in sample_info_da[donor_key].unique():
-            donor_samples = set(
-                sample_info_da.index[sample_info_da[donor_key] == donor_id].tolist()
-            )
+            donor_samples = set(sample_info_da.index[sample_info_da[donor_key] == donor_id].tolist())
             col_idx = [i for i, name in enumerate(sample_values) if name in donor_samples]
             if len(col_idx) == 1:
                 single_sample_donors.append(donor_id)
@@ -453,22 +432,12 @@ def differential_abundance(
 
     # Per-cell modality-weight models cannot accept held-out adata in get_latent_representation.
     # DA is always run on the training data, so adata=None (→ model.adata) is equivalent.
-    _repr_adata = (
-        None
-        if getattr(getattr(model, "module", None), "modality_weights", None) == "cell"
-        else adata
-    )
+    _repr_adata = None if getattr(getattr(model, "module", None), "modality_weights", None) == "cell" else adata
     if n_mc_samples == 1:
-        us_list = [
-            model.get_latent_representation(
-                _repr_adata, give_mean=True, give_z=False, batch_size=batch_size
-            )
-        ]
+        us_list = [model.get_latent_representation(_repr_adata, give_mean=True, give_z=False, batch_size=batch_size)]
     else:
         us_list = [
-            model.get_latent_representation(
-                _repr_adata, give_mean=False, give_z=False, batch_size=batch_size
-            )
+            model.get_latent_representation(_repr_adata, give_mean=False, give_z=False, batch_size=batch_size)
             for _ in range(n_mc_samples)
         ]
 
@@ -538,9 +507,7 @@ def differential_abundance(
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             for col_idx in donor_column_groups:
-                agg_log_probs[:, col_idx] -= np.nanmean(
-                    agg_log_probs[:, col_idx], axis=1, keepdims=True
-                )
+                agg_log_probs[:, col_idx] -= np.nanmean(agg_log_probs[:, col_idx], axis=1, keepdims=True)
 
     coords = {"cell_name": adata.obs_names.to_numpy(), "sample": np.asarray(sample_values)}
     data_vars = {"log_probs": (["cell_name", "sample"], log_probs)}
@@ -588,9 +555,7 @@ def differential_abundance(
             # sample); it carries no weight, and a group with no usable sample is NaN.
             usable = ~np.isnan(sample_log_probs)
             n_ref = usable.sum(axis=1)
-            result = logsumexp(np.where(usable, sample_log_probs, -np.inf), axis=1) - np.log(
-                np.maximum(n_ref, 1)
-            )
+            result = logsumexp(np.where(usable, sample_log_probs, -np.inf), axis=1) - np.log(np.maximum(n_ref, 1))
             result[n_ref == 0] = np.nan
         empty_group[n_ref == 0] = True
         return result
@@ -849,13 +814,11 @@ def _differential_expression(
     adjusted values change with how many cells and covariates are analysed.
     """
     from scipy.stats import false_discovery_control
-
     from scvi import REGISTRY_KEYS as RK
 
     if store_lfc and not hasattr(model.module, "compute_h_from_x_eps"):
         raise NotImplementedError(
-            "store_lfc requires model.module.compute_h_from_x_eps, "
-            "which is not implemented for this module."
+            "store_lfc requires model.module.compute_h_from_x_eps, which is not implemented for this module."
         )
     if not sample_cov_keys:
         raise ValueError("sample_cov_keys must contain at least one sample-level covariate.")
@@ -903,11 +866,7 @@ def _differential_expression(
             sample_key=sample_key,
             **filter_samples_kwargs,
         )
-        admissible_samples = (
-            outliers["is_admissible"]
-            .sel(sample=sample_order_kept)
-            .values.astype(np.float32)
-        )
+        admissible_samples = outliers["is_admissible"].sel(sample=sample_order_kept).values.astype(np.float32)
     else:
         admissible_samples = np.ones((adata.n_obs, n_sample_kept), dtype=np.float32)
 
@@ -981,10 +940,7 @@ def _differential_expression(
                 base_out = model.module.inference(**inf_inputs)
                 qu = base_out.get("qu")
                 if qu is None:
-                    raise RuntimeError(
-                        "model.module.inference() did not return 'qu'; "
-                        "cannot compute MC eps samples."
-                    )
+                    raise RuntimeError("model.module.inference() did not return 'qu'; cannot compute MC eps samples.")
 
                 def _eps_from_u(
                     u: torch.Tensor,
@@ -1010,9 +966,7 @@ def _differential_expression(
                     eps_batch = _eps_from_u(qu.mean).unsqueeze(0)
                 else:
                     u_samples = [qu.rsample() for _ in range(mc_samples)]
-                    eps_batch = torch.stack(
-                        [_eps_from_u(u_i) for u_i in u_samples], dim=0
-                    )
+                    eps_batch = torch.stack([_eps_from_u(u_i) for u_i in u_samples], dim=0)
                 # eps_batch: (mc, n_cells, n_sample_kept, n_latent)
 
                 # Admissibility for this batch
@@ -1023,10 +977,9 @@ def _differential_expression(
                 # X^T M X per cell: einsum over sample dimension s
                 # Xmat: (n_sample_kept, n_cov)  →  s,k
                 # admiss: (n_cells, n_sample_kept)  →  n,s
-                xtmx = (
-                    torch.einsum("sk,ns,sl->nkl", Xmat, admiss, Xmat)
-                    + lambd * torch.eye(n_covariates, device=device).unsqueeze(0)
-                )  # (n_cells, n_cov, n_cov)
+                xtmx = torch.einsum("sk,ns,sl->nkl", Xmat, admiss, Xmat) + lambd * torch.eye(
+                    n_covariates, device=device
+                ).unsqueeze(0)  # (n_cells, n_cov, n_cov)
                 prefactor = _sqrtm_batch(xtmx)  # (n_cells, n_cov, n_cov)
                 inv_ = torch.vmap(torch.linalg.pinv)(xtmx)  # (n_cells, n_cov, n_cov)
                 # Amat = (X^T M X)^{-1} X^T M  →  (n_cells, n_cov, n_sample_kept)
@@ -1095,7 +1048,7 @@ def _differential_expression(
                     )
 
                     # Accumulators (initialized lazily on first batch value)
-                    lfc_wsum: torch.Tensor | None = None   # (n_fixed, n_cells, n_features)
+                    lfc_wsum: torch.Tensor | None = None  # (n_fixed, n_cells, n_features)
                     lfc_var_wsum: torch.Tensor | None = None
                     pde_wsum: torch.Tensor | None = None
                     baseline_wsum: torch.Tensor | None = None
@@ -1134,16 +1087,12 @@ def _differential_expression(
 
                         if lfc_wsum is None:
                             n_features_lfc = log_x0_mc[0].shape[-1]
-                            lfc_wsum = torch.zeros(
-                                n_fixed, n_cells, n_features_lfc, device=device
-                            )
+                            lfc_wsum = torch.zeros(n_fixed, n_cells, n_features_lfc, device=device)
                             lfc_var_wsum = torch.zeros_like(lfc_wsum)
                             if delta is not None:
                                 pde_wsum = torch.zeros_like(lfc_wsum)
                             if store_baseline:
-                                baseline_wsum = torch.zeros(
-                                    n_cells, n_features_lfc, device=device
-                                )
+                                baseline_wsum = torch.zeros(n_cells, n_features_lfc, device=device)
 
                         if store_baseline:
                             baseline_wsum += w_b * torch.stack(x0_mc, 0).mean(0)
@@ -1153,24 +1102,16 @@ def _differential_expression(
                         for k in range(n_fixed):
                             lfc_mc_k = []
                             for mc_idx in range(mc_samples):
-                                extra = (
-                                    betas_eps[mc_idx, :, k, :] + eps_mean_cell
-                                )  # (n_cells, n_latent)
+                                extra = betas_eps[mc_idx, :, k, :] + eps_mean_cell  # (n_cells, n_latent)
                                 x_1 = model.module.compute_h_from_x_eps(
                                     extra_eps=extra,
                                     u_anchor=u_samples[mc_idx],
                                     _lfc_aux=_lfc_aux,
                                     **h_kwargs_b,
                                 )  # (n_cells, n_features)
-                                lfc_mc_k.append(
-                                    torch.log2(x_1 + eps_lfc) - log_x0_mc[mc_idx]
-                                )
-                            lfc_mc_cov_list.append(
-                                torch.stack(lfc_mc_k, 0)
-                            )  # (mc, n_cells, n_features)
-                        lfc_mc_cov = torch.stack(
-                            lfc_mc_cov_list, 0
-                        )  # (n_fixed, mc, n_cells, n_features)
+                                lfc_mc_k.append(torch.log2(x_1 + eps_lfc) - log_x0_mc[mc_idx])
+                            lfc_mc_cov_list.append(torch.stack(lfc_mc_k, 0))  # (mc, n_cells, n_features)
+                        lfc_mc_cov = torch.stack(lfc_mc_cov_list, 0)  # (n_fixed, mc, n_cells, n_features)
 
                         lfc_wsum += w_b * lfc_mc_cov.mean(1)
                         # correction=0 (population variance) because mc_samples=1 is valid;
@@ -1186,9 +1127,7 @@ def _differential_expression(
                     # Permute from (n_fixed, n_cells, n_features) to
                     # (n_cells, n_fixed, n_features).
                     lfc_list.append(lfc_wsum.permute(1, 0, 2).cpu().numpy())
-                    lfc_std_list.append(
-                        torch.sqrt(lfc_var_wsum).permute(1, 0, 2).cpu().numpy()
-                    )
+                    lfc_std_list.append(torch.sqrt(lfc_var_wsum).permute(1, 0, 2).cpu().numpy())
                     if delta is not None:
                         pde_list.append(pde_wsum.permute(1, 0, 2).cpu().numpy())
                     if store_baseline:
@@ -1214,7 +1153,7 @@ def _differential_expression(
     }
 
     if store_lfc:
-        lfc = np.concatenate(lfc_list, 0)          # (n_cells_total, n_fixed, n_features)
+        lfc = np.concatenate(lfc_list, 0)  # (n_cells_total, n_fixed, n_features)
         lfc_std = np.concatenate(lfc_std_list, 0)
         data_vars["lfc"] = (["cell_name", "covariate", "feature"], lfc)
         data_vars["lfc_std"] = (["cell_name", "covariate", "feature"], lfc_std)
@@ -1257,11 +1196,7 @@ def get_outlier_cell_sample_pairs(
     """
     rng = np.random.default_rng(random_state if random_state is not None else settings.seed)
     adata = model._validate_anndata(adata)
-    _repr_adata = (
-        None
-        if getattr(getattr(model, "module", None), "modality_weights", None) == "cell"
-        else adata
-    )
+    _repr_adata = None if getattr(getattr(model, "module", None), "modality_weights", None) == "cell" else adata
     us = model.get_latent_representation(
         _repr_adata,
         give_mean=True,
@@ -1269,9 +1204,7 @@ def get_outlier_cell_sample_pairs(
         batch_size=batch_size,
     )
 
-    sample_values = list(model.sample_order) if hasattr(model, "sample_order") else list(
-        adata.obs[sample_key].unique()
-    )
+    sample_values = list(model.sample_order) if hasattr(model, "sample_order") else list(adata.obs[sample_key].unique())
     log_probs = []
     thresholds = []
     n_splits = max(int(np.ceil(adata.n_obs / batch_size)), 1)
@@ -1300,9 +1233,7 @@ def get_outlier_cell_sample_pairs(
         # pooled threshold (its 1x1 entry would be the cell's own self-density).
         if sample_idxs.shape[0] > 1:
             in_comp_log_probs = ap.component_distribution.log_prob(in_sample.unsqueeze(-2))
-            thresholds.append(
-                _rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu()
-            )
+            thresholds.append(_rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu())
 
         # A cell inside this sample's subsample must not match its own component,
         # mirroring the leave-one-out thresholds above.

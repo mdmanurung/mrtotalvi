@@ -62,8 +62,8 @@
   models fail it (p = 0.07, 0.23, 0.77); the `*_wiring` tests do not.
 - Two opt-in training flags; the defaults are unchanged (user decisions, 2026-11-20).
   `residual_prior_mode="factual"` (centered_v2 only) scores the factual centered residual
-  instead of the mean over raw residuals, which made a sample-private residual about `S - 1`
-  times cheaper than in `legacy` (ADR-0007 amendment). `anneal_protein_likelihood=False`
+  at the legacy cost. For the same factual residual, the minimum excess `raw_mean` penalty is
+  the factual cost divided by `S - 1` for `S > 1` (ADR-0007 amendment). `anneal_protein_likelihood=False`
   stops scaling the protein likelihood by `kl_weight` during warm-up, as the TOTALVI paper
   describes; upstream TOTALVI scales it, so at `kl_weight=0` the protein term gave no
   gradient. Both are saved with the model; older checkpoints load with the defaults. Neither
@@ -254,9 +254,9 @@
 MrTotalVI moved from `scvi.external.mrtotalvi` in the fork to the standalone package `mrtotalvi`,
 built on upstream `scvi-tools` 1.5.2. MrMultiVI and CytoANVI stay in the fork.
 
-The fork's frozen regression oracle (`tests/legacy_oracle/`, commit `d8c8e997`) replays under
+The fork’s frozen regression oracle (`tests/legacy_oracle/`, commit `d8c8e997`) replays under
 upstream scvi-tools 1.5.2, torch 2.15 and pandas 3.1 on CPU within its portable tolerance. The
-largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
+largest strict-tolerance delta is 1.9e-6, below the fork host’s 3.8e-6.
 
 ### Fixed during extraction
 

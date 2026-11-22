@@ -8,18 +8,18 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+import scvi
 import torch
 import xarray as xr
 from scipy import sparse
+from scvi.model._totalvi import TOTALVI
 
-import scvi
 from mrtotalvi import MrTotalVI
 from mrtotalvi._contracts import (
     ordered_indices_sha256,
     validate_count_matrix,
     validate_sample_metadata,
 )
-from scvi.model._totalvi import TOTALVI
 
 
 def _adata(*, labels: bool = False):
@@ -61,9 +61,7 @@ def test_exact_prior_migration_table(prior, legacy, mixture):
     adata = _adata()
     _setup(adata)
     context = (
-        pytest.warns(DeprecationWarning, match="u_prior_mixture")
-        if legacy is not None
-        else warnings.catch_warnings()
+        pytest.warns(DeprecationWarning, match="u_prior_mixture") if legacy is not None else warnings.catch_warnings()
     )
     with context:
         model = MrTotalVI(
@@ -274,9 +272,7 @@ def test_legacy_checkpoint_prior_label_matrix_preserves_effective_objective(
     expected_supervision = "labels" if labels and prior == "mog" else "none"
     expected_weight = 10.0 if expected_supervision == "labels" else 0.0
     migration_match = (
-        "explicit label supervision"
-        if expected_supervision == "labels"
-        else "historical effective objective"
+        "explicit label supervision" if expected_supervision == "labels" else "historical effective objective"
     )
     with pytest.warns(DeprecationWarning, match=migration_match):
         migrated = MrTotalVI.load(old_path, adata=adata)
@@ -304,11 +300,7 @@ def test_legacy_checkpoint_prior_label_matrix_preserves_effective_objective(
     assert first_init["u_prior_supervision"] == expected_supervision
     assert first_init["u_prior_label_weight"] == expected_weight
     assert first_init["u_prior_mixture"] is None
-    expected_k = (
-        migrated.summary_stats.n_labels
-        if labels and prior == "vamp"
-        else original_mixture_k
-    )
+    expected_k = migrated.summary_stats.n_labels if labels and prior == "vamp" else original_mixture_k
     assert first_init["u_prior_mixture_k"] == expected_k
 
     with warnings.catch_warnings(record=True) as caught:

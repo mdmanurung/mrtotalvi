@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import subprocess
 import sys
@@ -19,11 +18,11 @@ from mrtotalvi import MrTotalVI
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_COMMIT = "b900c13"  # last commit before the prior existed
-SETUP = dict(
-    protein_expression_obsm_key="protein_expression",
-    sample_key="sample",
-    batch_key="batch",
-)
+SETUP = {
+    "protein_expression_obsm_key": "protein_expression",
+    "sample_key": "sample",
+    "batch_key": "batch",
+}
 
 
 def _adata(n_samples: int = 4, random_halves: bool = False):
@@ -94,7 +93,11 @@ def _run_one_step(src: Path) -> tuple[str, str]:
     env = {**os.environ, "PYTHONPATH": str(src), "MPLCONFIGDIR": "/tmp/mplconfig"}
     out = subprocess.run(
         [sys.executable, "-c", ONE_STEP_SCRIPT],
-        env=env, capture_output=True, text=True, check=True, timeout=600,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=600,
     ).stdout.split()
     return out[-2], out[-1]
 
@@ -107,7 +110,8 @@ def test_default_off_is_byte_identical_to_main(tmp_path):
     try:
         subprocess.run(
             ["git", "-C", str(ROOT), "archive", "-o", str(archive), MAIN_COMMIT, "src"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
     except subprocess.CalledProcessError:
         pytest.skip(f"commit {MAIN_COMMIT} not reachable")
@@ -144,9 +148,7 @@ def test_penalty_term_equals_formula():
     assert float(on.kl_global_sum.detach()) == pytest.approx(expected, rel=1e-5)
     # the loss is float32 and large, so allow a few units in its last place
     ulp = float(np.spacing(np.float32(abs(float(off.loss.detach())))))
-    assert float((on.loss - off.loss).detach()) == pytest.approx(
-        expected / n_cells, abs=4 * ulp
-    )
+    assert float((on.loss - off.loss).detach()) == pytest.approx(expected / n_cells, abs=4 * ulp)
     assert float(off.kl_global_sum) == 0.0
 
 
@@ -191,8 +193,11 @@ def test_invalid_settings_raise():
         MrTotalVI(adata, sample_key="sample", n_latent=10, sample_embedding_prior_scale=0.0)
     with pytest.raises(ValueError, match="sample_conditioned"):
         MrTotalVI(
-            adata, sample_key="sample", n_latent=10,
-            u_encoder_mode="sample_blind", u_encoder_sample_embedding_prior_scale=1.0,
+            adata,
+            sample_key="sample",
+            n_latent=10,
+            u_encoder_mode="sample_blind",
+            u_encoder_sample_embedding_prior_scale=1.0,
         )
 
 
@@ -202,8 +207,12 @@ def _train_spread(prior):
     kw = {} if prior is None else {"sample_embedding_prior_scale": prior}
     model = _model(adata, **kw)
     model.train(
-        max_epochs=3, lr=1e-2, batch_size=32, accelerator="cpu",
-        early_stopping=False, reduce_lr_on_plateau=False,
+        max_epochs=3,
+        lr=1e-2,
+        batch_size=32,
+        accelerator="cpu",
+        early_stopping=False,
+        reduce_lr_on_plateau=False,
     )
     w = model.module.qz.embedding.weight.detach()
     return float((w[0] - w[1]).norm())

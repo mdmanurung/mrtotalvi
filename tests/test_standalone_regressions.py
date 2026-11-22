@@ -49,15 +49,9 @@ def test_centered_v2_mean_latent_works_on_gpu():
 
 def test_learned_eps_prior_scale_starts_at_requested_value():
     adata = _make_adata()
-    MrTotalVI.setup_anndata(
-        adata, protein_expression_obsm_key="protein_expression", sample_key="sample"
-    )
-    model = MrTotalVI(
-        adata, sample_key="sample", z_u_prior_scale=-2.0, learn_z_u_prior_scale=True
-    )
-    torch.testing.assert_close(
-        model.module.pz_scale.detach(), torch.full_like(model.module.pz_scale, -2.0)
-    )
+    MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein_expression", sample_key="sample")
+    model = MrTotalVI(adata, sample_key="sample", z_u_prior_scale=-2.0, learn_z_u_prior_scale=True)
+    torch.testing.assert_close(model.module.pz_scale.detach(), torch.full_like(model.module.pz_scale, -2.0))
 
 
 def test_local_sample_distances_match_direct_computation(trained_legacy):
@@ -67,9 +61,7 @@ def test_local_sample_distances_match_direct_computation(trained_legacy):
     for norm in ("l2", "l1"):
         dists = model.get_local_sample_distances(adata, norm=norm, batch_size=7).values
         delta = reps[:, :, None, :] - reps[:, None, :, :]
-        expected = (
-            np.sqrt((delta**2).sum(-1)) if norm == "l2" else np.abs(delta).sum(-1)
-        )
+        expected = np.sqrt((delta**2).sum(-1)) if norm == "l2" else np.abs(delta).sum(-1)
         np.testing.assert_allclose(dists, expected, rtol=1e-5, atol=1e-5)
 
 
@@ -86,9 +78,7 @@ def test_outlier_pairs_exclude_each_cells_own_component(trained_legacy):
     log_p = comp.log_prob(torch.as_tensor(us[members])[:, None, :]).sum(-1)
     log_p.fill_diagonal_(-float("inf"))
     expected = log_p.max(dim=1).values.numpy()
-    np.testing.assert_allclose(
-        out["log_probs"].sel(sample=sample).values[members], expected, rtol=1e-4, atol=1e-4
-    )
+    np.testing.assert_allclose(out["log_probs"].sel(sample=sample).values[members], expected, rtol=1e-4, atol=1e-4)
 
 
 def test_counterfactual_expression_unchanged_by_row_chunked_decode(monkeypatch):
@@ -151,7 +141,7 @@ def test_local_outputs_apply_an_admissibility_mask(trained_legacy, monkeypatch):
         coords={"cell_name": names, "sample": samples},
     )
     adata.obs["one_group"] = "g"
-    request = dict(adata=adata, indices=positions, admissibility=mask)
+    request = {"adata": adata, "indices": positions, "admissibility": mask}
 
     local = model.get_local_sample_representation(**request)
     expected_reps = reps.copy()

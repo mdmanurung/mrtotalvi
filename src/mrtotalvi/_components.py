@@ -17,11 +17,10 @@ if TYPE_CHECKING:
 
 import torch
 import torch.nn.functional as F
+from scvi.module.base import auto_move_data
 from torch import nn
 from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal, kl_divergence
 from torch.nn import init
-
-from scvi.module.base import auto_move_data
 
 # Lower bound on the stochastic residual log-scale: log(1e-3), the scale floor of upstream
 # MrVI (scvi/external/mrvi/_module.py:572). User decision, 2026-11-20.
@@ -303,9 +302,7 @@ def init_u_prior(
             module.u_prior_means = nn.Parameter(prior_centroids.float().clone())
         else:
             module.u_prior_means = nn.Parameter(torch.randn(resolved_k, n_latent_u))
-        module.u_prior_scales = nn.Parameter(
-            torch.full((resolved_k, n_latent_u), float(u_prior_scale))
-        )
+        module.u_prior_scales = nn.Parameter(torch.full((resolved_k, n_latent_u), float(u_prior_scale)))
     else:
         module.u_prior_mixture = False
         module.resolved_u_prior_mixture_k = 0
@@ -330,9 +327,7 @@ def build_u_prior(
     # ``None`` is the compatibility sentinel used by MrMultiVI, which
     # historically label-conditioned MoG weights but never Vamp weights.
     # MrTotalVI resolves all new calls to the explicit "none"/"labels" enum.
-    label_conditioned = supervision == "labels" or (
-        supervision is None and prior_type != "vamp"
-    )
+    label_conditioned = supervision == "labels" or (supervision is None and prior_type != "vamp")
     if (
         logits is not None
         and label_conditioned
@@ -436,9 +431,7 @@ def _append_covariates(
         elif batch_index is None:
             raise ValueError("batch_index is required when encode_covariates=True.")
         else:
-            covariates.append(
-                F.one_hot(batch_index.squeeze(-1).to(torch.int64), n_batch).float()
-            )
+            covariates.append(F.one_hot(batch_index.squeeze(-1).to(torch.int64), n_batch).float())
 
     if len(n_cats_per_cov) > 0:
         if cat_covs is None:
@@ -643,9 +636,7 @@ class EncoderXU_TotalVI(nn.Module):
     ):
         super().__init__()
         if u_encoder_mode not in {"sample_conditioned", "sample_blind"}:
-            raise ValueError(
-                "u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}."
-            )
+            raise ValueError("u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}.")
         self.activation = activation
         self.u_encoder_mode = u_encoder_mode
         self.n_batch = int(n_batch)
@@ -798,9 +789,7 @@ class EncoderXU_MultiVI(nn.Module):
 
         valid_modes = {"log1p", "layernorm", "project"}
         if protein_encoder_mode not in valid_modes:
-            raise ValueError(
-                f"protein_encoder_mode must be one of {valid_modes}, got {protein_encoder_mode!r}"
-            )
+            raise ValueError(f"protein_encoder_mode must be one of {valid_modes}, got {protein_encoder_mode!r}")
         self.protein_encoder_mode = protein_encoder_mode
 
         # Effective protein contribution to fc1 input width
@@ -816,11 +805,15 @@ class EncoderXU_MultiVI(nn.Module):
             else:  # "log1p"
                 prot_dim = n_input_proteins
 
-        n_input_fc1 = n_input + prot_dim + _covariate_n_input(
-            self.n_batch,
-            self.n_continuous_cov,
-            self.n_cats_per_cov,
-            self.encode_covariates,
+        n_input_fc1 = (
+            n_input
+            + prot_dim
+            + _covariate_n_input(
+                self.n_batch,
+                self.n_continuous_cov,
+                self.n_cats_per_cov,
+                self.encode_covariates,
+            )
         )
 
         self.fc1 = nn.Linear(n_input_fc1, n_hidden)
@@ -1036,9 +1029,7 @@ class AttentionBlock(nn.Module):
         flat_batch = q.shape[0]
 
         def _to_heads(t: torch.Tensor) -> torch.Tensor:
-            return t.view(
-                flat_batch, self.outerprod_dim, self.n_heads, self.depth_per_head
-            ).transpose(1, 2)
+            return t.view(flat_batch, self.outerprod_dim, self.n_heads, self.depth_per_head).transpose(1, 2)
 
         q, k, v = _to_heads(q), _to_heads(k), _to_heads(v)
 
@@ -1048,9 +1039,7 @@ class AttentionBlock(nn.Module):
         # (batch, n_heads, outerprod_dim, depth_per_head)
 
         # Transpose back and flatten heads: → (batch, outerprod_dim, n_heads * depth_per_head)
-        attn_out = attn_out.transpose(1, 2).reshape(
-            flat_batch, self.outerprod_dim, self.n_heads * self.depth_per_head
-        )
+        attn_out = attn_out.transpose(1, 2).reshape(flat_batch, self.outerprod_dim, self.n_heads * self.depth_per_head)
 
         # Output projection: → (batch, outerprod_dim, n_channels)
         eps = self.out_proj(attn_out)

@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import scvi
 import torch
 
 from mrtotalvi import MrTotalVI
 
-SETUP = dict(protein_expression_obsm_key="protein_expression", sample_key="sample", batch_key="batch")
-BLIND = dict(u_encoder_mode="sample_blind")
+SETUP = {"protein_expression_obsm_key": "protein_expression", "sample_key": "sample", "batch_key": "batch"}
+BLIND = {"u_encoder_mode": "sample_blind"}
 
 
 def _model(**kw):
@@ -50,9 +49,7 @@ def test_penalty_adds_and_trains_only_the_u_encoder():
     inf = module.inference(**module._get_inference_input(tensors))
     module.u_invariance_penalty(tensors, inf).backward()
     with_grad = {
-        name.split(".")[0]
-        for name, p in module.named_parameters()
-        if p.grad is not None and p.grad.abs().sum() > 0
+        name.split(".")[0] for name, p in module.named_parameters() if p.grad is not None and p.grad.abs().sum() > 0
     }
     assert with_grad == {"qu"}
 

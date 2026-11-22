@@ -191,12 +191,12 @@ learned embedding table shared by the u-encoder and the decoder:
 model = MrTotalVI(
     adata,
     sample_key="donor",
-    encode_covariates=True,             # required for batch to reach the u-encoder
+    encode_covariates=True,  # required for batch to reach the u-encoder
     batch_representation="embedding",
     batch_embedding_kwargs={"embedding_dim": 5},
 )
 model.train()
-batch_vectors = model.get_batch_representation()   # (n_cells, embedding_dim); embedding mode only
+batch_vectors = model.get_batch_representation()  # (n_cells, embedding_dim); embedding mode only
 ```
 
 The input width then grows by `embedding_dim` instead of by `n_batch`. Note
@@ -282,13 +282,19 @@ enrichment = model_v2.local_sample_enrichment(
 ```
 
 `donor_key` must name a column that groups the samples of one patient, with exactly one
-`treated` and one `control` sample per patient. It cannot be the model's own `sample_key`
+`treated` and one `control` sample per patient. It cannot be the model’s own `sample_key`
 (`"donor"` above), because each registered sample then belongs to its own group and the
 pairing check raises.
 
-Group densities use equal-sample `logmeanexp`; only a query cell's factual
-reference mixture excludes that cell. These outputs and grouped
-`differential_abundance()` results are descriptive and non-inferential.
+Group densities use equal-sample `logmeanexp`. Only the factual reference mixture excludes the query cell.
+For paired samples, `enrichment["donor_log_ratio"]` gives one log density ratio per donor.
+`enrichment["donor_log_ratio_mean"]` gives each usable donor pair equal weight.
+
+`differential_abundance(donor_key=..., omit_original_sample=False)` centers log densities within each donor.
+Consider two conditions with one sample per donor per condition and finite densities throughout.
+Write `r` for the vector of within-donor log density ratios at one query cell.
+The grouped log enrichment equals `logsumexp(r / 2) - logsumexp(-r / 2)`.
+Its sign can differ from `mean(r)`. Both summaries describe fitted local densities.
 
 ## Statistical APIs
 
@@ -304,29 +310,33 @@ outliers = model.get_outlier_cell_sample_pairs()
 MrVI aggregated posterior and its output is unchanged. Per-cell posterior scales (about 0.06 per
 dimension in one planted-effect test) can be far below the spacing between neighbouring cells
 (about 0.5), and then the log densities are noise-dominated: sample pairs with no abundance
-change scored between -3.8 and +19.7 nats. Two calibrated alternatives:
+change scored between -3.8 and +19.7 nats. Two options change the smoothing scale.
 
 ```python
-model.differential_abundance(sample_cov_keys=["condition"], compute_log_enrichment=True,
-                             density_estimator="knn", knn_k=50)
-model.differential_abundance(sample_cov_keys=["condition"], compute_log_enrichment=True,
-                             density_estimator="scale_floor", scale_floor=0.4)
+model.differential_abundance(
+    sample_cov_keys=["condition"], compute_log_enrichment=True, density_estimator="knn", knn_k=50
+)
+model.differential_abundance(
+    sample_cov_keys=["condition"], compute_log_enrichment=True, density_estimator="scale_floor", scale_floor=0.4
+)
 ```
 
 `"scale_floor"` raises every kernel scale to `max(scale, scale_floor)`. `"knn"` counts, among
-each cell's `knn_k` nearest reference cells in `u`, the cells of each sample or group; the score
+each cell’s `knn_k` nearest reference cells in `u`, the cells of each sample or group; the score
 is `log(k + 0.5) - log(n_reference)`. In a synthetic 2-D check
 (`tests/test_da_density_estimator.py`) both recovered a planted depletion, with a per-cell null sd
-of about 0.2-0.3 (`knn_k=50`, floor 0.4); the posterior estimator's null sd there was about 10.
+of about 0.2-0.3 (`knn_k=50`, floor 0.4); the posterior estimator’s null sd there was about 10.
 Under `"knn"` the per-sample
 `log_probs` are comparable across samples of similar size within a cell, but not across cells or
-with `"posterior"` values, so read the enrichments. Where a sample's expected neighbour count
+with `"posterior"` values, so read the enrichments. Where a sample’s expected neighbour count
 `knn_k * n_g / N` is below about 1, the score favours the smaller sample. Group scores share
-the bias; a warning names such groups, but not such samples. `donor_key` is not available with `"knn"`. Both remain
-descriptive. See the `differential_abundance` docstring for the full mapping.
+this bias. The warning identifies groups with low expected counts. The neighbour method pools
+reference cells, so samples with higher yields carry more weight within a group. The two kernel
+estimators give each included sample equal weight. `donor_key` is available only for the kernel
+estimators. See the `differential_abundance` docstring for the full mapping.
 
 With `omit_original_sample=False` (forced by `donor_key`), `differential_abundance()` removes
-each cell's own kernel from its own sample's density (leave-one-cell-out), unlike upstream MrVI.
+each cell’s own kernel from its own sample’s density (leave-one-cell-out), unlike upstream MrVI.
 Without this, every cell looks enriched for its own group. A group with no reference sample for
 a cell (for example one sample per condition under the default `omit_original_sample=True`)
 gives NaN, not `inf`, and a warning with the affected cell count.
@@ -370,14 +380,14 @@ multiplied by the batch size, and `kl_weight` warm-up does not scale it. The pen
 reported as `kl_global`, which the training plan divides by `n_obs_training`. With a
 `train_size` below 1, the penalty is relative to all cells, not the training split.
 
-Three reporting details. First, with the legacy `scale_observations=True` each cell's data term
-is divided by its sample's cell count while the penalty is not, so one sigma shrinks relatively more
-strongly, by about the sample's cell count (the gradient ratio on `qz.embedding.weight` rose by the sample's cell count in a toy run).
+Three reporting details. First, with the legacy `scale_observations=True` each cell’s data term
+is divided by its sample’s cell count while the penalty is not, so one sigma shrinks relatively more
+strongly, by about the sample’s cell count (the gradient ratio on `qz.embedding.weight` rose by the sample’s cell count in a toy run).
 `centered_v2` weights average to 1 and are unaffected. Second, `elbo_validation` reports the
 penalty as `kl_global / n_obs_validation`, about `n_cells / n_obs_validation` times its
 size in the loss (0.035 against 0.0035 nats in a toy run), and `get_elbo` leaves the penalty out.
 Third, `MrTotalVI.load` rebuilds the model on the AnnData you pass, so `n_cells` is that
-AnnData's size. A load on a different cell set changes the penalty strength for continued
+AnnData’s size. A load on a different cell set changes the penalty strength for continued
 training, and a `UserWarning` says so when the checkpoint stores the training count (models with
 `scale_observations=True`).
 
@@ -388,7 +398,7 @@ normalisation. Check the spread of the embeddings after training before relying 
 
 ## Inherited training defaults
 
-`MrTotalVI.train()` uses MrVI's Adam `eps=1e-8`, `weight_decay=1e-8`, `lr=2e-3` and no plateau
+`MrTotalVI.train()` uses MrVI’s Adam `eps=1e-8`, `weight_decay=1e-8`, `lr=2e-3` and no plateau
 schedule (`reduce_lr_on_plateau=False`; TOTALVI uses `lr=4e-3` with the schedule).
 Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
 `reduce_lr_on_plateau` to `train()`. The small `eps` matters for the legacy
@@ -409,21 +419,23 @@ Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
   `scale_observations=True` and `hierarchy_mode="legacy"` the per-cell ELBO is divided by the
   sample's cell count while the adversarial loss is not, so the adversary carries a much larger relative weight (inferred from the code, not measured). Pass
   `adversarial_classifier=False` to turn it off.
-- **Opt-in objectives (unvalidated on real data).** `residual_prior_mode="factual"`
-  (`centered_v2` only) scores the cell's factual centered residual instead of the mean over raw
-  residuals, which makes a sample-private residual about `S - 1` times cheaper (ADR-0007
-  amendment). `anneal_protein_likelihood=False` stops scaling the protein likelihood by
+- **Opt-in objectives (unvalidated on real data).** For `centered_v2`, let `a` be the cell's
+  factual centered residual and `S > 1` the number of registered samples. At fixed prior scale
+  `σ`, the smallest excess `raw_mean` penalty is `||a||² / (2σ²(S - 1))`.
+  `residual_prior_mode="factual"` costs `||a||² / (2σ²)`, exactly `S - 1` times that minimum.
+  Both costs use zero residuals as the reference. [Derivation](adr/0007-mrtotalvi-v2-centered-counterfactuals.md#centered-hierarchy-and-training-penalty)
+  `anneal_protein_likelihood=False` stops scaling the protein likelihood by
   `kl_weight` during warm-up; by default (upstream TOTALVI) it gets no gradient at
   `kl_weight=0`. Both change training; compare matched-seed fits before relying on either.
 
 Protein scale in inherited methods. The loss fits protein counts with means
 `per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that
 efficiency (stock TOTALVI does not, and its protein samples are about `1/efficiency` too large).
-`get_normalized_expression` still returns upstream's normalised scale, without the efficiency,
+`get_normalized_expression` still returns upstream’s normalised scale, without the efficiency,
 so its protein values sit on a different scale from `get_counterfactual_expression`.
 
 Other inherited TOTALVI methods are not re-derived for `u`/`eps`: `get_marginal_ll` raises, and
-`get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell's
+`get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell’s
 own donor `eps` (use the counterfactual APIs to change the donor).
 
 ## v1 Limitations
@@ -431,27 +443,25 @@ own donor `eps` (use the counterfactual APIs to change the donor).
 These limitations are intentional cuts documented in ADR-0005.
 
 **Differential expression:**
+
 - MrTotalVI accepts only `use_vmap=False`; `use_vmap=True` raises before inference/statistics.
 
-**Differential expression — empirical validation note (eps-space limitation):**
-The LFC values returned by `store_lfc=True` are decoded from the `eps = z − u` residual, which
-captures the *donor-specific* deviation from the sample-conditioned base `u`. Because the `u` encoder
-absorbs cell-state variation (including treatment-induced states such as IFN activation) as part of
-cell identity, `eps` carries minimal cell-state treatment signal. On one CITE-seq dataset
-(schistosomiasis, n=10 donors, 12 cell types), eps-space LFC from MRVI, MrTotalVI and MrMultiVI was **anti-concordant** with pseudobulk DE gold standard (PyDESeq2,
-Spearman rho −0.24 to +0.04 across all cell types). This limitation is architectural and
-cell-type-universal: no cell type showed positive concordance between model LFC and pseudobulk
-direction. These historical internals remain private for reproduction; the public MrTotalVI method
-does not return p-values or decoded LFC. Use donor-pseudobulk for biological inference.
+**Differential expression in one cohort.** The historical `store_lfc=True` path decodes
+contrasts in the sample residual `eps = z − z_base(u)`. The default encoder can also carry
+donor information in `u`. A historical comparison covered 10 donors and 12 cell types in
+one schistosomiasis CITE-seq cohort. Reported Spearman correlations between residual-based
+log fold changes and PyDESeq2 pseudobulk estimates ranged from −0.24 to +0.04 across
+MRVI, MrTotalVI and MrMultiVI. These values describe rank agreement in that cohort.
+The historical method is private. Use a replicate-aware donor-pseudobulk analysis
+for biological inference.
 
-**Differential abundance — sample-count sensitivity:**
-`MrTotalVI.differential_abundance` is unreliable when `sample_key` maps to many samples relative
-to the prior capacity. In one experiment with 38 donor-timepoint samples (schistosomiasis DTP
+**Differential abundance across training seeds.**
+In one experiment with 38 donor-timepoint samples (schistosomiasis DTP
 cohort, 3 seeds), MrTotalVI DA varied from −9.0 to +9.7 across seeds (per-seed: s0 = +2.74,
 s1 = −9.04, s2 = +9.67; std 9.46 >> mean 1.12). Those fits stopped before KL warm-up finished
 (`kl_weight` 0.23–0.42). Refits with a completed 40-epoch warm-up and the current unsupervised
-default prior gave +0.80, +0.68, +0.40 (mean +0.63 ± 0.20), so most of that instability came from
-the incomplete warm-up; the two changes were not separated. If using
+default prior gave +0.80, +0.68, +0.40 (mean +0.63 ± 0.20). The joint change leaves
+the contribution of each setting unresolved. If using
 `differential_abundance` with a `sample_key` that expands the sample count significantly (e.g.
 `sample_key="donor_timepoint"`), do not interpret the package output as inferential evidence.
 Use an independently validated, replicate-aware compositional method for biological DA.
@@ -483,7 +493,7 @@ plug-in; do not mix the two.
 **Admissibility (methods note):**
 `get_outlier_cell_sample_pairs` (`is_admissible`) uses one global quantile over pooled
 leave-one-out scores. `get_counterfactual_latent` (`admissible`) uses one quantile per target
-sample. They are different quantities. In both, a cell's own sample is scored leave-one-out, so
+sample. They are different quantities. In both, a cell’s own sample is scored leave-one-out, so
 about `quantile_threshold` (default 5%) of own-sample pairs fail by design, and the private DE
 filter drops that share of cells from their own sample. A one-cell sample (or
 `subsample_size=1`) has no leave-one-out reference: its cell is NaN and inadmissible for its own
@@ -494,6 +504,7 @@ The default training objective (`use_map=True`) is a MAP/cross-entropy penalty o
 `eps`, not a strict ELBO. For the legacy hierarchy, the analytic ELBO — including the `q(eps)`
 entropy term — is available via `use_map=False` at model construction. Centered v2 requires
 `use_map=True`.
+
 ```python
 model = MrTotalVI(adata, sample_key="donor", use_map=False)
 ```
