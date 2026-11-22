@@ -15,10 +15,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import xarray as xr
-from torch.distributions import Normal
-
 from scvi import REGISTRY_KEYS
 from scvi.module._constants import MODULE_KEYS
+from torch.distributions import Normal
 
 from ._stats import _loader_order
 
@@ -109,11 +108,7 @@ def _validate_inference(inference_mode: str, n_draws: int, quantiles) -> np.ndar
 
 
 def _validate_chunk_size(value, *, name: str) -> None:
-    if value is not None and (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value < 1
-    ):
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
         raise ValueError(f"{name} must be a positive integer or None.")
 
 
@@ -212,9 +207,7 @@ def _encode_u_params(model, adata, indices: np.ndarray, batch_size: int):
                 )
                 locs.append(qu.loc.detach().cpu())
                 scales.append(qu.scale.detach().cpu())
-                observed_samples.append(
-                    tensors[REGISTRY_KEYS.SAMPLE_KEY].long().flatten().cpu()
-                )
+                observed_samples.append(tensors[REGISTRY_KEYS.SAMPLE_KEY].long().flatten().cpu())
     finally:
         model.module.train(was_training)
     params = (
@@ -242,9 +235,7 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
     cont_covariates = []
     has_cat = False
     has_cont = False
-    has_size_factor = (
-        REGISTRY_KEYS.SIZE_FACTOR_KEY in model.adata_manager.data_registry
-    )
+    has_size_factor = REGISTRY_KEYS.SIZE_FACTOR_KEY in model.adata_manager.data_registry
     uses_latent_library = not model.module.use_observed_lib_size
     if has_size_factor:
         library_estimand = "registered_size_factor"
@@ -261,9 +252,7 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
             inputs = model.module._get_inference_input(tensors)
             batches.append(inputs["batch_index"].long().flatten().cpu())
             panels.append(inputs["panel_index"].long().flatten().cpu())
-            samples.append(
-                tensors[REGISTRY_KEYS.SAMPLE_KEY].long().flatten().cpu()
-            )
+            samples.append(tensors[REGISTRY_KEYS.SAMPLE_KEY].long().flatten().cpu())
             if has_size_factor:
                 library = tensors[REGISTRY_KEYS.SIZE_FACTOR_KEY].float()
             elif uses_latent_library:
@@ -288,16 +277,8 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
         "panel": torch.cat(panels).numpy().astype(np.int64),
         "sample": torch.cat(samples).numpy().astype(np.int64),
         "library": torch.cat(libraries).numpy().astype(np.float32),
-        "cat_covs": (
-            torch.cat(cat_covariates).numpy().astype(np.int64)
-            if has_cat
-            else None
-        ),
-        "cont_covs": (
-            torch.cat(cont_covariates).numpy().astype(np.float32)
-            if has_cont
-            else None
-        ),
+        "cat_covs": (torch.cat(cat_covariates).numpy().astype(np.int64) if has_cat else None),
+        "cont_covs": (torch.cat(cont_covariates).numpy().astype(np.float32) if has_cont else None),
         "library_estimand": library_estimand,
     }
     if inverse is not None:
@@ -310,12 +291,7 @@ def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int
 
 def _mapping(model, registry_key: str) -> np.ndarray:
     return np.asarray(
-        [
-            str(value)
-            for value in model.adata_manager.get_state_registry(
-                registry_key
-            ).categorical_mapping
-        ]
+        [str(value) for value in model.adata_manager.get_state_registry(registry_key).categorical_mapping]
     )
 
 
@@ -331,16 +307,12 @@ def _specified_category(value, mapping: np.ndarray, *, name: str) -> int:
 
 def _specified_library(value, n_cells: int) -> np.ndarray:
     if value is None:
-        raise ValueError(
-            "specified_library_size is required when library_policy='specified'."
-        )
+        raise ValueError("specified_library_size is required when library_policy='specified'.")
     values = np.asarray(value, dtype=np.float32)
     if values.ndim == 0:
         values = np.full(n_cells, float(values), dtype=np.float32)
     elif values.shape != (n_cells,):
-        raise ValueError(
-            "specified_library_size must be one scalar or a cell-aligned vector."
-        )
+        raise ValueError("specified_library_size must be one scalar or a cell-aligned vector.")
     if not np.all(np.isfinite(values)) or np.any(values <= 0):
         raise ValueError("specified_library_size values must be finite and positive.")
     return values
@@ -377,10 +349,7 @@ def _validate_context_request(
             "sample_balanced_marginal for only one is unsupported."
         )
     if (batch_marginal or library_marginal) and not has_marginal_reference:
-        raise ValueError(
-            "A non-empty marginal reference is required for "
-            "sample_balanced_marginal policies."
-        )
+        raise ValueError("A non-empty marginal reference is required for sample_balanced_marginal policies.")
 
     if batch_policy == "specified":
         _specified_category(
@@ -390,9 +359,7 @@ def _validate_context_request(
         )
     if panel_policy == "specified":
         panel_mapping = (
-            _mapping(model, "panel")
-            if model.module.panel_key == "panel"
-            else _mapping(model, REGISTRY_KEYS.BATCH_KEY)
+            _mapping(model, "panel") if model.module.panel_key == "panel" else _mapping(model, REGISTRY_KEYS.BATCH_KEY)
         )
         _specified_category(
             specified_panel,
@@ -401,8 +368,10 @@ def _validate_context_request(
         )
     if library_policy == "specified":
         _specified_library(specified_library_size, n_cells)
-    if model.module.panel_key != "panel" and panel_policy == "specified" and (
-        batch_policy != "specified" or str(specified_panel) != str(specified_batch)
+    if (
+        model.module.panel_key != "panel"
+        and panel_policy == "specified"
+        and (batch_policy != "specified" or str(specified_panel) != str(specified_batch))
     ):
         raise ValueError(
             "Without a registered panel the panel is the batch: specify the batch with "
@@ -440,18 +409,11 @@ def _build_context_scenarios(
             "sample_balanced_marginal for only one is unsupported."
         )
     if (batch_marginal or library_marginal) and reference_context is None:
-        raise ValueError(
-            "A non-empty marginal reference is required for "
-            "sample_balanced_marginal policies."
-        )
+        raise ValueError("A non-empty marginal reference is required for sample_balanced_marginal policies.")
 
     n_cells = observed_context["batch"].size
     batch_mapping = _mapping(model, REGISTRY_KEYS.BATCH_KEY)
-    panel_mapping = (
-        _mapping(model, "panel")
-        if model.module.panel_key == "panel"
-        else batch_mapping
-    )
+    panel_mapping = _mapping(model, "panel") if model.module.panel_key == "panel" else batch_mapping
     batch = observed_context["batch"].copy()
     panel = observed_context["panel"].copy()
     library = observed_context["library"].copy()
@@ -491,9 +453,7 @@ def _build_context_scenarios(
         reference_samples = reference_context["sample"]
         represented_samples = np.unique(reference_samples)
         if represented_samples.size == 0:
-            raise ValueError(
-                "marginal_reference_indices must retain at least one reference cell."
-            )
+            raise ValueError("marginal_reference_indices must retain at least one reference cell.")
 
         # Each represented biological sample receives equal total mass. Within
         # a sample, empirical joint technical contexts retain their frequency.
@@ -504,21 +464,9 @@ def _build_context_scenarios(
             row_weight = sample_weight / sample_positions.size
             for position in sample_positions:
                 key = (
-                    (
-                        int(reference_context["batch"][position])
-                        if batch_marginal
-                        else -1
-                    ),
-                    (
-                        int(reference_context["panel"][position])
-                        if panel_marginal
-                        else -1
-                    ),
-                    (
-                        float(reference_context["library"][position])
-                        if library_marginal
-                        else 0.0
-                    ),
+                    (int(reference_context["batch"][position]) if batch_marginal else -1),
+                    (int(reference_context["panel"][position]) if panel_marginal else -1),
+                    (float(reference_context["library"][position]) if library_marginal else 0.0),
                 )
                 context_weights[key] = context_weights.get(key, 0.0) + row_weight
         if len(context_weights) > MAX_CONTEXT_SCENARIOS:
@@ -532,25 +480,13 @@ def _build_context_scenarios(
         # A field set by the context is a read-only broadcast view, and an observed
         # field is the shared array, so S scenarios add no n_cells x S copies.
         scenarios = []
-        for (context_batch, context_panel, context_library), weight in sorted(
-            context_weights.items()
-        ):
+        for (context_batch, context_panel, context_library), weight in sorted(context_weights.items()):
             scenarios.append(
                 {
-                    "batch": (
-                        np.broadcast_to(np.int64(context_batch), (n_cells,))
-                        if batch_marginal
-                        else batch
-                    ),
-                    "panel": (
-                        np.broadcast_to(np.int64(context_panel), (n_cells,))
-                        if batch_marginal
-                        else panel
-                    ),
+                    "batch": (np.broadcast_to(np.int64(context_batch), (n_cells,)) if batch_marginal else batch),
+                    "panel": (np.broadcast_to(np.int64(context_panel), (n_cells,)) if batch_marginal else panel),
                     "library": (
-                        np.broadcast_to(np.float32(context_library), (n_cells,))
-                        if library_marginal
-                        else library
+                        np.broadcast_to(np.float32(context_library), (n_cells,)) if library_marginal else library
                     ),
                     "weight": np.broadcast_to(np.float32(weight), (n_cells,)),
                 }
@@ -564,10 +500,14 @@ def _build_context_scenarios(
             context_hash.update(b",")
         context_hash.update(
             (
-                '{"batch":' + _json_array(scenario["batch"], as_float=False)
-                + ',"library":' + _json_array(scenario["library"], as_float=True)
-                + ',"panel":' + _json_array(scenario["panel"], as_float=False)
-                + ',"weight":' + _json_array(scenario["weight"], as_float=True)
+                '{"batch":'
+                + _json_array(scenario["batch"], as_float=False)
+                + ',"library":'
+                + _json_array(scenario["library"], as_float=True)
+                + ',"panel":'
+                + _json_array(scenario["panel"], as_float=False)
+                + ',"weight":'
+                + _json_array(scenario["weight"], as_float=True)
                 + "}"
             ).encode()
         )
@@ -665,9 +605,7 @@ def _support_and_admissibility(
         reference_scores = _max_component_log_prob(loc, loc, scale, leave_one_out)
         threshold = float(np.quantile(reference_scores, support_quantile))
         scores = _max_component_log_prob(query_loc, loc, scale, self_match)
-        admissible[:, target_position] = np.isfinite(scores) & (
-            scores - threshold > admissibility_threshold
-        )
+        admissible[:, target_position] = np.isfinite(scores) & (scores - threshold > admissibility_threshold)
     return support, admissible
 
 
@@ -710,20 +648,14 @@ def _estimate_latent_bytes(
     n_quantiles: int,
     posterior_mc: bool,
 ) -> int:
-    float_elements = n_draws * n_cells * (
-        n_latent_u + n_latent + 3 * n_targets * n_latent
-    )
+    float_elements = n_draws * n_cells * (n_latent_u + n_latent + 3 * n_targets * n_latent)
     if posterior_mc:
-        float_elements += (1 + n_quantiles) * n_cells * (
-            n_latent_u + n_latent + 3 * n_targets * n_latent
-        )
+        float_elements += (1 + n_quantiles) * n_cells * (n_latent_u + n_latent + 3 * n_targets * n_latent)
     raw_bytes = 4 * float_elements + 2 * n_cells * n_targets
     return math.ceil(raw_bytes * 1.2)
 
 
-def _residual_working_bytes(
-    model, *, n_cells: int, n_draws: int, target_chunk_size: int | None
-) -> int:
+def _residual_working_bytes(model, *, n_cells: int, n_draws: int, target_chunk_size: int | None) -> int:
     """Peak bytes of one minibatch's all-registered-sample residual pass.
 
     Centering needs every registered sample's residual, so each minibatch holds
@@ -789,17 +721,13 @@ def _write_atomic_zarr(
         import dask  # noqa: F401
         import zarr
     except ImportError as error:  # pragma: no cover - optional dependency environment
-        raise ImportError(
-            "Zarr output requires dask and zarr. Install the existing 'parallel' extra."
-        ) from error
+        raise ImportError("Zarr output requires dask and zarr. Install the existing 'parallel' extra.") from error
 
     destination = Path(zarr_path)
     if destination.exists():
         raise FileExistsError(f"Refusing to overwrite existing Zarr store: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(
-        f".{destination.name}.tmp-{uuid.uuid4().hex}"
-    )
+    temporary = destination.with_name(f".{destination.name}.tmp-{uuid.uuid4().hex}")
     try:
         effective_chunks = _resolve_zarr_chunks(dataset, zarr_chunks)
         group = zarr.open_group(temporary, mode="w", zarr_format=2)
@@ -903,9 +831,7 @@ def _resolve_zarr_chunks(dataset: xr.Dataset, zarr_chunks) -> dict[str, int]:
     for dimension, size in dataset.sizes.items():
         chunk = requested.get(dimension, defaults.get(dimension, size))
         if isinstance(chunk, bool) or not isinstance(chunk, int) or chunk < 1:
-            raise ValueError(
-                f"Zarr chunk size for {dimension!r} must be a positive integer."
-            )
+            raise ValueError(f"Zarr chunk size for {dimension!r} must be a positive integer.")
         result[dimension] = min(chunk, max(1, size))
     return result
 
@@ -935,18 +861,13 @@ class _AtomicZarrRegionWriter:
             import dask  # noqa: F401
             import zarr
         except ImportError as error:  # pragma: no cover - optional dependency
-            raise ImportError(
-                "Zarr output requires dask and zarr. "
-                "Install the existing 'parallel' extra."
-            ) from error
+            raise ImportError("Zarr output requires dask and zarr. Install the existing 'parallel' extra.") from error
 
         self._zarr = zarr
         self.destination = Path(destination)
         _preflight_zarr_path(self.destination)
         self.destination.parent.mkdir(parents=True, exist_ok=True)
-        self.temporary = self.destination.with_name(
-            f".{self.destination.name}.tmp-{uuid.uuid4().hex}"
-        )
+        self.temporary = self.destination.with_name(f".{self.destination.name}.tmp-{uuid.uuid4().hex}")
         self.full_sizes = dict(template.sizes)
         self.full_sizes["cell_name"] = cell_names.size
         sizing = template.drop_dims("cell_name")
@@ -966,16 +887,10 @@ class _AtomicZarrRegionWriter:
                 separators=(",", ":"),
             )
             for coordinate_name, coordinate in template.coords.items():
-                values = (
-                    cell_names
-                    if coordinate_name == "cell_name"
-                    else coordinate.to_numpy()
-                )
+                values = cell_names if coordinate_name == "cell_name" else coordinate.to_numpy()
                 if values.dtype.kind in {"O", "U", "S"}:
                     values = np.asarray(values, dtype=str)
-                shape = tuple(
-                    self.full_sizes[dimension] for dimension in coordinate.dims
-                )
+                shape = tuple(self.full_sizes[dimension] for dimension in coordinate.dims)
                 coordinate_chunks = tuple(
                     min(self.chunks[dimension], size)
                     for dimension, size in zip(
@@ -992,9 +907,7 @@ class _AtomicZarrRegionWriter:
                     attributes={"_ARRAY_DIMENSIONS": list(coordinate.dims)},
                 )
             for variable_name, variable in template.data_vars.items():
-                shape = tuple(
-                    self.full_sizes[dimension] for dimension in variable.dims
-                )
+                shape = tuple(self.full_sizes[dimension] for dimension in variable.dims)
                 variable_chunks = tuple(
                     min(self.chunks[dimension], size)
                     for dimension, size in zip(
@@ -1024,10 +937,7 @@ class _AtomicZarrRegionWriter:
     ) -> None:
         for variable_name, variable in dataset.data_vars.items():
             region = tuple(
-                slice(start, stop)
-                if dimension == "cell_name"
-                else slice(None)
-                for dimension in variable.dims
+                slice(start, stop) if dimension == "cell_name" else slice(None) for dimension in variable.dims
             )
             self.group[variable_name][region] = variable.to_numpy()
 
@@ -1070,9 +980,7 @@ def _stream_cell_regions_to_zarr(
             piece = build_piece(query_indices[start:stop], start, stop)
             if writer is None:
                 attrs = dict(piece.attrs)
-                attrs["estimated_bytes_with_overhead"] = int(
-                    global_estimated_bytes
-                )
+                attrs["estimated_bytes_with_overhead"] = int(global_estimated_bytes)
                 attrs["storage_mode"] = "atomic_zarr_cell_regions"
                 if attrs_override:
                     attrs.update(attrs_override)
@@ -1247,32 +1155,20 @@ def get_counterfactual_latent(
             for start in range(0, query_indices.size, batch_size):
                 stop = min(start + batch_size, query_indices.size)
                 u_batch = torch.as_tensor(u_values[:, start:stop])
-                z_base, eps_raw, eps_centered, z_all = (
-                    model.module._all_sample_residuals(
-                        u_batch,
-                        target_chunk_size=target_chunk_size,
-                    )
+                z_base, eps_raw, eps_centered, z_all = model.module._all_sample_residuals(
+                    u_batch,
+                    target_chunk_size=target_chunk_size,
                 )
                 z_base_parts.append(z_base.detach().cpu().numpy())
-                eps_raw_parts.append(
-                    eps_raw[:, :, target_indices].detach().cpu().numpy()
-                )
-                eps_centered_parts.append(
-                    eps_centered[:, :, target_indices].detach().cpu().numpy()
-                )
+                eps_raw_parts.append(eps_raw[:, :, target_indices].detach().cpu().numpy())
+                eps_centered_parts.append(eps_centered[:, :, target_indices].detach().cpu().numpy())
                 z_parts.append(z_all[:, :, target_indices].detach().cpu().numpy())
     finally:
         model.module.train(was_training)
 
-    z_base_values = np.concatenate(z_base_parts, axis=1).astype(
-        np.float32, copy=False
-    )
-    eps_raw_values = np.concatenate(eps_raw_parts, axis=1).astype(
-        np.float32, copy=False
-    )
-    eps_centered_values = np.concatenate(eps_centered_parts, axis=1).astype(
-        np.float32, copy=False
-    )
+    z_base_values = np.concatenate(z_base_parts, axis=1).astype(np.float32, copy=False)
+    eps_raw_values = np.concatenate(eps_raw_parts, axis=1).astype(np.float32, copy=False)
+    eps_centered_values = np.concatenate(eps_centered_parts, axis=1).astype(np.float32, copy=False)
     z_values = np.concatenate(z_parts, axis=1).astype(np.float32, copy=False)
 
     support, admissible = _support_and_admissibility(
@@ -1344,9 +1240,7 @@ def get_counterfactual_latent(
             "chunks": json.dumps(
                 {
                     "cell_name": int(batch_size),
-                    "target_sample": int(
-                        target_chunk_size or model.module._n_sample
-                    ),
+                    "target_sample": int(target_chunk_size or model.module._n_sample),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1399,9 +1293,7 @@ def get_counterfactual_expression(
     """Decode deterministic RNA/protein expectations for registered samples."""
     _preflight_zarr_path(zarr_path)
     if model.hierarchy_mode != "centered_v2":
-        raise RuntimeError(
-            "get_counterfactual_expression() requires hierarchy_mode='centered_v2'."
-        )
+        raise RuntimeError("get_counterfactual_expression() requires hierarchy_mode='centered_v2'.")
     model._check_if_trained(warn=False)
     adata = model._validate_anndata(adata)
     query_indices = _as_indices(adata, indices, name="indices")
@@ -1430,9 +1322,7 @@ def get_counterfactual_expression(
         gene_list,
         feature_type="gene",
     )
-    protein_registry = model.adata_manager.get_state_registry(
-        REGISTRY_KEYS.PROTEIN_EXP_KEY
-    )
+    protein_registry = model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY)
     protein_indices, protein_labels = _validate_features(
         protein_registry.column_names,
         protein_list,
@@ -1447,9 +1337,7 @@ def get_counterfactual_expression(
         specified_panel=specified_panel,
         library_policy=library_policy,
         specified_library_size=specified_library_size,
-        has_marginal_reference=(
-            reference_indices is not None and reference_indices.size > 0
-        ),
+        has_marginal_reference=(reference_indices is not None and reference_indices.size > 0),
     )
     estimated_bytes = _estimate_expression_bytes(
         n_cells=query_indices.size,
@@ -1529,18 +1417,11 @@ def get_counterfactual_expression(
                 MAX_IN_MEMORY_BYTES // max(1, per_cell_bytes),
             ),
         )
-        specified_library_array = (
-            None
-            if specified_library_size is None
-            else np.asarray(specified_library_size)
-        )
+        specified_library_array = None if specified_library_size is None else np.asarray(specified_library_size)
 
         def build_piece(piece_indices, start, stop):
             piece_library = specified_library_size
-            if (
-                specified_library_array is not None
-                and specified_library_array.ndim == 1
-            ):
+            if specified_library_array is not None and specified_library_array.ndim == 1:
                 piece_library = specified_library_array[start:stop]
             return get_counterfactual_expression(
                 model,
@@ -1600,9 +1481,7 @@ def get_counterfactual_expression(
                     torch.as_tensor(u_values[:, start:stop]),
                     target_chunk_size=target_chunk_size,
                 )
-                z_parts.append(
-                    z_all[:, :, target_indices].detach().cpu().numpy()
-                )
+                z_parts.append(z_all[:, :, target_indices].detach().cpu().numpy())
     finally:
         model.module.train(was_training)
     z_values = np.concatenate(z_parts, axis=1).astype(np.float32, copy=False)
@@ -1637,27 +1516,43 @@ def get_counterfactual_expression(
     model.module.eval()
     try:
         for scenario in scenarios:
-            batch_values = np.broadcast_to(
-                scenario["batch"][None, :, None],
-                draw_cell_target,
-            ).reshape(-1, 1).copy()
-            library_values = np.broadcast_to(
-                scenario["library"][None, :, None],
-                draw_cell_target,
-            ).reshape(-1, 1).copy()
+            batch_values = (
+                np.broadcast_to(
+                    scenario["batch"][None, :, None],
+                    draw_cell_target,
+                )
+                .reshape(-1, 1)
+                .copy()
+            )
+            library_values = (
+                np.broadcast_to(
+                    scenario["library"][None, :, None],
+                    draw_cell_target,
+                )
+                .reshape(-1, 1)
+                .copy()
+            )
             weights = scenario["weight"][None, :, None, None]
             cat_covs = observed_context["cat_covs"]
             if cat_covs is not None:
-                cat_covs = np.broadcast_to(
-                    cat_covs[None, :, None, :],
-                    (*draw_cell_target, cat_covs.shape[1]),
-                ).reshape(-1, cat_covs.shape[1]).copy()
+                cat_covs = (
+                    np.broadcast_to(
+                        cat_covs[None, :, None, :],
+                        (*draw_cell_target, cat_covs.shape[1]),
+                    )
+                    .reshape(-1, cat_covs.shape[1])
+                    .copy()
+                )
             cont_covs = observed_context["cont_covs"]
             if cont_covs is not None:
-                cont_covs = np.broadcast_to(
-                    cont_covs[None, :, None, :],
-                    (*draw_cell_target, cont_covs.shape[1]),
-                ).reshape(-1, cont_covs.shape[1]).copy()
+                cont_covs = (
+                    np.broadcast_to(
+                        cont_covs[None, :, None, :],
+                        (*draw_cell_target, cont_covs.shape[1]),
+                    )
+                    .reshape(-1, cont_covs.shape[1])
+                    .copy()
+                )
 
             # Decode in row chunks and keep only the requested features, so the
             # full-width decoder output never exceeds the in-memory budget the
@@ -1686,13 +1581,9 @@ def get_counterfactual_expression(
                     ),
                 )
                 for key in ("rna_scale", "rna_rate"):
-                    pieces.setdefault(key, []).append(
-                        chunk[key].index_select(1, gene_index_t).detach().cpu()
-                    )
+                    pieces.setdefault(key, []).append(chunk[key].index_select(1, gene_index_t).detach().cpu())
                 for key in protein_values:
-                    pieces.setdefault(key, []).append(
-                        chunk[key].index_select(1, protein_index_t).detach().cpu()
-                    )
+                    pieces.setdefault(key, []).append(chunk[key].index_select(1, protein_index_t).detach().cpu())
                 del chunk
             # decoded[...] columns now follow gene_indices / protein_indices order.
             decoded = {key: torch.cat(values, dim=0) for key, values in pieces.items()}
@@ -1707,25 +1598,13 @@ def get_counterfactual_expression(
                     feature_stop - feature_start,
                 )
                 decoded_rna_scale = (
-                    decoded["rna_scale"][:, feature_start:feature_stop]
-                    .reshape(selected_shape)
-                    .detach()
-                    .cpu()
-                    .numpy()
+                    decoded["rna_scale"][:, feature_start:feature_stop].reshape(selected_shape).detach().cpu().numpy()
                 )
                 decoded_rna_rate = (
-                    decoded["rna_rate"][:, feature_start:feature_stop]
-                    .reshape(selected_shape)
-                    .detach()
-                    .cpu()
-                    .numpy()
+                    decoded["rna_rate"][:, feature_start:feature_stop].reshape(selected_shape).detach().cpu().numpy()
                 )
-                rna_scale[..., feature_start:feature_stop] += (
-                    weights * decoded_rna_scale
-                )
-                rna_rate[..., feature_start:feature_stop] += (
-                    weights * decoded_rna_rate
-                )
+                rna_scale[..., feature_start:feature_stop] += weights * decoded_rna_scale
+                rna_rate[..., feature_start:feature_stop] += weights * decoded_rna_rate
 
             protein_step = feature_chunk_size or protein_indices.size
             for feature_start in range(0, protein_indices.size, protein_step):
@@ -1745,17 +1624,13 @@ def get_counterfactual_expression(
                         .cpu()
                         .numpy()
                     )
-                    protein_values[variable_name][
-                        ..., feature_start:feature_stop
-                    ] += weights * decoded_values
+                    protein_values[variable_name][..., feature_start:feature_stop] += weights * decoded_values
 
             if model.module.protein_batch_mask is not None:
                 for cell_position, panel_index in enumerate(scenario["panel"]):
                     if scenario["weight"][cell_position] <= 0:
                         continue
-                    panel_mask = model.module.protein_batch_mask[
-                        str(int(panel_index))
-                    ].astype(bool)
+                    panel_mask = model.module.protein_batch_mask[str(int(panel_index))].astype(bool)
                     protein_available[cell_position] &= panel_mask[protein_indices]
     finally:
         model.module.train(was_training)
@@ -1812,15 +1687,9 @@ def get_counterfactual_expression(
             "batch_policy": batch_policy,
             "panel_policy": panel_policy,
             "library_policy": library_policy,
-            "observed_library_estimand": observed_context[
-                "library_estimand"
-            ],
-            "specified_batch": (
-                "" if specified_batch is None else str(specified_batch)
-            ),
-            "specified_panel": (
-                "" if specified_panel is None else str(specified_panel)
-            ),
+            "observed_library_estimand": observed_context["library_estimand"],
+            "specified_batch": ("" if specified_batch is None else str(specified_batch)),
+            "specified_panel": ("" if specified_panel is None else str(specified_panel)),
             "protein_mean_formula": (
                 "efficiency * exp(back_alpha + 0.5 * back_beta**2); "
                 "foreground = background * fore_scale; "
@@ -1831,13 +1700,8 @@ def get_counterfactual_expression(
             "chunks": json.dumps(
                 {
                     "cell_name": int(batch_size),
-                    "feature": int(
-                        feature_chunk_size
-                        or max(gene_indices.size, protein_indices.size)
-                    ),
-                    "target_sample": int(
-                        target_chunk_size or model.module._n_sample
-                    ),
+                    "feature": int(feature_chunk_size or max(gene_indices.size, protein_indices.size)),
+                    "target_sample": int(target_chunk_size or model.module._n_sample),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1851,9 +1715,7 @@ def get_counterfactual_expression(
                 specified_library_size if library_policy == "specified" else None
             ),
             "marginal_reference": _settings_digest(
-                np.asarray(adata.obs_names[reference_indices], dtype=str)
-                if uses_marginal_context
-                else None
+                np.asarray(adata.obs_names[reference_indices], dtype=str) if uses_marginal_context else None
             ),
         },
     )
@@ -1880,16 +1742,9 @@ def _hash_subsample_positions(
 ) -> np.ndarray:
     if limit is None or names.size <= limit:
         return np.arange(names.size)
-    scores = [
-        hashlib.sha256(
-            f"{int(random_state)}\0{sample_label}\0{name}".encode()
-        ).digest()
-        for name in names
-    ]
+    scores = [hashlib.sha256(f"{int(random_state)}\0{sample_label}\0{name}".encode()).digest() for name in names]
     return np.asarray(
-        sorted(range(names.size), key=lambda position: (scores[position], position))[
-            :limit
-        ],
+        sorted(range(names.size), key=lambda position: (scores[position], position))[:limit],
         dtype=np.int64,
     )
 
@@ -1910,8 +1765,7 @@ def _sample_covariate_values(
         values = np.unique(covariate_values[sample_values == target_label])
         if values.size != 1:
             raise ValueError(
-                f"{covariate_key!r} must be constant within sample "
-                f"{target_label!r}; observed {values.tolist()}."
+                f"{covariate_key!r} must be constant within sample {target_label!r}; observed {values.tolist()}."
             )
         result.append(values[0])
     return np.asarray(result)
@@ -1929,19 +1783,17 @@ def _mixture_log_density(
     log_total = None
     for start in range(0, loc.shape[0], chunk_size):
         stop = min(start + chunk_size, loc.shape[0])
-        component_log_prob = Normal(
-            torch.as_tensor(loc[start:stop], dtype=torch.float32),
-            torch.as_tensor(scale[start:stop], dtype=torch.float32),
-        ).log_prob(query_tensor[:, None, :]).sum(dim=-1)
-        chunk_total = torch.logsumexp(component_log_prob, dim=-1)
-        log_total = (
-            chunk_total
-            if log_total is None
-            else torch.logaddexp(log_total, chunk_total)
+        component_log_prob = (
+            Normal(
+                torch.as_tensor(loc[start:stop], dtype=torch.float32),
+                torch.as_tensor(scale[start:stop], dtype=torch.float32),
+            )
+            .log_prob(query_tensor[:, None, :])
+            .sum(dim=-1)
         )
-    return (
-        log_total - math.log(loc.shape[0])
-    ).numpy().astype(np.float32, copy=False)
+        chunk_total = torch.logsumexp(component_log_prob, dim=-1)
+        log_total = chunk_total if log_total is None else torch.logaddexp(log_total, chunk_total)
+    return (log_total - math.log(loc.shape[0])).numpy().astype(np.float32, copy=False)
 
 
 def local_sample_enrichment(
@@ -1965,14 +1817,10 @@ def local_sample_enrichment(
 ) -> xr.Dataset:
     """Compute descriptive local densities under registered-sample posteriors."""
     if model.hierarchy_mode != "centered_v2":
-        raise RuntimeError(
-            "local_sample_enrichment() requires hierarchy_mode='centered_v2'."
-        )
+        raise RuntimeError("local_sample_enrichment() requires hierarchy_mode='centered_v2'.")
     model._check_if_trained(warn=False)
     adata = model._validate_anndata(adata)
-    reference_adata = model._validate_anndata(
-        adata if reference_adata is None else reference_adata
-    )
+    reference_adata = model._validate_anndata(adata if reference_adata is None else reference_adata)
     query_indices = _as_indices(adata, indices, name="indices")
     reference_indices = _as_indices(
         reference_adata,
@@ -1983,20 +1831,14 @@ def local_sample_enrichment(
         raise ValueError("batch_size must be a positive integer.")
     if reference_chunk_size is None:
         reference_chunk_size = batch_size
-    if (
-        isinstance(reference_chunk_size, bool)
-        or not isinstance(reference_chunk_size, int)
-        or reference_chunk_size < 1
-    ):
+    if isinstance(reference_chunk_size, bool) or not isinstance(reference_chunk_size, int) or reference_chunk_size < 1:
         raise ValueError("reference_chunk_size must be a positive integer or None.")
     if max_reference_cells_per_sample is not None and (
         isinstance(max_reference_cells_per_sample, bool)
         or not isinstance(max_reference_cells_per_sample, int)
         or max_reference_cells_per_sample < 1
     ):
-        raise ValueError(
-            "max_reference_cells_per_sample must be a positive integer or None."
-        )
+        raise ValueError("max_reference_cells_per_sample must be a positive integer or None.")
 
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
     _validate_random_state(random_state)
@@ -2066,17 +1908,13 @@ def local_sample_enrichment(
     )
     self_excluded = np.zeros_like(n_reference_cells, dtype=bool)
     finite_support = np.zeros_like(n_reference_cells, dtype=bool)
-    for query_position, (query_name, factual_sample) in enumerate(
-        zip(cell_names, observed_samples, strict=True)
-    ):
+    for query_position, (query_name, factual_sample) in enumerate(zip(cell_names, observed_samples, strict=True)):
         for target_position, target_index in enumerate(target_indices):
             loc, scale, names = selected_reference[int(target_index)]
             keep = np.ones(names.size, dtype=bool)
             if target_index == factual_sample:
                 self_matches = names == query_name
-                self_excluded[query_position, target_position] = bool(
-                    np.any(self_matches)
-                )
+                self_excluded[query_position, target_position] = bool(np.any(self_matches))
                 keep &= ~self_matches
             loc = loc[keep]
             scale = scale[keep]
@@ -2138,12 +1976,10 @@ def local_sample_enrichment(
             usable = ~np.isnan(member_density)
             n_usable = usable.sum(axis=-1)
             with np.errstate(divide="ignore"):
-                reduced = np.logaddexp.reduce(
-                    np.where(usable, member_density, -np.inf), axis=-1
-                ) - np.log(np.maximum(n_usable, 1)).astype(np.float32)
-            group_density[..., group_position] = np.where(
-                n_usable > 0, reduced, np.nan
-            )
+                reduced = np.logaddexp.reduce(np.where(usable, member_density, -np.inf), axis=-1) - np.log(
+                    np.maximum(n_usable, 1)
+                ).astype(np.float32)
+            group_density[..., group_position] = np.where(n_usable > 0, reduced, np.nan)
         data_vars["group_log_density"] = (
             ("draw", "cell_name", "group"),
             group_density,
@@ -2155,17 +1991,9 @@ def local_sample_enrichment(
     numerator = denominator = None
     if contrast is not None:
         contrast_values = np.asarray([str(value) for value in contrast])
-        if (
-            contrast_values.shape != (2,)
-            or contrast_values[0] == contrast_values[1]
-        ):
-            raise ValueError(
-                "contrast must contain two distinct values: "
-                "(numerator, denominator)."
-            )
-        unknown = [
-            value for value in contrast_values if value not in set(group_order)
-        ]
+        if contrast_values.shape != (2,) or contrast_values[0] == contrast_values[1]:
+            raise ValueError("contrast must contain two distinct values: (numerator, denominator).")
+        unknown = [value for value in contrast_values if value not in set(group_order)]
         if unknown:
             raise ValueError(f"Unknown contrast group(s): {unknown}.")
         numerator, denominator = contrast_values
@@ -2173,8 +2001,7 @@ def local_sample_enrichment(
         denominator_position = int(np.flatnonzero(group_order == denominator)[0])
         data_vars["log_ratio"] = (
             ("draw", "cell_name"),
-            group_density[..., numerator_position]
-            - group_density[..., denominator_position],
+            group_density[..., numerator_position] - group_density[..., denominator_position],
         )
 
     if donor_key is not None:
@@ -2196,8 +2023,7 @@ def local_sample_enrichment(
             or set(numerator_donors) != set(denominator_donors)
         ):
             raise ValueError(
-                "Paired contrasts require exactly one numerator and one "
-                "denominator sample for every donor."
+                "Paired contrasts require exactly one numerator and one denominator sample for every donor."
             )
         donor_order = np.asarray(list(dict.fromkeys(numerator_donors.tolist())))
         donor_log_ratio = np.empty(
@@ -2205,15 +2031,9 @@ def local_sample_enrichment(
             dtype=np.float32,
         )
         for donor_position, donor in enumerate(donor_order):
-            numerator_sample = numerator_positions[
-                np.flatnonzero(numerator_donors == donor)[0]
-            ]
-            denominator_sample = denominator_positions[
-                np.flatnonzero(denominator_donors == donor)[0]
-            ]
-            donor_log_ratio[..., donor_position] = (
-                density[..., numerator_sample] - density[..., denominator_sample]
-            )
+            numerator_sample = numerator_positions[np.flatnonzero(numerator_donors == donor)[0]]
+            denominator_sample = denominator_positions[np.flatnonzero(denominator_donors == donor)[0]]
+            donor_log_ratio[..., donor_position] = density[..., numerator_sample] - density[..., denominator_sample]
         data_vars["donor_log_ratio"] = (
             ("draw", "cell_name", "donor"),
             donor_log_ratio,
@@ -2250,14 +2070,11 @@ def local_sample_enrichment(
             "interpretation": INTERPRETATION,
             # The seed combiner compares these; contrast keeps numerator, denominator order.
             "group_key": "" if group_key is None else str(group_key),
-            "contrast": json.dumps(
-                [] if contrast is None else [str(value) for value in contrast]
-            ),
+            "contrast": json.dumps([] if contrast is None else [str(value) for value in contrast]),
             "donor_key": "" if donor_key is None else str(donor_key),
             "reference_cells": _settings_digest(reference_names),
             "max_reference_cells_per_sample": (
-                "" if max_reference_cells_per_sample is None
-                else str(int(max_reference_cells_per_sample))
+                "" if max_reference_cells_per_sample is None else str(int(max_reference_cells_per_sample))
             ),
         },
     )

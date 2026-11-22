@@ -8,11 +8,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import scvi
 import torch
+from scvi import REGISTRY_KEYS
 from torch.distributions import Normal
 
-import scvi
-from scvi import REGISTRY_KEYS
 from mrtotalvi import (
     MrTotalVI,
     combine_mrtotalvi_seed_results,
@@ -41,9 +41,7 @@ def _make_adata(n_samples: int = 3):
         n_batches=2,
         n_labels=2,
     )
-    adata.obs["sample"] = np.asarray(
-        [f"sample_{index % n_samples}" for index in range(adata.n_obs)]
-    )
+    adata.obs["sample"] = np.asarray([f"sample_{index % n_samples}" for index in range(adata.n_obs)])
     MrTotalVI.setup_anndata(
         adata,
         protein_expression_obsm_key="protein_expression",
@@ -76,15 +74,9 @@ def _make_context_v2_model():
         n_batches=2,
         n_labels=2,
     )
-    adata.obs["sample"] = np.asarray(
-        ["sample_0"] * 6 + ["sample_1"] * 4 + ["sample_2"] * 2
-    )
+    adata.obs["sample"] = np.asarray(["sample_0"] * 6 + ["sample_1"] * 4 + ["sample_2"] * 2)
     adata.obs["batch"] = np.asarray(
-        ["batch_0"] * 4
-        + ["batch_1"] * 2
-        + ["batch_0"]
-        + ["batch_1"] * 3
-        + ["batch_0", "batch_1"]
+        ["batch_0"] * 4 + ["batch_1"] * 2 + ["batch_0"] + ["batch_1"] * 3 + ["batch_0", "batch_1"]
     )
     adata.obs["panel"] = np.where(
         adata.obs["batch"].to_numpy() == "batch_0",
@@ -154,9 +146,7 @@ def test_pre_v2_oracle_checksum_manifest_and_policy_are_immutable():
     assert inventory["source_commit"] == EXPECTED_SOURCE_COMMIT
     assert inventory["verified_file_count"] == 14
 
-    policy, policy_bytes, policy_sha256 = load_portability_policy(
-        PORTABILITY_POLICY_PATH
-    )
+    policy, policy_bytes, policy_sha256 = load_portability_policy(PORTABILITY_POLICY_PATH)
     assert policy_bytes == canonical_json_bytes(policy)
     assert policy_sha256 == EXPECTED_PORTABILITY_POLICY_SHA256
     assert policy["schema"] == "mrtotalvi-pre-v2-oracle-cpu-portability-v1"
@@ -197,13 +187,9 @@ def test_pre_v2_oracle_inventory_rejects_every_non_authoritative_path(
     expected_manifest_sha256 = EXPECTED_CHECKSUM_MANIFEST_SHA256
 
     if mutation == "unauthorized_parent":
-        checksum_path.write_bytes(
-            checksum_path.read_bytes() + f"{'0' * 64}  ../../escape.py\n".encode()
-        )
+        checksum_path.write_bytes(checksum_path.read_bytes() + f"{'0' * 64}  ../../escape.py\n".encode())
     elif mutation == "absolute_path":
-        checksum_path.write_bytes(
-            checksum_path.read_bytes() + f"{'0' * 64}  /tmp/escape.py\n".encode()
-        )
+        checksum_path.write_bytes(checksum_path.read_bytes() + f"{'0' * 64}  /tmp/escape.py\n".encode())
     elif mutation == "duplicate_record":
         first_line = checksum_path.read_bytes().splitlines(keepends=True)[0]
         checksum_path.write_bytes(checksum_path.read_bytes() + first_line)
@@ -245,33 +231,24 @@ def test_pre_v2_oracle_strict_manifest_tolerance_is_diagnostic(
     assessment = pre_v2_cpu_portability_assessment
     diagnostic = assessment["summary"]["strict_diagnostic"]
     policy, _, _ = load_portability_policy(PORTABILITY_POLICY_PATH)
-    rows = [
-        row
-        for model in assessment["models"].values()
-        for row in model["rows"]
-    ]
+    rows = [row for model in assessment["models"].values() for row in model["rows"]]
     assert diagnostic["status"] in {"pass", "host_rounding_mismatches"}
     assert diagnostic["tolerances"] == {"atol": 1e-7, "rtol": 1e-6}
     assert diagnostic["failing_element_count"] == sum(
-        row["failing_count"]["strict"]
-        for model in assessment["models"].values()
-        for row in model["rows"]
+        row["failing_count"]["strict"] for model in assessment["models"].values() for row in model["rows"]
     )
     if diagnostic["status"] == "pass":
         assert diagnostic["failing_element_count"] == 0
     else:
         assert diagnostic["failing_element_count"] > 0
         assert diagnostic["classification"] == "cpu_float32_host_rounding"
-        assert max(
-            row["max_abs_delta"]
-            for row in rows
-            if row["failing_count"]["strict"] > 0
-        ) <= policy["derivation"]["observed_floor_requiring_max_abs_delta"]
+        assert (
+            max(row["max_abs_delta"] for row in rows if row["failing_count"]["strict"] > 0)
+            <= policy["derivation"]["observed_floor_requiring_max_abs_delta"]
+        )
     # The policy records the observed worst-case host delta used to derive the
     # portable ceiling. A host with smaller rounding deltas is also compliant.
-    assert max(row["max_abs_delta"] for row in rows) <= policy["derivation"][
-        "observed_overall_max_abs_delta"
-    ]
+    assert max(row["max_abs_delta"] for row in rows) <= policy["derivation"]["observed_overall_max_abs_delta"]
 
 
 def test_pre_v2_oracle_cpu_portable_assessment_passes(
@@ -282,19 +259,12 @@ def test_pre_v2_oracle_cpu_portable_assessment_passes(
     policy, _, policy_sha256 = load_portability_policy(PORTABILITY_POLICY_PATH)
     binding = assessment["binding"]
     assert binding["policy_sha256"] == policy_sha256
-    assert binding["oracle_checksum_manifest_sha256"] == (
-        EXPECTED_CHECKSUM_MANIFEST_SHA256
-    )
+    assert binding["oracle_checksum_manifest_sha256"] == (EXPECTED_CHECKSUM_MANIFEST_SHA256)
     assert binding["source_commit"] == EXPECTED_SOURCE_COMMIT
     assert binding["assessment_rows_sha256"] == canonical_json_sha256(
-        {
-            model_name: assessment["models"][model_name]["rows"]
-            for model_name in ("mrtotalvi",)
-        }
+        {model_name: assessment["models"][model_name]["rows"] for model_name in ("mrtotalvi",)}
     )
-    assert binding["provenance_sha256"] == canonical_json_sha256(
-        assessment["provenance"]
-    )
+    assert binding["provenance_sha256"] == canonical_json_sha256(assessment["provenance"])
     assert binding["binding_sha256"] == canonical_json_sha256(
         {key: value for key, value in binding.items() if key != "binding_sha256"}
     )
@@ -324,17 +294,11 @@ def test_pre_v2_oracle_cpu_portable_assessment_passes(
         "processor",
         "torch_capability",
     }
-    assert assessment["provenance"]["cpu"]["flags"] == sorted(
-        assessment["provenance"]["cpu"]["flags"]
-    )
-    assert assessment["provenance"]["cpu"]["flags_count"] == len(
-        assessment["provenance"]["cpu"]["flags"]
-    )
+    assert assessment["provenance"]["cpu"]["flags"] == sorted(assessment["provenance"]["cpu"]["flags"])
+    assert assessment["provenance"]["cpu"]["flags_count"] == len(assessment["provenance"]["cpu"]["flags"])
     assert assessment["provenance"]["execution"]["cuda_available"] is False
     assert assessment["provenance"]["execution"]["cuda_visible_devices"] == ""
-    assert set(
-        assessment["provenance"]["threads"]["environment"].values()
-    ) <= {"", "0", "1"}
+    assert set(assessment["provenance"]["threads"]["environment"].values()) <= {"", "0", "1"}
 
     required_row_fields = {
         "category",
@@ -356,9 +320,7 @@ def test_pre_v2_oracle_cpu_portable_assessment_passes(
         assert run_manifest["kl_weight"] == 0.73
         assert run_manifest["sample_order"] == ["sample_0", "sample_1", "sample_2"]
         assert run_manifest["tolerances"] == policy["tolerances"]["strict"]
-        assert run_manifest["protein_reconstruction_weight"] == (
-            0.61 if model_name == "mrtotalvi" else None
-        )
+        assert run_manifest["protein_reconstruction_weight"] == (0.61 if model_name == "mrtotalvi" else None)
         assert model["requirements"] == {
             "array_keys_exact": True,
             "cell_indices_exact": True,
@@ -403,9 +365,7 @@ def test_mode_contract_is_opt_in_validated_and_topology_preserving():
             z_u_prior=False,
         )
 
-    state_contract = {
-        key: tuple(value.shape) for key, value in legacy.module.state_dict().items()
-    }
+    state_contract = {key: tuple(value.shape) for key, value in legacy.module.state_dict().items()}
     for hierarchy_mode in ("legacy", "centered_v2"):
         for u_encoder_mode in ("sample_conditioned", "sample_blind"):
             model = MrTotalVI(
@@ -415,10 +375,7 @@ def test_mode_contract_is_opt_in_validated_and_topology_preserving():
                 hierarchy_mode=hierarchy_mode,
                 u_encoder_mode=u_encoder_mode,
             )
-            assert {
-                key: tuple(value.shape)
-                for key, value in model.module.state_dict().items()
-            } == state_contract
+            assert {key: tuple(value.shape) for key, value in model.module.state_dict().items()} == state_contract
 
 
 def test_sample_blind_encoder_bypasses_sample_only_and_keeps_technical_covariates():
@@ -431,12 +388,8 @@ def test_sample_blind_encoder_bypasses_sample_only_and_keeps_technical_covariate
         n_batches=2,
         n_labels=2,
     )
-    adata.obs["sample"] = np.asarray(
-        [f"sample_{index % 3}" for index in range(adata.n_obs)]
-    )
-    adata.obs["technical_category"] = np.asarray(
-        [f"tech_{index % 2}" for index in range(adata.n_obs)]
-    )
+    adata.obs["sample"] = np.asarray([f"sample_{index % 3}" for index in range(adata.n_obs)])
+    adata.obs["technical_category"] = np.asarray([f"tech_{index % 2}" for index in range(adata.n_obs)])
     adata.obs["technical_continuous"] = np.linspace(0.0, 1.0, adata.n_obs)
     MrTotalVI.setup_anndata(
         adata,
@@ -506,8 +459,7 @@ def test_sample_blind_encoder_bypasses_sample_only_and_keeps_technical_covariate
         qu.sample_embed.weight,
     )
     assert all(
-        parameter.grad is None or torch.count_nonzero(parameter.grad) == 0
-        for parameter in conditioning_parameters
+        parameter.grad is None or torch.count_nonzero(parameter.grad) == 0 for parameter in conditioning_parameters
     )
     assert qu.fc1.weight.grad is not None
     assert torch.isfinite(qu.fc1.weight.grad).all()
@@ -524,9 +476,7 @@ def test_centered_hierarchy_uses_the_full_registered_sample_universe():
         hierarchy_mode="centered_v2",
     )
     module = model.module.eval()
-    tensors = next(
-        iter(model._make_data_loader(adata=adata, indices=np.arange(4), batch_size=4))
-    )
+    tensors = next(iter(model._make_data_loader(adata=adata, indices=np.arange(4), batch_size=4)))
     torch.manual_seed(117)
     inference_outputs = module.inference(**module._get_inference_input(tensors))
 
@@ -643,9 +593,7 @@ def test_centered_single_sample_and_common_raw_shift_contracts():
         atol=0.0,
     )
     torch.testing.assert_close(z_all[:, 0], z_base, rtol=0.0, atol=0.0)
-    single_penalty = -Normal(
-        0.0, torch.exp(single.pz_scale.clamp(min=-4.0))
-    ).log_prob(eps_raw).sum()
+    single_penalty = -Normal(0.0, torch.exp(single.pz_scale.clamp(min=-4.0))).log_prob(eps_raw).sum()
     assert torch.isfinite(single_penalty)
     assert single_penalty > 0
 
@@ -696,12 +644,7 @@ def test_centered_target_chunks_preserve_values_and_gradients():
             u,
             target_chunk_size=chunk_size,
         )
-        objective = (
-            z_base.square().sum()
-            + eps_raw.square().sum()
-            + eps_centered.square().sum()
-            + z_all.square().sum()
-        )
+        objective = z_base.square().sum() + eps_raw.square().sum() + eps_centered.square().sum() + z_all.square().sum()
         objective.backward()
         snapshots[chunk_size] = {
             "z_base": z_base.detach(),
@@ -750,10 +693,7 @@ def test_centered_cell_batches_preserve_values_and_gradients():
                 objective = objective + value.square().sum()
         objective.backward()
         snapshots[cell_batch_size] = {
-            "outputs": [
-                torch.cat(output_parts, dim=1 if output_parts[0].ndim == 4 else 0)
-                for output_parts in outputs
-            ],
+            "outputs": [torch.cat(output_parts, dim=1 if output_parts[0].ndim == 4 else 0) for output_parts in outputs],
             "u_gradient": u.grad.detach().clone(),
             "embedding_gradient": module.qz.embedding.weight.grad.detach().clone(),
         }
@@ -833,9 +773,7 @@ def test_centered_scale_observations_uses_exact_sample_balanced_weights():
     duplicated_values = torch.cat([per_cell.detach(), per_cell.detach()[duplicate_mask]])
     duplicated_samples = torch.cat([sample_index, sample_index[duplicate_mask]])
     duplicated_counts = torch.bincount(duplicated_samples, minlength=module._n_sample)
-    duplicated_weights = duplicated_samples.numel() / (
-        module._n_sample * duplicated_counts[duplicated_samples]
-    )
+    duplicated_weights = duplicated_samples.numel() / (module._n_sample * duplicated_counts[duplicated_samples])
     torch.testing.assert_close(
         (duplicated_values * duplicated_weights).mean(),
         (per_cell.detach() * weights).mean(),
@@ -917,10 +855,7 @@ def test_checkpoint_modes_default_roundtrip_and_require_explicit_semantic_overri
     assert encoder_override.resolved_u_encoder_mode == "sample_conditioned"
     assert encoder_override.hierarchy_mode == "centered_v2"
     assert encoder_override.u_encoder_mode == "sample_conditioned"
-    assert (
-        encoder_override.init_params_["non_kwargs"]["u_encoder_mode"]
-        == "sample_conditioned"
-    )
+    assert encoder_override.init_params_["non_kwargs"]["u_encoder_mode"] == "sample_conditioned"
     encoder_resave_path = tmp_path / "encoder-override-resaved"
     encoder_override.save(encoder_resave_path, save_anndata=True)
     encoder_resaved = MrTotalVI.load(
@@ -1003,12 +938,8 @@ def test_counterfactual_latent_schema_order_and_v2_only_contract():
         target_samples=["sample_0", "sample_1"],
         reference_indices=[0, 1],
     )
-    assert not singleton_support["target_support"].sel(
-        target_sample="sample_0"
-    ).item()
-    assert singleton_support["target_support"].sel(
-        target_sample="sample_1"
-    ).item()
+    assert not singleton_support["target_support"].sel(target_sample="sample_0").item()
+    assert singleton_support["target_support"].sel(target_sample="sample_1").item()
 
 
 def test_counterfactual_latent_posterior_is_batch_target_and_subset_invariant():
@@ -1043,9 +974,7 @@ def test_counterfactual_latent_posterior_is_batch_target_and_subset_invariant():
     )
     for variable in ("eps_raw", "eps_centered", "z"):
         np.testing.assert_allclose(
-            full[variable].sel(
-                target_sample=["sample_2", "sample_0"]
-            ).to_numpy(),
+            full[variable].sel(target_sample=["sample_2", "sample_0"]).to_numpy(),
             subset[variable].to_numpy(),
             rtol=1e-6,
             atol=1e-6,
@@ -1107,11 +1036,7 @@ def test_counterfactual_invalid_requests_fail_before_inference(monkeypatch):
     """Invalid modes, features, and technical contexts fail before encoding."""
     model, adata = _make_v2_model()
     gene = str(adata.var_names[0])
-    protein = str(
-        model.adata_manager.get_state_registry(
-            REGISTRY_KEYS.PROTEIN_EXP_KEY
-        ).column_names[0]
-    )
+    protein = str(model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names[0])
 
     import mrtotalvi._counterfactual as counterfactual_module
 
@@ -1232,18 +1157,14 @@ def test_counterfactual_expression_schema_specified_library_and_protein_means():
     protein_names = list(
         map(
             str,
-            model.adata_manager.get_state_registry(
-                REGISTRY_KEYS.PROTEIN_EXP_KEY
-            ).column_names,
+            model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names,
         )
     )
     proteins = [protein_names[2], protein_names[0]]
     batch_labels = list(
         map(
             str,
-            model.adata_manager.get_state_registry(
-                REGISTRY_KEYS.BATCH_KEY
-            ).categorical_mapping,
+            model.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping,
         )
     )
 
@@ -1313,17 +1234,14 @@ def test_counterfactual_expression_schema_specified_library_and_protein_means():
     )
     np.testing.assert_allclose(
         result["protein_total_mean"],
-        result["protein_background_contribution"]
-        + result["protein_foreground_contribution"],
+        result["protein_background_contribution"] + result["protein_foreground_contribution"],
         rtol=1e-6,
         atol=1e-7,
     )
     assert result["protein_available"].to_numpy().all()
     assert result.attrs["batch_policy"] == "specified"
     assert result.attrs["library_policy"] == "specified"
-    assert result.attrs["protein_mean_formula"].startswith(
-        "efficiency * exp(back_alpha"
-    )
+    assert result.attrs["protein_mean_formula"].startswith("efficiency * exp(back_alpha")
     assert "context_table_sha256" in result.attrs
 
     torch.manual_seed(999)
@@ -1355,9 +1273,7 @@ def test_counterfactual_expression_sample_balanced_joint_marginal_contexts():
     batches = list(
         map(
             str,
-            model.adata_manager.get_state_registry(
-                REGISTRY_KEYS.BATCH_KEY
-            ).categorical_mapping,
+            model.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping,
         )
     )
     panels = list(
@@ -1369,9 +1285,7 @@ def test_counterfactual_expression_sample_balanced_joint_marginal_contexts():
     protein_names = list(
         map(
             str,
-            model.adata_manager.get_state_registry(
-                REGISTRY_KEYS.PROTEIN_EXP_KEY
-            ).column_names,
+            model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names,
         )
     )
     common = {
@@ -1407,20 +1321,13 @@ def test_counterfactual_expression_sample_balanced_joint_marginal_contexts():
     for variable in ("rna_scale", "rna_rate"):
         np.testing.assert_allclose(
             marginal[variable],
-            context_0_weight * context_0[variable]
-            + (1.0 - context_0_weight) * context_1[variable],
+            context_0_weight * context_0[variable] + (1.0 - context_0_weight) * context_1[variable],
             rtol=1e-6,
             atol=1e-6,
         )
-    assert not marginal["protein_available"].sel(
-        protein=protein_names[0]
-    ).to_numpy().any()
-    assert marginal["protein_available"].sel(
-        protein=protein_names[1]
-    ).to_numpy().all()
-    assert np.isnan(
-        marginal["protein_total_mean"].sel(protein=protein_names[0])
-    ).all()
+    assert not marginal["protein_available"].sel(protein=protein_names[0]).to_numpy().any()
+    assert marginal["protein_available"].sel(protein=protein_names[1]).to_numpy().all()
+    assert np.isnan(marginal["protein_total_mean"].sel(protein=protein_names[0])).all()
     np.testing.assert_allclose(
         marginal["rna_rate"].isel(cell_name=0),
         adata.obs["size_factor"].iloc[0] * marginal["rna_scale"].isel(cell_name=0),
@@ -1451,8 +1358,7 @@ def test_counterfactual_expression_sample_balanced_joint_marginal_contexts():
     )
     np.testing.assert_allclose(
         specified_vector["rna_rate"],
-        np.asarray([7.0, 9.0])[None, :, None, None]
-        * specified_vector["rna_scale"],
+        np.asarray([7.0, 9.0])[None, :, None, None] * specified_vector["rna_scale"],
         rtol=1e-6,
         atol=1e-7,
     )
@@ -1496,13 +1402,7 @@ def test_counterfactual_expression_observed_policy_uses_latent_library_mean():
         indices=indices,
         target_samples=["sample_1"],
         gene_list=[str(adata.var_names[0])],
-        protein_list=[
-            str(
-                model.adata_manager.get_state_registry(
-                    REGISTRY_KEYS.PROTEIN_EXP_KEY
-                ).column_names[0]
-            )
-        ],
+        protein_list=[str(model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names[0])],
         library_policy="observed",
     )
     expected_library = model.get_latent_library_size(
@@ -1526,9 +1426,7 @@ def test_counterfactual_expression_posterior_common_noise_and_subsetting():
     proteins = list(
         map(
             str,
-            model.adata_manager.get_state_registry(
-                REGISTRY_KEYS.PROTEIN_EXP_KEY
-            ).column_names[:2],
+            model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names[:2],
         )
     )
     full = model.get_counterfactual_expression(
@@ -1667,12 +1565,8 @@ def test_local_sample_enrichment_self_exclusion_singletons_and_group_logmeanexp(
     assert singleton["n_reference_cells"].sel(target_sample="sample_1").item() == 1
     assert not singleton["finite_support"].sel(target_sample="sample_0").item()
     assert singleton["finite_support"].sel(target_sample="sample_1").item()
-    assert np.isnan(
-        singleton["log_density"].sel(target_sample="sample_0")
-    ).all()
-    assert np.isfinite(
-        singleton["log_density"].sel(target_sample="sample_1")
-    ).all()
+    assert np.isnan(singleton["log_density"].sel(target_sample="sample_0")).all()
+    assert np.isfinite(singleton["log_density"].sel(target_sample="sample_1")).all()
 
     grouped = model.local_sample_enrichment(
         adata=adata,
@@ -1692,9 +1586,7 @@ def test_local_sample_enrichment_self_exclusion_singletons_and_group_logmeanexp(
         "group",
     )
     assert grouped.group.to_numpy().tolist() == ["numerator", "denominator"]
-    numerator = grouped["log_density"].sel(
-        target_sample=["sample_0", "sample_2"]
-    )
+    numerator = grouped["log_density"].sel(target_sample=["sample_0", "sample_2"])
     expected_numerator = np.logaddexp(
         numerator.isel(target_sample=0),
         numerator.isel(target_sample=1),
@@ -1707,8 +1599,7 @@ def test_local_sample_enrichment_self_exclusion_singletons_and_group_logmeanexp(
     )
     np.testing.assert_allclose(
         grouped["log_ratio"],
-        grouped["group_log_density"].sel(group="numerator")
-        - grouped["group_log_density"].sel(group="denominator"),
+        grouped["group_log_density"].sel(group="numerator") - grouped["group_log_density"].sel(group="denominator"),
         rtol=1e-6,
         atol=1e-6,
     )
@@ -1719,8 +1610,7 @@ def test_local_sample_enrichment_self_exclusion_singletons_and_group_logmeanexp(
     )
     np.testing.assert_allclose(
         grouped["donor_log_ratio"].sel(donor="donor_0"),
-        grouped["log_density"].sel(target_sample="sample_0")
-        - grouped["log_density"].sel(target_sample="sample_1"),
+        grouped["log_density"].sel(target_sample="sample_0") - grouped["log_density"].sel(target_sample="sample_1"),
         rtol=1e-6,
         atol=1e-6,
     )
@@ -1824,8 +1714,7 @@ def test_combine_mrtotalvi_seed_results_separates_draw_and_seed_uncertainty():
     )
     assert "draw" in result.dims
     assert result.attrs["uncertainty_separation"] == (
-        "within-seed posterior draws and between-seed training variation "
-        "are reported separately and never pooled"
+        "within-seed posterior draws and between-seed training variation are reported separately and never pooled"
     )
 
     with pytest.raises(ValueError, match="non-empty"):
@@ -1855,10 +1744,7 @@ def test_centered_local_representation_routes_through_full_universe():
     observed_labels = adata.obs["sample"].iloc[indices].astype(str).to_numpy()
     expected_factual = np.stack(
         [
-            counterfactual["z"]
-            .isel(draw=0, cell_name=position)
-            .sel(target_sample=sample)
-            .to_numpy()
+            counterfactual["z"].isel(draw=0, cell_name=position).sel(target_sample=sample).to_numpy()
             for position, sample in enumerate(observed_labels)
         ]
     )
@@ -1881,10 +1767,7 @@ def test_centered_local_representation_routes_through_full_universe():
         batch_size=2,
     )
     expected_distances = np.sqrt(
-        np.square(
-            local.to_numpy()[:, :, None, :]
-            - local.to_numpy()[:, None, :, :]
-        ).sum(axis=-1)
+        np.square(local.to_numpy()[:, :, None, :] - local.to_numpy()[:, None, :, :]).sum(axis=-1)
     )
     np.testing.assert_allclose(
         distances,
@@ -1908,6 +1791,7 @@ def test_centered_de_fails_closed_and_da_always_warns(monkeypatch):
         n_latent_u=2,
     )
     legacy.is_trained_ = True
+
     class Sentinel:
         def __init__(self):
             self.attrs = {}

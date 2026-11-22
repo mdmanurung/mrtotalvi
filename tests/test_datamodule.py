@@ -22,6 +22,7 @@ sys.path.insert(0, "src")
 import scvi
 from scvi.data import AnnDataManager
 from scvi.dataloaders import AnnDataLoader
+
 from mrtotalvi import MrTotalVI
 from mrtotalvi._datamodule import (
     _InMemoryProteinMappedDataset,
@@ -88,8 +89,7 @@ def _deep_compare(a, b, path: str = "") -> list[str]:
         a2, b2 = np.asarray(a), np.asarray(b)
         if a2.shape != b2.shape or a2.dtype != b2.dtype or not np.array_equal(a2, b2):
             mismatches.append(
-                f"array mismatch at {path}: shape/dtype/values differ "
-                f"({a2.dtype}{a2.shape} vs {b2.dtype}{b2.shape})"
+                f"array mismatch at {path}: shape/dtype/values differ ({a2.dtype}{a2.shape} vs {b2.dtype}{b2.shape})"
             )
         return mismatches
     if a != b:
@@ -123,9 +123,7 @@ def test_registry_matches_in_memory_default(adata_basic):
         batch_key="batch",
         parallel=False,
     )
-    mismatches = _deep_compare(
-        ref["field_registries"], dm.registry["field_registries"], "field_registries"
-    )
+    mismatches = _deep_compare(ref["field_registries"], dm.registry["field_registries"], "field_registries")
     assert mismatches == []
     assert dm.registry["model_name"] == ref["model_name"] == "MrTotalVI"
     assert dm.registry["setup_method_name"] == "setup_datamodule"
@@ -144,9 +142,7 @@ def test_registry_matches_in_memory_no_batch_key(adata_basic):
         sample_key="sample",
         parallel=False,
     )
-    mismatches = _deep_compare(
-        ref["field_registries"], dm.registry["field_registries"], "field_registries"
-    )
+    mismatches = _deep_compare(ref["field_registries"], dm.registry["field_registries"], "field_registries")
     assert mismatches == []
 
 
@@ -177,15 +173,11 @@ def test_registry_matches_in_memory_with_labels_and_covariates(adata_basic):
         continuous_covariate_keys=["cont1"],
         parallel=False,
     )
-    mismatches = _deep_compare(
-        ref["field_registries"], dm.registry["field_registries"], "field_registries"
-    )
+    mismatches = _deep_compare(ref["field_registries"], dm.registry["field_registries"], "field_registries")
     assert mismatches == []
     # extra_categorical_covs mapping dtype must be preserved (int64 for an
     # int-valued covariate column), not coerced to string/object.
-    cat_mapping = dm.registry["field_registries"]["extra_categorical_covs"]["state_registry"][
-        "mappings"
-    ]["cat1"]
+    cat_mapping = dm.registry["field_registries"]["extra_categorical_covs"]["state_registry"]["mappings"]["cat1"]
     assert cat_mapping.dtype == np.int64
 
 
@@ -278,12 +270,8 @@ def test_tensors_match_in_memory_dataloader_default(adata_basic):
     assert set(ref_batch.keys()) == set(dm_batch.keys())
     for key, ref_tensor in ref_batch.items():
         dm_tensor = dm_batch[key]
-        assert dm_tensor.dtype == ref_tensor.dtype, (
-            f"{key}: dtype {dm_tensor.dtype} != {ref_tensor.dtype}"
-        )
-        assert dm_tensor.shape == ref_tensor.shape, (
-            f"{key}: shape {dm_tensor.shape} != {ref_tensor.shape}"
-        )
+        assert dm_tensor.dtype == ref_tensor.dtype, f"{key}: dtype {dm_tensor.dtype} != {ref_tensor.dtype}"
+        assert dm_tensor.shape == ref_tensor.shape, f"{key}: shape {dm_tensor.shape} != {ref_tensor.shape}"
         assert torch.equal(dm_tensor, ref_tensor), f"{key}: values differ"
 
 
@@ -456,9 +444,7 @@ def test_multi_file_collection_matches_concatenated_in_memory():
     adata2 = _make_adata(seed=11)
     import anndata as ad
 
-    combined = ad.concat(
-        [adata1, adata2], join="inner", merge="same", index_unique="-", keys=["a", "b"]
-    )
+    combined = ad.concat([adata1, adata2], join="inner", merge="same", index_unique="-", keys=["a", "b"])
     combined.uns["protein_names"] = adata1.uns["protein_names"].copy()
 
     ref = _registered_reference_registry(
@@ -476,9 +462,7 @@ def test_multi_file_collection_matches_concatenated_in_memory():
         batch_key="batch",
         parallel=False,
     )
-    mismatches = _deep_compare(
-        ref["field_registries"], dm.registry["field_registries"], "field_registries"
-    )
+    mismatches = _deep_compare(ref["field_registries"], dm.registry["field_registries"], "field_registries")
     assert mismatches == []
     assert dm.n_obs == adata1.n_obs + adata2.n_obs
 

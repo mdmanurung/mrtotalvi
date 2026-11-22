@@ -14,7 +14,6 @@ import torch
 import xarray as xr
 from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal
 
-import mrtotalvi
 from mrtotalvi import MrTotalVI
 from mrtotalvi._datamodule import _InMemoryProteinMappedDataset
 from mrtotalvi._seed import combine_mrtotalvi_seed_results
@@ -28,9 +27,7 @@ from tests.test_da_density_estimator import StubModel
 from tests.test_mrtotalvi import N_LATENT, _make_adata, _setup_and_train
 
 ROOT = Path(__file__).resolve().parents[1]
-SETUP = dict(
-    protein_expression_obsm_key="protein_expression", sample_key="sample", batch_key="batch"
-)
+SETUP = {"protein_expression_obsm_key": "protein_expression", "sample_key": "sample", "batch_key": "batch"}
 
 
 @pytest.fixture(scope="module")
@@ -66,9 +63,7 @@ def test_local_distances_size_check_groupby_and_keep_cell(trained):
     batch = trained.adata.obs["batch"].to_numpy()
     for label in np.unique(batch):
         expected = plain.values[batch == label].mean(axis=0)
-        np.testing.assert_allclose(
-            grouped["batch_distances"].sel(batch=label).values, expected, rtol=1e-4, atol=1e-5
-        )
+        np.testing.assert_allclose(grouped["batch_distances"].sel(batch=label).values, expected, rtol=1e-4, atol=1e-5)
     both = trained.get_local_sample_distances(batch_size=64, groupby=["batch"], keep_cell=True)
     np.testing.assert_allclose(both["cell"].values, plain.values, rtol=1e-6)
     # keep_cell=False stays under a limit that the per-cell output would break
@@ -95,8 +90,13 @@ def test_posterior_da_null_tracks_group_size_but_knn_and_floor_do_not():
         "floor": {"density_estimator": "scale_floor", "scale_floor": 0.4},
     }.items():
         da = differential_abundance(
-            StubModel(u, labels), adata=adata, sample_key="sample", sample_cov_keys=["cond"],
-            compute_log_enrichment=True, batch_size=600, **kw,
+            StubModel(u, labels),
+            adata=adata,
+            sample_key="sample",
+            sample_cov_keys=["cond"],
+            compute_log_enrichment=True,
+            batch_size=600,
+            **kw,
         )
         out[name] = float(np.nanmean(da["cond_log_enrichs"].sel(cond_enrichment="a").values))
     # the 2-sample group scores below the 8-sample group under the default estimator
@@ -178,8 +178,12 @@ def test_docs_and_warning_wording():
         MrTotalVI.setup_anndata(adata, **SETUP)
         model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT)
         model._warn_inherited_training_schedule(
-            max_epochs=1, train_size=None, batch_size=None, n_steps_kl_warmup=None,
-            n_epochs_kl_warmup=None, adversarial_classifier=True,
+            max_epochs=1,
+            train_size=None,
+            batch_size=None,
+            n_steps_kl_warmup=None,
+            n_epochs_kl_warmup=None,
+            adversarial_classifier=True,
         )
     text = " ".join(str(w.message) for w in caught)
     assert "sample-free" not in text and "not on u alone" in text
@@ -203,8 +207,12 @@ def test_own_sample_pairs_fail_about_quantile_by_design():
     obs = pd.DataFrame({"sample": labels}, index=[f"c{i}" for i in range(len(labels))])
     adata = ad.AnnData(np.zeros((len(labels), 1), dtype=np.float32), obs=obs)
     out = get_outlier_cell_sample_pairs(
-        _OutlierStub(u, labels), adata=adata, sample_key="sample", subsample_size=None,
-        quantile_threshold=0.05, batch_size=600,
+        _OutlierStub(u, labels),
+        adata=adata,
+        sample_key="sample",
+        subsample_size=None,
+        quantile_threshold=0.05,
+        batch_size=600,
     )
     own = np.array([out["is_admissible"].sel(sample=s).values[labels == s] for s in set(labels)])
     assert 0.9 <= own.mean() <= 0.99
@@ -264,7 +272,9 @@ def test_sample_blind_override_drops_u_encoder_penalty_and_resaves(tmp_path):
     model.save(tmp_path / "m", save_anndata=False)
     with pytest.warns(UserWarning) as caught:
         loaded = MrTotalVI.load(
-            tmp_path / "m", adata=adata, u_encoder_mode_override="sample_blind",
+            tmp_path / "m",
+            adata=adata,
+            u_encoder_mode_override="sample_blind",
             allow_semantic_override=True,
         )
     assert any("switched off" in str(w.message) for w in caught)
@@ -342,7 +352,7 @@ def test_validation_dataset_reuses_training_codes():
     train = make_dm_adata(seed=1)
     valid = make_dm_adata(seed=2)
     valid = valid[valid.obs["sample"] != "donor_0"].copy()  # donor_0 has training code 0
-    kw = dict(protein_expression_obsm_key="protein_expression", require_protein_names=False)
+    kw = {"protein_expression_obsm_key": "protein_expression", "require_protein_names": False}
     train_ds = _InMemoryProteinMappedDataset([train], ["sample"], **kw)
     plain = _InMemoryProteinMappedDataset([valid], ["sample"], **kw)
     shared = _InMemoryProteinMappedDataset([valid], ["sample"], encoders=train_ds.encoders, **kw)

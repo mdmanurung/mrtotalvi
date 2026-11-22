@@ -40,19 +40,19 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import scvi
 import torch
 from anndata import AnnData
 from lightning.pytorch import LightningDataModule
+from scvi import REGISTRY_KEYS
+from scvi.model._utils import parse_device_args
+from scvi.utils import dependencies
 from torch.utils.data import DataLoader, Dataset
 
-import scvi
-from scvi import REGISTRY_KEYS
 from mrtotalvi._contracts import (
     authoritative_protein_names,
     matrix_row,
 )
-from scvi.model._utils import parse_device_args
-from scvi.utils import dependencies
 
 if TYPE_CHECKING:
     from typing import Any
@@ -173,8 +173,7 @@ class _InMemoryProteinMappedDataset(Dataset):
                 unseen = sorted({str(v) for v in raw if v not in reference})
                 if unseen:
                     raise ValueError(
-                        f"obs column {key!r} has categories {unseen} that the training "
-                        "collection does not have."
+                        f"obs column {key!r} has categories {unseen} that the training collection does not have."
                     )
                 self.categories[key] = np.asarray(list(reference))
                 self.encoders[key] = dict(reference)
@@ -399,17 +398,13 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
             self._validset.protein_names,
         ):
             raise ValueError(
-                "Training and validation collections must provide identical "
-                "authoritative protein names in exact order."
+                "Training and validation collections must provide identical authoritative protein names in exact order."
             )
         if self._validset is not None and not np.array_equal(
             self._dataset.var_joint,
             self._validset.var_joint,
         ):
-            raise ValueError(
-                "Training and validation collections must have identical gene "
-                "var_names in exact order."
-            )
+            raise ValueError("Training and validation collections must have identical gene var_names in exact order.")
 
         # n_obs_per_sample: exposed as a convenience attribute (matching the
         # generic reference's convention), but deliberately *not* stored
@@ -424,9 +419,7 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
 
         self._log_hyperparams = False
         self.allow_zero_length_dataloader_with_multiple_devices = False
-        _, _, self.device = parse_device_args(
-            accelerator=accelerator, devices=device, return_device="torch"
-        )
+        _, _, self.device = parse_device_args(accelerator=accelerator, devices=device, return_device="torch")
 
     # ------------------------------------------------------------------
     # Dataset construction
@@ -499,22 +492,14 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
         """Dataloader for inference with `on_before_batch_transfer` applied."""
         if shuffle is None:
             shuffle = self.shuffle
-        dataloader = self._create_dataloader(
-            self._dataset, shuffle, batch_size, indices, parallel_cpu_count
-        )
+        dataloader = self._create_dataloader(self._dataset, shuffle, batch_size, indices, parallel_cpu_count)
         return self._InferenceDataloader(dataloader, self.on_before_batch_transfer)
 
-    def _create_dataloader(
-        self, dataset, shuffle, batch_size=None, indices=None, parallel_cpu_count=None
-    ):
+    def _create_dataloader(self, dataset, shuffle, batch_size=None, indices=None, parallel_cpu_count=None):
         if dataset is None:
             return None
         if self._parallel:
-            num_workers = (
-                max(0, (os.cpu_count() or 1) - 1)
-                if parallel_cpu_count is None
-                else parallel_cpu_count
-            )
+            num_workers = max(0, (os.cpu_count() or 1) - 1) if parallel_cpu_count is None else parallel_cpu_count
             worker_init_fn = dataset.torch_worker_init_fn
         else:
             num_workers = 0
@@ -680,10 +665,7 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
                 "state_registry": {},
                 "summary_stats": {"n_extra_categorical_covs": 0},
             }
-        mapping = {
-            key: np.array(list(self._dataset.encoders[key].keys()))
-            for key in self._categorical_covariate_keys
-        }
+        mapping = {key: np.array(list(self._dataset.encoders[key].keys())) for key in self._categorical_covariate_keys}
         return {
             "data_registry": {"attr_key": "_scvi_extra_categorical_covs", "attr_name": "obsm"},
             "state_registry": {
@@ -748,9 +730,7 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
                     "data_registry": {"attr_name": "obs", "attr_key": "_scvi_batch"},
                     "state_registry": {
                         "categorical_mapping": self.batch_labels,
-                        "original_key": (
-                            self._batch_key if self._batch_key is not None else "_scvi_batch"
-                        ),
+                        "original_key": (self._batch_key if self._batch_key is not None else "_scvi_batch"),
                     },
                     "summary_stats": {"n_batch": self.n_batch},
                 },
@@ -758,9 +738,7 @@ class _MrTotalVIRegistryAdapter(LightningDataModule):
                     "data_registry": {"attr_name": "obs", "attr_key": "_scvi_labels"},
                     "state_registry": {
                         "categorical_mapping": self.labels,
-                        "original_key": (
-                            self._label_key if self._label_key is not None else "_scvi_labels"
-                        ),
+                        "original_key": (self._label_key if self._label_key is not None else "_scvi_labels"),
                     },
                     "summary_stats": {"n_labels": self.n_labels},
                 },

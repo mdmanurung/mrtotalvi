@@ -93,29 +93,19 @@ def resolve_u_prior_supervision(
                     stacklevel=3,
                 )
         else:
-            raise ValueError(
-                "A nonzero u_prior_label_weight requires explicit "
-                "u_prior_supervision='labels'."
-            )
+            raise ValueError("A nonzero u_prior_label_weight requires explicit u_prior_supervision='labels'.")
     if supervision not in _VALID_U_PRIOR_SUPERVISION:
         raise ValueError("u_prior_supervision must be exactly one of {'none', 'labels'}.")
 
     if supervision == "none":
         if resolved_weight != 0.0:
-            raise ValueError(
-                "u_prior_supervision='none' requires u_prior_label_weight=0.0."
-            )
+            raise ValueError("u_prior_supervision='none' requires u_prior_label_weight=0.0.")
         return "none", 0.0
 
     if not has_registered_labels:
-        raise ValueError(
-            "u_prior_supervision='labels' requires labels_key to be registered."
-        )
+        raise ValueError("u_prior_supervision='labels' requires labels_key to be registered.")
     if resolved_weight <= 0.0:
-        raise ValueError(
-            "u_prior_supervision='labels' requires a finite positive "
-            "u_prior_label_weight."
-        )
+        raise ValueError("u_prior_supervision='labels' requires a finite positive u_prior_label_weight.")
     if resolved_prior == "standard":
         raise ValueError(
             "u_prior_supervision='labels' requires u_prior='mog' or 'vamp'; "
@@ -174,10 +164,7 @@ def validate_count_matrix(matrix: Any, *, name: str, chunk_size: int = 1024) -> 
         if np.issubdtype(values.dtype, np.complexfloating):
             raise ValueError(f"{name} must contain real-valued raw counts, not complex values.")
         if values.dtype.kind not in {"b", "i", "u", "f"}:
-            raise ValueError(
-                f"{name} must use a real numeric dtype for raw counts; "
-                f"got {values.dtype}."
-            )
+            raise ValueError(f"{name} must use a real numeric dtype for raw counts; got {values.dtype}.")
         try:
             numeric = values.astype(np.float64, copy=False)
         except (TypeError, ValueError) as exc:
@@ -186,22 +173,15 @@ def validate_count_matrix(matrix: Any, *, name: str, chunk_size: int = 1024) -> 
         finite = np.isfinite(numeric)
         if not finite.all():
             local = int(np.flatnonzero(~finite)[0])
-            raise ValueError(
-                f"{name} contains a non-finite value at scanned offset {offset + local}."
-            )
+            raise ValueError(f"{name} contains a non-finite value at scanned offset {offset + local}.")
         non_negative = numeric >= 0.0
         if not non_negative.all():
             local = int(np.flatnonzero(~non_negative)[0])
-            raise ValueError(
-                f"{name} contains a negative value at scanned offset {offset + local}."
-            )
+            raise ValueError(f"{name} contains a negative value at scanned offset {offset + local}.")
         integer_like = np.isclose(numeric, np.rint(numeric), rtol=0.0, atol=1e-8)
         if not integer_like.all():
             local = int(np.flatnonzero(~integer_like)[0])
-            raise ValueError(
-                f"{name} contains a non-integer-like value at scanned offset "
-                f"{offset + local}."
-            )
+            raise ValueError(f"{name} contains a non-integer-like value at scanned offset {offset + local}.")
         offset += values.size
 
 
@@ -221,9 +201,7 @@ def validate_anndata_counts(
         rna = adata.layers[layer]
         rna_name = f"adata.layers[{layer!r}] RNA"
     if protein_expression_obsm_key not in adata.obsm:
-        raise KeyError(
-            f"Protein count matrix {protein_expression_obsm_key!r} is absent from adata.obsm."
-        )
+        raise KeyError(f"Protein count matrix {protein_expression_obsm_key!r} is absent from adata.obsm.")
     validate_count_matrix(rna, name=rna_name)
     validate_count_matrix(
         adata.obsm[protein_expression_obsm_key],
@@ -277,9 +255,7 @@ def authoritative_protein_names(
         if names.size == 0 or width == 0:
             raise ValueError("The authoritative protein axis must not be empty.")
         if names.size != width:
-            raise ValueError(
-                f"{source} has {names.size} entries but the matrix has {width} columns."
-            )
+            raise ValueError(f"{source} has {names.size} entries but the matrix has {width} columns.")
         normalized: list[str] = []
         for value in names.tolist():
             # Check the scalar type before any missingness predicate: pd.isna on
@@ -301,9 +277,7 @@ def authoritative_protein_names(
     uns_names = None
     if protein_names_uns_key is not None:
         if protein_names_uns_key not in adata.uns:
-            raise KeyError(
-                f"Protein-name authority {protein_names_uns_key!r} is absent from adata.uns."
-            )
+            raise KeyError(f"Protein-name authority {protein_names_uns_key!r} is absent from adata.uns.")
         uns_names = _validated_names(
             adata.uns[protein_names_uns_key],
             source=f"adata.uns[{protein_names_uns_key!r}]",
@@ -312,8 +286,7 @@ def authoritative_protein_names(
     if dataframe_names is not None and uns_names is not None:
         if not np.array_equal(dataframe_names, uns_names):
             raise ValueError(
-                "Protein names in DataFrame columns and protein_names_uns_key must "
-                "agree exactly in name and order."
+                "Protein names in DataFrame columns and protein_names_uns_key must agree exactly in name and order."
             )
         return dataframe_names
     if dataframe_names is not None:
@@ -349,10 +322,7 @@ def validate_sample_metadata(
     for key in requested_columns:
         missing_mask = obs[key].isna()
         if bool(missing_mask.any()):
-            raise ValueError(
-                f"Sample metadata column {key!r} contains null values at "
-                f"{int(missing_mask.sum())} cells."
-            )
+            raise ValueError(f"Sample metadata column {key!r} contains null values at {int(missing_mask.sum())} cells.")
 
     observed = list(pd.unique(obs[sample_key]))
     authority = list(authoritative_order) if authoritative_order is not None else observed

@@ -7,11 +7,11 @@ import scvi
 
 from mrtotalvi import MrTotalVI
 
-SETUP = dict(
-    protein_expression_obsm_key="protein_expression",
-    sample_key="sample",
-    batch_key="batch",
-)
+SETUP = {
+    "protein_expression_obsm_key": "protein_expression",
+    "sample_key": "sample",
+    "batch_key": "batch",
+}
 
 
 def _adata(n_samples: int = 4):
@@ -36,9 +36,7 @@ def test_load_query_data_with_new_samples_is_rejected(tmp_path):
     model.save(ref_dir, overwrite=True, save_anndata=False)
     query = adata.copy()
     # Mixed query: all four reference samples plus three new ones.
-    query.obs["sample"] = [
-        f"q{i % 3}" if i % 5 == 4 else f"s{i % 4}" for i in range(query.n_obs)
-    ]
+    query.obs["sample"] = [f"q{i % 3}" if i % 5 == 4 else f"s{i % 4}" for i in range(query.n_obs)]
     with pytest.raises(NotImplementedError, match=r"docs/user_guide\.md"):
         MrTotalVI.load_query_data(query, ref_dir)
 

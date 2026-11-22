@@ -6,9 +6,9 @@ import warnings
 
 import numpy as np
 import pytest
+import scvi
 import torch
 
-import scvi
 import mrtotalvi
 from mrtotalvi import MrTotalVI
 
@@ -199,9 +199,7 @@ def test_conflicting_plan_values_warn_without_changing_precedence(adata, monkeyp
 
 
 def test_matching_plan_values_do_not_warn(adata, monkeypatch):
-    model = MrTotalVI(
-        adata, sample_key="sample", u_prior="standard", empirical_protein_background_prior=False
-    )
+    model = MrTotalVI(adata, sample_key="sample", u_prior="standard", empirical_protein_background_prior=False)
     monkeypatch.setattr(model, "_train_runner_cls", lambda _model, **kwargs: lambda: None)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

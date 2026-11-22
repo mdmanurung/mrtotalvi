@@ -23,26 +23,18 @@ import h5py
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+import scvi
 import torch
 
-import scvi
 from mrtotalvi import MrTotalVI
 
 if TYPE_CHECKING:
     import xarray as xr
 
-EXPECTED_INPUT_SHA256 = (
-    "520ff544daae6192efd7f3501669e05b0122e6fbaf8e9de0246122cecd1de2da"
-)
-EXPECTED_PANEL_SHA256 = (
-    "90a467f72abe9b347784ceae0eeb1e4fb14476bbe65a3e736f77785f95cd4570"
-)
-EXPECTED_PROTEIN_ORDER_SHA256 = (
-    "09bbe2e870a7005d411b9557711266e7e8d4ac3d3a5e2804ddd658467873418b"
-)
-EXPECTED_GENE_ORDER_SHA256 = (
-    "2e2f27973e64360e839e896a7d955fc17ae4268485c519d721ea2baac96f681c"
-)
+EXPECTED_INPUT_SHA256 = "520ff544daae6192efd7f3501669e05b0122e6fbaf8e9de0246122cecd1de2da"
+EXPECTED_PANEL_SHA256 = "90a467f72abe9b347784ceae0eeb1e4fb14476bbe65a3e736f77785f95cd4570"
+EXPECTED_PROTEIN_ORDER_SHA256 = "09bbe2e870a7005d411b9557711266e7e8d4ac3d3a5e2804ddd658467873418b"
+EXPECTED_GENE_ORDER_SHA256 = "2e2f27973e64360e839e896a7d955fc17ae4268485c519d721ea2baac96f681c"
 SEED = 0
 N_GROUPS = 20
 CELLS_PER_GROUP = 25
@@ -73,8 +65,7 @@ def _parse_args() -> argparse.Namespace:
         "--panel-map",
         type=Path,
         default=Path(
-            "/exports/para-lipg-hpc/mdmanurung/schisto_citeseq/"
-            "analysis/adt-denoising/outputs/adt_panel_map.tsv"
+            "/exports/para-lipg-hpc/mdmanurung/schisto_citeseq/analysis/adt-denoising/outputs/adt_panel_map.tsv"
         ),
     )
     parser.add_argument(
@@ -186,10 +177,7 @@ def _assert_dataset_values_equal(
 def _decode_h5_strings(dataset: h5py.Dataset) -> np.ndarray:
     values = dataset[:]
     return np.asarray(
-        [
-            value.decode("utf-8") if isinstance(value, bytes) else str(value)
-            for value in values
-        ],
+        [value.decode("utf-8") if isinstance(value, bytes) else str(value) for value in values],
         dtype=str,
     )
 
@@ -225,19 +213,9 @@ def _read_h5_csr_subset(
         keep = mapped_columns >= 0
         output_indices.append(mapped_columns[keep])
         output_data.append(np.asarray(group["data"][start:stop])[keep])
-        output_indptr[output_row + 1] = (
-            output_indptr[output_row] + int(np.count_nonzero(keep))
-        )
-    indices = (
-        np.concatenate(output_indices)
-        if output_indices
-        else np.empty(0, dtype=np.int32)
-    )
-    data = (
-        np.concatenate(output_data)
-        if output_data
-        else np.empty(0, dtype=group["data"].dtype)
-    )
+        output_indptr[output_row + 1] = output_indptr[output_row] + int(np.count_nonzero(keep))
+    indices = np.concatenate(output_indices) if output_indices else np.empty(0, dtype=np.int32)
+    data = np.concatenate(output_data) if output_data else np.empty(0, dtype=group["data"].dtype)
     return sp.csr_matrix(
         (data, indices, output_indptr),
         shape=(rows.size, columns.size),
@@ -251,24 +229,14 @@ def _select_fixture(
     panel = pd.read_csv(panel_map_path, sep="\t")
     required_panel_columns = {"feature", "is_control"}
     if not required_panel_columns.issubset(panel.columns):
-        raise ValueError(
-            f"Panel map must contain {sorted(required_panel_columns)}."
-        )
-    is_control = panel["is_control"].map(
-        lambda value: str(value).strip().lower() in {"1", "true"}
-    )
+        raise ValueError(f"Panel map must contain {sorted(required_panel_columns)}.")
+    is_control = panel["is_control"].map(lambda value: str(value).strip().lower() in {"1", "true"})
     biological_proteins = panel.loc[~is_control, "feature"].astype(str).tolist()
     if len(biological_proteins) != N_PROTEINS:
-        raise ValueError(
-            f"Expected {N_PROTEINS} biological proteins, found "
-            f"{len(biological_proteins)}."
-        )
+        raise ValueError(f"Expected {N_PROTEINS} biological proteins, found {len(biological_proteins)}.")
     protein_hash = _sha256_lines(biological_proteins)
     if protein_hash != EXPECTED_PROTEIN_ORDER_SHA256:
-        raise ValueError(
-            "The ordered biological-protein selection does not match its "
-            "frozen SHA-256."
-        )
+        raise ValueError("The ordered biological-protein selection does not match its frozen SHA-256.")
 
     with h5py.File(input_h5ad, "r") as source:
         required_paths = {
@@ -292,29 +260,19 @@ def _select_fixture(
         source_groups = _read_h5_categorical(source["obs/donor_timepoint"])
         source_batches = _read_h5_categorical(source["obs/batch"])
         selected_timepoint = np.isin(source_timepoints, ["W00", "W22"])
-        selected_groups = sorted(
-            np.unique(source_groups[selected_timepoint]).astype(str).tolist()
-        )
+        selected_groups = sorted(np.unique(source_groups[selected_timepoint]).astype(str).tolist())
         if len(selected_groups) != N_GROUPS:
-            raise ValueError(
-                f"Expected {N_GROUPS} W00/W22 donor-timepoint groups, found "
-                f"{len(selected_groups)}."
-            )
+            raise ValueError(f"Expected {N_GROUPS} W00/W22 donor-timepoint groups, found {len(selected_groups)}.")
 
         selected_positions = []
         selection_rows = []
         for group in selected_groups:
             positions = np.flatnonzero(source_groups == group)
             if positions.size < CELLS_PER_GROUP:
-                raise ValueError(
-                    f"{group!r} has only {positions.size} cells; "
-                    f"{CELLS_PER_GROUP} are required."
-                )
+                raise ValueError(f"{group!r} has only {positions.size} cells; {CELLS_PER_GROUP} are required.")
             scored = sorted(
                 (
-                    hashlib.sha256(
-                        f"{SEED}\0{source_names[position]}".encode()
-                    ).hexdigest(),
+                    hashlib.sha256(f"{SEED}\0{source_names[position]}".encode()).hexdigest(),
                     int(position),
                 )
                 for position in positions
@@ -341,34 +299,22 @@ def _select_fixture(
         )
         hvg_positions = np.flatnonzero(hvg_2000)
         if hvg_positions.size != 2000:
-            raise ValueError(
-                f"Expected 2,000 stored Pearson-residual HVGs, found "
-                f"{hvg_positions.size}."
-            )
+            raise ValueError(f"Expected 2,000 stored Pearson-residual HVGs, found {hvg_positions.size}.")
         rank_order = np.lexsort((hvg_positions, hvg_rank[hvg_positions]))
         gene_positions = hvg_positions[rank_order[:N_GENES]]
         selected_genes = source_genes[gene_positions].tolist()
         gene_hash = _sha256_lines(selected_genes)
         if gene_hash != EXPECTED_GENE_ORDER_SHA256:
-            raise ValueError(
-                "The ordered 1,000-gene selection does not match its frozen "
-                "SHA-256."
-            )
+            raise ValueError("The ordered 1,000-gene selection does not match its frozen SHA-256.")
 
         protein_names = _decode_h5_strings(source["uns/protein_names"]).tolist()
         if len(protein_names) != len(set(protein_names)):
             raise ValueError("Input protein names are not unique.")
         protein_lookup = {name: index for index, name in enumerate(protein_names)}
-        missing_proteins = [
-            name for name in biological_proteins if name not in protein_lookup
-        ]
+        missing_proteins = [name for name in biological_proteins if name not in protein_lookup]
         if missing_proteins:
-            raise ValueError(
-                f"Panel-map proteins are absent from the input: {missing_proteins}."
-            )
-        protein_positions = [
-            protein_lookup[name] for name in biological_proteins
-        ]
+            raise ValueError(f"Panel-map proteins are absent from the input: {missing_proteins}.")
+        protein_positions = [protein_lookup[name] for name in biological_proteins]
 
         counts = _read_h5_csr_subset(
             source["layers/counts"],
@@ -420,9 +366,7 @@ def _select_fixture(
         dtype=object,
     )
 
-    counts_by_group = (
-        fixture.obs["donor_timepoint"].astype(str).value_counts().sort_index()
-    )
+    counts_by_group = fixture.obs["donor_timepoint"].astype(str).value_counts().sort_index()
     if (
         fixture.n_obs != N_GROUPS * CELLS_PER_GROUP
         or counts_by_group.shape[0] != N_GROUPS
@@ -434,14 +378,10 @@ def _select_fixture(
         "cell_selection": selection_rows,
         "selected_cell_order": fixture.obs_names.astype(str).tolist(),
         "selected_groups": selected_groups,
-        "group_counts": {
-            str(name): int(value) for name, value in counts_by_group.items()
-        },
+        "group_counts": {str(name): int(value) for name, value in counts_by_group.items()},
         "selected_genes": selected_genes,
         "selected_proteins": biological_proteins,
-        "selected_cell_order_sha256": _sha256_lines(
-            fixture.obs_names.astype(str).tolist()
-        ),
+        "selected_cell_order_sha256": _sha256_lines(fixture.obs_names.astype(str).tolist()),
         "selected_gene_order_sha256": gene_hash,
         "selected_protein_order_sha256": protein_hash,
     }
@@ -483,9 +423,7 @@ def _sample_blind_checks(model: MrTotalVI, tensors: dict) -> dict:
             atol=0.0,
         )
         if batch_index is None or model.summary_stats.n_batch < 2:
-            raise AssertionError(
-                "The engineering fixture needs at least two registered batches."
-            )
+            raise AssertionError("The engineering fixture needs at least two registered batches.")
         alternate_batch = (batch_index + 1) % int(model.summary_stats.n_batch)
         qu_other_batch = module.qu(
             x,
@@ -495,18 +433,12 @@ def _sample_blind_checks(model: MrTotalVI, tensors: dict) -> dict:
             cont_covs=cont_covs,
             cat_covs=cat_covs,
         )
-    technical_difference = float(
-        torch.max(torch.abs(qu_zero.loc - qu_other_batch.loc)).cpu()
-    )
+    technical_difference = float(torch.max(torch.abs(qu_zero.loc - qu_other_batch.loc)).cpu())
     if technical_difference <= 0.0:
         raise AssertionError("Declared batch covariates do not affect sample-blind u.")
     return {
-        "sample_loc_max_abs_difference": float(
-            torch.max(torch.abs(qu_zero.loc - qu_one.loc)).cpu()
-        ),
-        "sample_scale_max_abs_difference": float(
-            torch.max(torch.abs(qu_zero.scale - qu_one.scale)).cpu()
-        ),
+        "sample_loc_max_abs_difference": float(torch.max(torch.abs(qu_zero.loc - qu_one.loc)).cpu()),
+        "sample_scale_max_abs_difference": float(torch.max(torch.abs(qu_zero.scale - qu_one.scale)).cpu()),
         "technical_batch_loc_max_abs_difference": technical_difference,
     }
 
@@ -524,10 +456,7 @@ def _forward_backward_checks(model: MrTotalVI, tensors: dict) -> dict:
     loss_output.loss.backward()
     elapsed = time.perf_counter() - started
     if elapsed > FORWARD_BACKWARD_LIMIT_SECONDS:
-        raise AssertionError(
-            f"Forward/backward took {elapsed:.3f}s, exceeding "
-            f"{FORWARD_BACKWARD_LIMIT_SECONDS:.0f}s."
-        )
+        raise AssertionError(f"Forward/backward took {elapsed:.3f}s, exceeding {FORWARD_BACKWARD_LIMIT_SECONDS:.0f}s.")
     if not torch.isfinite(loss_output.loss):
         raise AssertionError("Forward/backward produced a non-finite loss.")
 
@@ -535,15 +464,8 @@ def _forward_backward_checks(model: MrTotalVI, tensors: dict) -> dict:
     if embedding_gradient is None:
         raise AssertionError("The registered residual embedding has no gradient.")
     row_norms = embedding_gradient.norm(dim=1)
-    if (
-        row_norms.shape[0] != N_GROUPS
-        or not torch.isfinite(row_norms).all()
-        or torch.any(row_norms <= 0)
-    ):
-        raise AssertionError(
-            "Every registered residual embedding row must have a finite, "
-            "nonzero gradient."
-        )
+    if row_norms.shape[0] != N_GROUPS or not torch.isfinite(row_norms).all() or torch.any(row_norms <= 0):
+        raise AssertionError("Every registered residual embedding row must have a finite, nonzero gradient.")
     conditioning_parameters = (
         module.qu.cond_norm1.gamma_embedding.weight,
         module.qu.cond_norm1.beta_embedding.weight,
@@ -554,33 +476,19 @@ def _forward_backward_checks(model: MrTotalVI, tensors: dict) -> dict:
     conditioning_nonzero = []
     for parameter in conditioning_parameters:
         gradient = parameter.grad
-        conditioning_nonzero.append(
-            0 if gradient is None else int(torch.count_nonzero(gradient).cpu())
-        )
+        conditioning_nonzero.append(0 if gradient is None else int(torch.count_nonzero(gradient).cpu()))
     if any(conditioning_nonzero):
-        raise AssertionError(
-            "Sample-conditioning parameters received gradients in sample-blind mode."
-        )
+        raise AssertionError("Sample-conditioning parameters received gradients in sample-blind mode.")
     core_gradient = module.qu.fc1.weight.grad
-    if (
-        core_gradient is None
-        or not torch.isfinite(core_gradient).all()
-        or torch.count_nonzero(core_gradient) == 0
-    ):
+    if core_gradient is None or not torch.isfinite(core_gradient).all() or torch.count_nonzero(core_gradient) == 0:
         raise AssertionError("The sample-blind encoder core lacks a valid gradient.")
     return {
         "seconds": elapsed,
         "loss": float(loss_output.loss.detach().cpu()),
-        "residual_embedding_gradient_row_norms": row_norms.detach()
-        .cpu()
-        .tolist(),
+        "residual_embedding_gradient_row_norms": row_norms.detach().cpu().tolist(),
         "sample_conditioning_nonzero_gradient_counts": conditioning_nonzero,
-        "core_nonzero_gradient_count": int(
-            torch.count_nonzero(core_gradient).cpu()
-        ),
-        "inference_eps_raw_shape": list(
-            inference_outputs["eps_raw_all"].shape
-        ),
+        "core_nonzero_gradient_count": int(torch.count_nonzero(core_gradient).cpu()),
+        "inference_eps_raw_shape": list(inference_outputs["eps_raw_all"].shape),
     }
 
 
@@ -634,9 +542,7 @@ def _target_chunk_checks(model: MrTotalVI, tensors: dict) -> dict:
                 atol=ENGINEERING_CHUNK_ATOL,
             )
         for name in ("u_gradient", "embedding_gradient"):
-            difference = float(
-                torch.max(torch.abs(actual[name] - expected[name]))
-            )
+            difference = float(torch.max(torch.abs(actual[name] - expected[name])))
             maximum_gradient_difference = max(
                 maximum_gradient_difference,
                 difference,
@@ -649,21 +555,10 @@ def _target_chunk_checks(model: MrTotalVI, tensors: dict) -> dict:
             )
 
     _, eps_raw, eps_centered, z_all = expected["outputs"]
-    centering_error = float(
-        torch.max(torch.abs(eps_centered.mean(dim=1)))
-    )
-    pairwise_error = float(
-        torch.max(
-            torch.abs(
-                (z_all[:, 0] - z_all[:, -1])
-                - (eps_raw[:, 0] - eps_raw[:, -1])
-            )
-        )
-    )
+    centering_error = float(torch.max(torch.abs(eps_centered.mean(dim=1))))
+    pairwise_error = float(torch.max(torch.abs((z_all[:, 0] - z_all[:, -1]) - (eps_raw[:, 0] - eps_raw[:, -1]))))
     if centering_error > 1e-6 or pairwise_error > 1e-6:
-        raise AssertionError(
-            "Centered or pairwise hierarchy identities exceed 1e-6."
-        )
+        raise AssertionError("Centered or pairwise hierarchy identities exceed 1e-6.")
     return {
         "target_chunk_sizes": list(TARGET_CHUNKS),
         "comparison_rtol": ENGINEERING_CHUNK_RTOL,
@@ -706,15 +601,9 @@ def _run(args: argparse.Namespace, temporary: Path) -> tuple[str, dict]:
     input_hash = _sha256_file(args.input_h5ad)
     panel_hash = _sha256_file(args.panel_map)
     if input_hash != EXPECTED_INPUT_SHA256:
-        raise ValueError(
-            f"Input H5AD SHA-256 is {input_hash}, expected "
-            f"{EXPECTED_INPUT_SHA256}."
-        )
+        raise ValueError(f"Input H5AD SHA-256 is {input_hash}, expected {EXPECTED_INPUT_SHA256}.")
     if panel_hash != EXPECTED_PANEL_SHA256:
-        raise ValueError(
-            f"Panel-map SHA-256 is {panel_hash}, expected "
-            f"{EXPECTED_PANEL_SHA256}."
-        )
+        raise ValueError(f"Panel-map SHA-256 is {panel_hash}, expected {EXPECTED_PANEL_SHA256}.")
 
     fixture, selection = _select_fixture(args.input_h5ad, args.panel_map)
     _write_lines(
@@ -808,14 +697,8 @@ def _run(args: argparse.Namespace, temporary: Path) -> tuple[str, dict]:
     latent = latent_outputs[N_GROUPS]
     np.savez_compressed(
         temporary / "latent_output.npz",
-        **{
-            f"coord__{name}": coordinate.to_numpy()
-            for name, coordinate in latent.coords.items()
-        },
-        **{
-            f"variable__{name}": variable.to_numpy()
-            for name, variable in latent.data_vars.items()
-        },
+        **{f"coord__{name}": coordinate.to_numpy() for name, coordinate in latent.coords.items()},
+        **{f"variable__{name}": variable.to_numpy() for name, variable in latent.data_vars.items()},
     )
 
     checkpoint = temporary / "checkpoint"
@@ -873,19 +756,13 @@ def _run(args: argparse.Namespace, temporary: Path) -> tuple[str, dict]:
     peak_rss = _max_rss_bytes()
     rss_increase = max(0, peak_rss - initial_rss)
     if smoke_seconds > FULL_SMOKE_LIMIT_SECONDS:
-        raise AssertionError(
-            f"Full smoke took {smoke_seconds:.3f}s, exceeding "
-            f"{FULL_SMOKE_LIMIT_SECONDS:.0f}s."
-        )
+        raise AssertionError(f"Full smoke took {smoke_seconds:.3f}s, exceeding {FULL_SMOKE_LIMIT_SECONDS:.0f}s.")
     if rss_increase >= RSS_INCREASE_LIMIT_BYTES:
         raise AssertionError(
-            f"Peak RSS increased by {rss_increase} bytes, exceeding the "
-            f"{RSS_INCREASE_LIMIT_BYTES}-byte limit."
+            f"Peak RSS increased by {rss_increase} bytes, exceeding the {RSS_INCREASE_LIMIT_BYTES}-byte limit."
         )
 
-    source_hashes = {
-        path.as_posix(): _sha256_file(path) for path in _package_sources()
-    }
+    source_hashes = {path.as_posix(): _sha256_file(path) for path in _package_sources()}
     configuration = {
         "scope": "historical human comparator engineering fixture only",
         "scientific_status": "not canonical, not QC-pass, not biological validation",
@@ -952,16 +829,13 @@ def _run(args: argparse.Namespace, temporary: Path) -> tuple[str, dict]:
     metrics = {
         "status": "pass",
         "interpretation": (
-            "Bounded package engineering evidence only; no biological, QC, "
-            "causal, comparative, or promotion claim."
+            "Bounded package engineering evidence only; no biological, QC, causal, comparative, or promotion claim."
         ),
         "training_seconds": training_seconds,
         "forward_backward": forward_backward,
         "sample_blind": sample_blind,
         "target_chunks": target_chunks,
-        "latent_dataset_sha256": _dataset_sha256(
-            checkpoint_reference_latent
-        ),
+        "latent_dataset_sha256": _dataset_sha256(checkpoint_reference_latent),
         "loaded_latent_dataset_sha256": _dataset_sha256(loaded_latent),
         "expression_dataset_sha256": _dataset_sha256(expression),
         "zarr_expression_dataset_sha256": _dataset_sha256(expression_from_zarr),
@@ -978,13 +852,9 @@ def _run(args: argparse.Namespace, temporary: Path) -> tuple[str, dict]:
             "peak_rss_increase_bytes": RSS_INCREASE_LIMIT_BYTES,
         },
     }
-    if metrics["latent_dataset_sha256"] != metrics[
-        "loaded_latent_dataset_sha256"
-    ]:
+    if metrics["latent_dataset_sha256"] != metrics["loaded_latent_dataset_sha256"]:
         raise AssertionError("Save/load changed the latent dataset digest.")
-    if metrics["expression_dataset_sha256"] != metrics[
-        "zarr_expression_dataset_sha256"
-    ]:
+    if metrics["expression_dataset_sha256"] != metrics["zarr_expression_dataset_sha256"]:
         raise AssertionError("Zarr storage changed the expression dataset digest.")
     _write_json(temporary / "validation_metrics.json", metrics)
     return input_hash[:8], metrics
@@ -1005,9 +875,7 @@ def main() -> None:
         run_name = f"{timestamp}-seed0-{input_tag}"
         destination = args.output_root / run_name
         if destination.exists():
-            raise FileExistsError(
-                f"Refusing to overwrite engineering run {destination}."
-            )
+            raise FileExistsError(f"Refusing to overwrite engineering run {destination}.")
         checksum_lines = _artifact_checksums(temporary)
         _write_lines(temporary / "checksums.sha256", checksum_lines)
         os.replace(temporary, destination)
@@ -1017,9 +885,7 @@ def main() -> None:
                     "run_directory": str(destination.resolve()),
                     "status": metrics["status"],
                     "full_smoke_seconds": metrics["full_smoke_seconds"],
-                    "peak_rss_increase_bytes": metrics[
-                        "peak_rss_increase_bytes"
-                    ],
+                    "peak_rss_increase_bytes": metrics["peak_rss_increase_bytes"],
                 },
                 sort_keys=True,
             ),
@@ -1036,9 +902,7 @@ def main() -> None:
         )
         failed = args.output_root / f"{timestamp}-failed"
         if failed.exists():
-            failed = args.output_root / (
-                f"{timestamp}-failed-{hashlib.sha256(str(error).encode()).hexdigest()[:8]}"
-            )
+            failed = args.output_root / (f"{timestamp}-failed-{hashlib.sha256(str(error).encode()).hexdigest()[:8]}")
         os.replace(temporary, failed)
         raise
 

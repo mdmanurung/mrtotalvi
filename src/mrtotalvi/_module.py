@@ -8,13 +8,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal, kl_divergence
-
 from scvi import REGISTRY_KEYS
 from scvi.module._constants import MODULE_KEYS
 from scvi.module._totalvae import TOTALVAE
 from scvi.module.base import EmbeddingModuleMixin, LossOutput, auto_move_data
 from scvi.nn import DecoderTOTALVI
+from torch.distributions import Normal, kl_divergence
 
 from ._components import (
     BatchEmbeddingDecoderAdapter,
@@ -157,9 +156,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if u_prior_supervision not in {"none", "labels"}:
             raise ValueError("u_prior_supervision must be one of {'none', 'labels'}.")
         if u_prior_supervision == "none" and float(u_prior_label_weight) != 0.0:
-            raise ValueError(
-                "u_prior_supervision='none' requires u_prior_label_weight=0.0."
-            )
+            raise ValueError("u_prior_supervision='none' requires u_prior_label_weight=0.0.")
 
         n_continuous_cov = kwargs.get("n_continuous_cov", 0)
         n_cats_per_cov = kwargs.get("n_cats_per_cov", None)
@@ -209,25 +206,20 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if self.u_invariance_weight < 0:
             raise ValueError("u_invariance_weight must be >= 0.")
         if u_invariance_mode not in {"counterfactual", "dropout_consistency"}:
-            raise ValueError(
-                "u_invariance_mode must be 'counterfactual' or 'dropout_consistency'."
-            )
+            raise ValueError("u_invariance_mode must be 'counterfactual' or 'dropout_consistency'.")
         self.u_invariance_mode = u_invariance_mode
-        if self.u_invariance_weight > 0 and (
-            hierarchy_mode != "legacy" or u_encoder_mode != "sample_blind"
-        ):
-            raise ValueError(
-                "u_invariance_weight > 0 needs hierarchy_mode='legacy' and "
-                "u_encoder_mode='sample_blind'."
-            )
+        if self.u_invariance_weight > 0 and (hierarchy_mode != "legacy" or u_encoder_mode != "sample_blind"):
+            raise ValueError("u_invariance_weight > 0 needs hierarchy_mode='legacy' and u_encoder_mode='sample_blind'.")
         # Apply the eps sample-embedding prior after layer_norm_embed (closes the LayerNorm
         # loophole: a raw-table prior can be undone by shrinking the free across-sample mean).
         self.sample_embedding_prior_post_ln = bool(sample_embedding_prior_post_ln)
         self.n_continuous_cov = int(n_continuous_cov)
         self.n_cats_per_cov = list(n_cats_per_cov or [])
         self.qu_encode_covariates = bool(qu_encode_covariates)
-        if u_prior == "vamp" and self.qu_encode_covariates and (
-            self.n_continuous_cov > 0 or len(self.n_cats_per_cov) > 0
+        if (
+            u_prior == "vamp"
+            and self.qu_encode_covariates
+            and (self.n_continuous_cov > 0 or len(self.n_cats_per_cov) > 0)
         ):
             raise ValueError(
                 "u_prior='vamp' cannot be combined with encode_covariates=True and "
@@ -244,9 +236,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.batch_representation = batch_representation
         self._batch_dim: int | None = None
         if batch_representation == "embedding":
-            self.init_embedding(
-                REGISTRY_KEYS.BATCH_KEY, self.n_batch, **(batch_embedding_kwargs or {})
-            )
+            self.init_embedding(REGISTRY_KEYS.BATCH_KEY, self.n_batch, **(batch_embedding_kwargs or {}))
             self._batch_dim = self.get_embedding(REGISTRY_KEYS.BATCH_KEY).embedding_dim
             self._rebuild_decoder_for_batch_embedding(self._batch_dim, kwargs)
         elif batch_representation != "one-hot":
@@ -381,9 +371,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if hierarchy_mode not in {"legacy", "centered_v2"}:
             raise ValueError("hierarchy_mode must be one of {'legacy', 'centered_v2'}.")
         if u_encoder_mode not in {"sample_conditioned", "sample_blind"}:
-            raise ValueError(
-                "u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}."
-            )
+            raise ValueError("u_encoder_mode must be one of {'sample_conditioned', 'sample_blind'}.")
         if hierarchy_mode == "centered_v2" and not use_map:
             raise ValueError("hierarchy_mode='centered_v2' requires use_map=True.")
         if hierarchy_mode == "centered_v2" and not self.z_u_prior:
@@ -397,11 +385,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if n_labels is not None:
             self.n_labels = int(n_labels)
 
-        n_latent_u = (
-            self.n_latent
-            if self._n_latent_u_requested is None
-            else int(self._n_latent_u_requested)
-        )
+        n_latent_u = self.n_latent if self._n_latent_u_requested is None else int(self._n_latent_u_requested)
 
         # Mode-selectable u-encoder: the legacy default is sample-conditioned.
         # Explicitly registered technical covariates remain available when
@@ -445,9 +429,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         )
 
         if learn_z_u_prior_scale:
-            self.pz_scale = nn.Parameter(
-                torch.full((self.n_latent,), float(z_u_prior_scale))
-            )
+            self.pz_scale = nn.Parameter(torch.full((self.n_latent,), float(z_u_prior_scale)))
         else:
             self.register_buffer(
                 "pz_scale",
@@ -475,33 +457,22 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             ("sample_embedding_prior_scale", sample_embedding_prior_scale),
             ("u_encoder_sample_embedding_prior_scale", u_encoder_sample_embedding_prior_scale),
         ):
-            if value is not None and (
-                isinstance(value, bool)
-                or not np.isfinite(float(value))
-                or float(value) <= 0.0
-            ):
+            if value is not None and (isinstance(value, bool) or not np.isfinite(float(value)) or float(value) <= 0.0):
                 raise ValueError(f"{name} must be None or a finite positive float.")
-        if u_encoder_sample_embedding_prior_scale is not None and (
-            self.u_encoder_mode != "sample_conditioned"
-        ):
+        if u_encoder_sample_embedding_prior_scale is not None and (self.u_encoder_mode != "sample_conditioned"):
             raise ValueError(
                 "u_encoder_sample_embedding_prior_scale requires "
                 "u_encoder_mode='sample_conditioned'; the sample_blind u encoder has "
                 "no sample tables."
             )
-        active = (
-            sample_embedding_prior_scale is not None
-            or u_encoder_sample_embedding_prior_scale is not None
-        )
+        active = sample_embedding_prior_scale is not None or u_encoder_sample_embedding_prior_scale is not None
         if active and (n_obs_total is None or float(n_obs_total) <= 0.0):
             raise ValueError("A sample-embedding prior needs n_obs_total > 0.")
         self.sample_embedding_prior_scale = (
             None if sample_embedding_prior_scale is None else float(sample_embedding_prior_scale)
         )
         self.u_encoder_sample_embedding_prior_scale = (
-            None
-            if u_encoder_sample_embedding_prior_scale is None
-            else float(u_encoder_sample_embedding_prior_scale)
+            None if u_encoder_sample_embedding_prior_scale is None else float(u_encoder_sample_embedding_prior_scale)
         )
         self._n_obs_total = None if n_obs_total is None else float(n_obs_total)
 
@@ -531,10 +502,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             if self.sample_embedding_prior_post_ln:
                 table = self.qz.layer_norm_embed(table)
             terms.append(self._centered_sq_norm(table) / (2.0 * sigma**2))
-        if (
-            self.u_encoder_sample_embedding_prior_scale is not None
-            and self.u_encoder_mode == "sample_conditioned"
-        ):
+        if self.u_encoder_sample_embedding_prior_scale is not None and self.u_encoder_mode == "sample_conditioned":
             sigma = self.u_encoder_sample_embedding_prior_scale
             tables = [
                 self.qu.sample_embed.weight,
@@ -562,11 +530,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         x_p = pseudo[:, : self.n_input_genes]
         y_p = pseudo[:, self.n_input_genes :]
         sample_idx = torch.zeros(K, 1, device=pseudo.device, dtype=torch.long)
-        batch_idx = (
-            torch.zeros(K, 1, device=pseudo.device, dtype=torch.long)
-            if self.qu_encode_covariates
-            else None
-        )
+        batch_idx = torch.zeros(K, 1, device=pseudo.device, dtype=torch.long) if self.qu_encode_covariates else None
         return self.qu(
             x_p,
             y_p,
@@ -579,9 +543,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     # DataLoader → inference plumbing
     # ------------------------------------------------------------------
 
-    def _get_inference_input(
-        self, tensors: dict[str, torch.Tensor]
-    ) -> dict[str, torch.Tensor]:
+    def _get_inference_input(self, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Extend TotalVI's inference input with the sample index.
 
         The ``SAMPLE_KEY`` tensor is added unconditionally; it is present in
@@ -602,11 +564,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         n_sample = int(self._n_sample)
         if target_chunk_size is None:
             target_chunk_size = n_sample
-        if (
-            isinstance(target_chunk_size, bool)
-            or not isinstance(target_chunk_size, int)
-            or target_chunk_size < 1
-        ):
+        if isinstance(target_chunk_size, bool) or not isinstance(target_chunk_size, int) or target_chunk_size < 1:
             raise ValueError("target_chunk_size must be a positive integer or None.")
 
         sample_dim = 1 if u.ndim == 2 else 2
@@ -619,15 +577,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             if u.ndim == 2:
                 n_cells, n_latent_u = u.shape
                 expanded_u = (
-                    u.unsqueeze(1)
-                    .expand(n_cells, n_targets, n_latent_u)
-                    .reshape(n_cells * n_targets, n_latent_u)
+                    u.unsqueeze(1).expand(n_cells, n_targets, n_latent_u).reshape(n_cells * n_targets, n_latent_u)
                 )
-                expanded_targets = (
-                    targets.unsqueeze(0)
-                    .expand(n_cells, n_targets)
-                    .reshape(n_cells * n_targets, 1)
-                )
+                expanded_targets = targets.unsqueeze(0).expand(n_cells, n_targets).reshape(n_cells * n_targets, 1)
                 chunk_z_base, chunk_raw, _ = self.qz(expanded_u, expanded_targets)
                 chunk_z_base = chunk_z_base.reshape(n_cells, n_targets, self.n_latent)
                 chunk_raw = chunk_raw.reshape(n_cells, n_targets, self.n_latent)
@@ -638,18 +590,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                     .expand(n_draws, n_cells, n_targets, n_latent_u)
                     .reshape(n_draws, n_cells * n_targets, n_latent_u)
                 )
-                expanded_targets = (
-                    targets.unsqueeze(0)
-                    .expand(n_cells, n_targets)
-                    .reshape(n_cells * n_targets, 1)
-                )
+                expanded_targets = targets.unsqueeze(0).expand(n_cells, n_targets).reshape(n_cells * n_targets, 1)
                 chunk_z_base, chunk_raw, _ = self.qz(expanded_u, expanded_targets)
-                chunk_z_base = chunk_z_base.reshape(
-                    n_draws, n_cells, n_targets, self.n_latent
-                )
-                chunk_raw = chunk_raw.reshape(
-                    n_draws, n_cells, n_targets, self.n_latent
-                )
+                chunk_z_base = chunk_z_base.reshape(n_draws, n_cells, n_targets, self.n_latent)
+                chunk_raw = chunk_raw.reshape(n_draws, n_cells, n_targets, self.n_latent)
             else:
                 raise ValueError("u must have shape (cell, latent) or (draw, cell, latent).")
 
@@ -672,13 +616,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         """Gather one registered sample per cell from an all-sample tensor."""
         sample_index = sample_index.to(device=values.device, dtype=torch.int64).flatten()
         if values.ndim == 3:
-            gather_index = sample_index[:, None, None].expand(
-                -1, 1, values.shape[-1]
-            )
+            gather_index = sample_index[:, None, None].expand(-1, 1, values.shape[-1])
             return values.gather(1, gather_index).squeeze(1)
-        gather_index = sample_index[None, :, None, None].expand(
-            values.shape[0], -1, 1, values.shape[-1]
-        )
+        gather_index = sample_index[None, :, None, None].expand(values.shape[0], -1, 1, values.shape[-1])
         return values.gather(2, gather_index).squeeze(2)
 
     # ------------------------------------------------------------------
@@ -731,7 +671,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # TotalVI encoder pass — we keep ql, library_gene, back_mean_prior, dispersions.
         # Its qz and z are discarded and replaced below.
         out = super()._regular_inference(
-            x, y,
+            x,
+            y,
             batch_index=batch_index,
             panel_index=panel_index,
             label=label,
@@ -877,17 +818,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             torch.tensor([0.0], device=x.device),
             torch.tensor([1.0], device=x.device),
         ).log_prob(per_batch_efficiency)
-        lkl_protein_expressed = -1e-3 * torch.distributions.Bernoulli(
-            logits=py_["mixing"]
-        ).log_prob(torch.ones_like(py_["mixing"]))
+        lkl_protein_expressed = -1e-3 * torch.distributions.Bernoulli(logits=py_["mixing"]).log_prob(
+            torch.ones_like(py_["mixing"])
+        )
         if pro_batch_mask_minibatch is not None:
             while pro_batch_mask_minibatch.ndim < kl_div_back_pro_full.ndim:
                 pro_batch_mask_minibatch = pro_batch_mask_minibatch.unsqueeze(0)
             kl_div_back_pro_full = pro_batch_mask_minibatch.bool() * kl_div_back_pro_full
         kl_div_back_pro = (
-            kl_div_back_pro_full.sum(dim=-1)
-            + lkl_back_pro_full.sum(dim=-1)
-            + lkl_protein_expressed.sum(dim=-1)
+            kl_div_back_pro_full.sum(dim=-1) + lkl_back_pro_full.sum(dim=-1) + lkl_protein_expressed.sum(dim=-1)
         )
 
         # loss() rebuilds the training loss from the per-cell terms below, so this
@@ -1013,8 +952,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             )
         else:
             loss_out = super().loss(
-                tensors, inference_outputs, generative_outputs,
-                pro_recons_weight, kl_weight,
+                tensors,
+                inference_outputs,
+                generative_outputs,
+                pro_recons_weight,
+                kl_weight,
             )
 
         protein_weight = kl_weight if self.anneal_protein_likelihood else 1.0
@@ -1073,9 +1015,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             prefactors = self.n_obs_per_sample[sample_index]  # (batch,)
             per_cell = (
                 loss_out.reconstruction_loss["reconst_loss_gene"]
-                + protein_weight
-                * pro_recons_weight
-                * loss_out.reconstruction_loss["reconst_loss_protein"]
+                + protein_weight * pro_recons_weight * loss_out.reconstruction_loss["reconst_loss_protein"]
                 + kl_weight * kl_local["kl_div_z"]
                 + kl_local["kl_div_l_gene"]
                 + kl_weight * kl_local["kl_div_back_pro"]
@@ -1088,6 +1028,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         else:
             if self._scale_observations:
                 import warnings
+
                 warnings.warn(
                     "scale_observations=True but n_obs_per_sample is None "
                     "(buffer was not restored after load). "
@@ -1097,9 +1038,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 )
             loss = (
                 loss_out.reconstruction_loss["reconst_loss_gene"]
-                + protein_weight * pro_recons_weight * loss_out.reconstruction_loss[
-                    "reconst_loss_protein"
-                ]
+                + protein_weight * pro_recons_weight * loss_out.reconstruction_loss["reconst_loss_protein"]
                 + kl_weight * kl_local["kl_div_z"]
                 + kl_local["kl_div_l_gene"]
                 + kl_weight * kl_local["kl_div_back_pro"]
@@ -1190,7 +1129,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 # Clone out of inference mode so the encoder pass below can be differentiated.
                 decoded.append((dec["rna_rate"].clone(), dec["protein_total_mean"].clone()))
         finally:
-            for net, flag in zip(nets, was_training):
+            for net, flag in zip(nets, was_training, strict=True):
                 net.train(flag)
         qu_batch_index = batch_index if self.qu_encode_covariates else None
         means = [
@@ -1221,11 +1160,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             decoder_input = z
         else:
             decoder_input = torch.cat([z, cont_covs], dim=-1)
-        categorical_input = (
-            tuple(torch.split(cat_covs, 1, dim=1))
-            if cat_covs is not None
-            else ()
-        )
+        categorical_input = tuple(torch.split(cat_covs, 1, dim=1)) if cat_covs is not None else ()
         decoder = self.decoder
 
         # Under `batch_representation="embedding"` the wrapped decoder was built without
@@ -1434,6 +1369,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             # path) or when no aux cache is available.
             if u_anchor is None:
                 import warnings
+
                 warnings.warn(
                     "compute_h_from_x_eps called without u_anchor: falling back to "
                     "qu.mean, which produces Jensen-biased LFC estimates. Pass "
@@ -1458,7 +1394,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             library_gene = out["library_gene"]
 
         z_base, _, _ = self.qz(u, sample_index_cf)
-        z = z_base + extra_eps      # counterfactual latent
+        z = z_base + extra_eps  # counterfactual latent
 
         gen_out = self.generative(
             z=z,
@@ -1482,12 +1418,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # background noise that does NOT cancel in the LFC.  Fix: use the
         # log-mean back_alpha directly (exp of the Gaussian mean) as a
         # deterministic background stand-in.
-        rate_back_det = torch.exp(py_["back_alpha"])          # (batch, n_proteins)
-        rate_fore_det = rate_back_det * py_["fore_scale"]     # fore_scale is deterministic
+        rate_back_det = torch.exp(py_["back_alpha"])  # (batch, n_proteins)
+        rate_fore_det = rate_back_det * py_["fore_scale"]  # fore_scale is deterministic
         # py_["mixing"] is a raw logit; sigmoid → mixing probability.
         protein_mixing_det = torch.sigmoid(py_["mixing"])
-        py_scale_det = F.normalize(
-            (1.0 - protein_mixing_det) * rate_fore_det, p=1, dim=-1
-        )  # (batch, n_proteins)
+        py_scale_det = F.normalize((1.0 - protein_mixing_det) * rate_fore_det, p=1, dim=-1)  # (batch, n_proteins)
 
-        return torch.cat([px_scale, py_scale_det], dim=-1)   # (batch, n_genes + n_proteins)
+        return torch.cat([px_scale, py_scale_det], dim=-1)  # (batch, n_genes + n_proteins)

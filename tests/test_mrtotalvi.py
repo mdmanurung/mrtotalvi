@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, "src")
 
 import scvi
+
 from mrtotalvi import MrTotalVI
 from tests._utils import get_elbo_key
 
@@ -69,6 +70,7 @@ def adata_shifted():
 # Helper: build + train MrTotalVI
 # ---------------------------------------------------------------------------
 
+
 def _setup_and_train(adata, max_epochs: int = MAX_EPOCHS_QUICK, **model_kwargs) -> MrTotalVI:
     MrTotalVI.setup_anndata(
         adata,
@@ -90,6 +92,7 @@ def _setup_and_train(adata, max_epochs: int = MAX_EPOCHS_QUICK, **model_kwargs) 
 # (a) Smoke test — finite ELBO + counterfactual paths
 # ---------------------------------------------------------------------------
 
+
 def test_smoke_trains_finite_elbo(adata_basic):
     """Training finishes with a finite ELBO and no NaN gradients.
 
@@ -110,9 +113,7 @@ def test_smoke_trains_finite_elbo(adata_basic):
             assert np.all(np.isfinite(vals)), f"{key} contains non-finite: {vals}"
             found_key = key
             break  # one key is sufficient
-    assert found_key is not None, (
-        f"No ELBO history key found. Available: {list(history.keys())}"
-    )
+    assert found_key is not None, f"No ELBO history key found. Available: {list(history.keys())}"
 
     # give_z=True returns z = z_base + eps (donor-aware);
     # give_z=False returns u (donor-unaware).
@@ -336,9 +337,7 @@ def test_mrtotalvi_mc_samples_with_size_factor_and_protein_batch_mask(adata_basi
     batch_size = tensors[scvi.REGISTRY_KEYS.X_KEY].shape[0]
     # The MC dimension is averaged, so every per-cell term has shape (batch,); the old
     # (n_samples, batch) shape made LossOutput read n_samples as n_obs_minibatch.
-    assert loss_out.reconstruction_loss["reconst_loss_protein"].shape == torch.Size(
-        [batch_size]
-    )
+    assert loss_out.reconstruction_loss["reconst_loss_protein"].shape == torch.Size([batch_size])
     assert loss_out.n_obs_minibatch == batch_size
     assert loss_out.kl_local["kl_div_z"].shape == torch.Size([batch_size])
     assert torch.isfinite(loss_out.loss)
@@ -494,9 +493,7 @@ def test_mrtotalvi_encode_covariates_expands_qu_input(adata_basic):
 
 
 @pytest.mark.parametrize("covariate_kind", ["categorical", "continuous", "both"])
-def test_mrtotalvi_registered_covariates_with_default_encode_covariates(
-    adata_basic, covariate_kind
-):
+def test_mrtotalvi_registered_covariates_with_default_encode_covariates(adata_basic, covariate_kind):
     """Registered covariates must not crash a default (encode_covariates unset) fit.
 
     TOTALVAE builds its library encoder for covariates when the flag is unset, so
@@ -528,9 +525,7 @@ def test_mrtotalvi_registered_covariates_with_default_encode_covariates(
 
 
 @pytest.mark.parametrize("embedding_dim", [2, 5])
-def test_mrtotalvi_encode_u_params_matches_training_qu_with_batch_embedding(
-    adata_basic, embedding_dim
-):
+def test_mrtotalvi_encode_u_params_matches_training_qu_with_batch_embedding(adata_basic, embedding_dim):
     """The u-parameter helper must feed qu the same batch embedding as inference.
 
     embedding_dim == n_batch (2 here) used to run with a one-hot batch and return a
@@ -557,9 +552,7 @@ def test_mrtotalvi_encode_u_params_matches_training_qu_with_batch_embedding(
 
     indices = np.arange(adata.n_obs)
     loc, _, _ = _encode_u_params(model, adata, indices, batch_size=128)
-    expected = model.get_latent_representation(
-        indices=indices, give_mean=True, give_z=False, batch_size=128
-    )
+    expected = model.get_latent_representation(indices=indices, give_mean=True, give_z=False, batch_size=128)
     np.testing.assert_allclose(loc, expected, rtol=1e-4, atol=1e-5)
 
 
@@ -618,26 +611,18 @@ def test_mrtotalvi_cell_names_follow_row_order_of_reordered_and_subset_adata(ada
     reordered = adata[adata.obs_names[::-1]].copy()
     rev = model.get_local_sample_representation(adata=reordered, use_mean=True)
     assert list(rev.coords["cell_name"].values) == list(reordered.obs_names)
-    np.testing.assert_allclose(
-        rev.sel(cell_name=list(adata.obs_names)).values, full.values, rtol=1e-4, atol=1e-5
-    )
+    np.testing.assert_allclose(rev.sel(cell_name=list(adata.obs_names)).values, full.values, rtol=1e-4, atol=1e-5)
 
     subset = adata[adata.obs_names[10:40]].copy()
     sub = model.get_local_sample_representation(adata=subset, use_mean=True)
     assert list(sub.coords["cell_name"].values) == list(subset.obs_names)
-    np.testing.assert_allclose(
-        sub.values, full.sel(cell_name=list(subset.obs_names)).values, rtol=1e-4, atol=1e-5
-    )
+    np.testing.assert_allclose(sub.values, full.sel(cell_name=list(subset.obs_names)).values, rtol=1e-4, atol=1e-5)
 
 
 def _da_model_with_donor_groups(adata_basic):
     adata = adata_basic.copy()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_2"]), "a", "b"
-    )
-    adata.obs["patient"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "p0", "p1"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_2"]), "a", "b")
+    adata.obs["patient"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "p0", "p1")
     MrTotalVI.setup_anndata(
         adata,
         protein_expression_obsm_key="protein_expression",
@@ -670,9 +655,7 @@ def test_da_donor_key_rejects_omit_original_sample(adata_basic):
     model = _da_model_with_donor_groups(adata_basic)
     with pytest.raises(ValueError, match="omit_original_sample"):
         with pytest.warns(UserWarning):
-            model.differential_abundance(
-                sample_cov_keys=["condition"], donor_key="patient", omit_original_sample=True
-            )
+            model.differential_abundance(sample_cov_keys=["condition"], donor_key="patient", omit_original_sample=True)
 
 
 def test_da_donor_key_rejects_single_sample_donors(adata_basic):
@@ -994,9 +977,7 @@ def test_mrtotalvi_u_space_statistical_apis(adata_basic):
 def test_mrtotalvi_differential_expression_returns_latent_statistics(adata_basic):
     """MrVI-style DE returns correct shapes, finite values, and valid p-values."""
     adata = adata_basic.copy()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     MrTotalVI.setup_anndata(
         adata,
         protein_expression_obsm_key="protein_expression",
@@ -1026,9 +1007,7 @@ def test_mrtotalvi_differential_expression_returns_latent_statistics(adata_basic
 def test_mrtotalvi_de_mc_samples_1_fast_path(adata_basic):
     """mc_samples=1 uses qu.loc (posterior mean) and runs without error."""
     adata = adata_basic.copy()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     MrTotalVI.setup_anndata(
         adata,
         protein_expression_obsm_key="protein_expression",
@@ -1048,9 +1027,7 @@ def test_mrtotalvi_de_mc_samples_1_fast_path(adata_basic):
 def test_mrtotalvi_de_donor_key_warning(adata_basic):
     """donor_key triggers a UserWarning about potential collinearity."""
     adata = adata_basic.copy()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     MrTotalVI.setup_anndata(
         adata,
         protein_expression_obsm_key="protein_expression",
@@ -1085,9 +1062,7 @@ def test_mrtotalvi_de_raises_on_nonunique_cov(adata_basic):
     # every donor a mix of T0 and T1 cells.
     n_cells = adata.n_obs
     n_donors = len(adata.obs["sample"].unique())
-    adata.obs["timepoint"] = np.where(
-        (np.arange(n_cells) // n_donors) % 2 == 0, "T0", "T1"
-    )
+    adata.obs["timepoint"] = np.where((np.arange(n_cells) // n_donors) % 2 == 0, "T0", "T1")
     # Verify the paired structure: every donor must span both timepoints.
     for donor in adata.obs["sample"].unique():
         mask = adata.obs["sample"] == donor
@@ -1120,9 +1095,7 @@ def test_mrtotalvi_de_raises_on_nonunique_cov(adata_basic):
 def _de_lfc_model(adata):
     """Helper: train a tiny MrTotalVI and tag obs with a binary condition."""
     adata = adata.copy()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     MrTotalVI.setup_anndata(
         adata,
         protein_expression_obsm_key="protein_expression",
@@ -1326,14 +1299,14 @@ def test_mrtotalvi_lfc_is_nontrivial(adata_basic):
 
     max_abs_lfc = np.abs(de["lfc"].values).max()
     assert max_abs_lfc > 1e-4, (
-        f"All LFCs are effectively zero (max={max_abs_lfc:.2e}); "
-        "extra_eps may not be wired through the decoder"
+        f"All LFCs are effectively zero (max={max_abs_lfc:.2e}); extra_eps may not be wired through the decoder"
     )
 
 
 # ---------------------------------------------------------------------------
 # (b) Reconstruction not regressed vs stock TotalVI
 # ---------------------------------------------------------------------------
+
 
 def test_elbo_not_severely_regressed(adata_basic):
     """MrTotalVI's ELBO is within 10% of stock TotalVI after the same training.
@@ -1361,7 +1334,8 @@ def test_elbo_not_severely_regressed(adata_basic):
     )
     base_model = TOTALVI(adata_basic, n_latent=N_LATENT)
     base_model.train(
-        max_epochs=MAX_EPOCHS_FULL, plan_kwargs={"lr": 1e-3},
+        max_epochs=MAX_EPOCHS_FULL,
+        plan_kwargs={"lr": 1e-3},
         check_val_every_n_epoch=MAX_EPOCHS_FULL,
     )
 
@@ -1380,6 +1354,7 @@ def test_elbo_not_severely_regressed(adata_basic):
 # ---------------------------------------------------------------------------
 # (c) Non-degenerate sample embedding
 # ---------------------------------------------------------------------------
+
 
 def test_non_degenerate_sample_embedding_wiring(adata_basic):
     """Per-sample embedding rows vary and eps is non-zero.
@@ -1414,6 +1389,7 @@ def test_non_degenerate_sample_embedding_wiring(adata_basic):
 # ---------------------------------------------------------------------------
 # (d) Donor-axis separation via get_local_sample_distances
 # ---------------------------------------------------------------------------
+
 
 def test_donor_axis_separation_wiring(adata_shifted):
     """Cross-donor distances collapse when the embedding is zeroed.
@@ -1463,9 +1439,7 @@ def test_donor_axis_separation_wiring(adata_shifted):
         f"Expected trained > zeroed — hierarchy appears non-functional."
     )
     # Sanity: trained distances are non-trivially positive
-    assert cross_donor_trained > 0.0, (
-        "Trained cross-donor distances are 0 — hierarchy encodes no signal."
-    )
+    assert cross_donor_trained > 0.0, "Trained cross-donor distances are 0 — hierarchy encodes no signal."
 
     # get_local_sample_representation should have matching shape
     reps = model.get_local_sample_representation(batch_size=64)
@@ -1509,23 +1483,13 @@ def test_qu_encoder_gradients_flow(adata_basic):
         cn = getattr(qu, cn_name)
         gamma_grad = cn.gamma_embedding.weight.grad
         beta_grad = cn.beta_embedding.weight.grad
-        assert gamma_grad is not None, (
-            f"qu.{cn_name}.gamma_embedding.weight.grad is None — gradient not flowing"
-        )
-        assert gamma_grad.abs().max().item() > 0, (
-            f"qu.{cn_name}.gamma_embedding gradient is all zeros"
-        )
-        assert beta_grad is not None, (
-            f"qu.{cn_name}.beta_embedding.weight.grad is None"
-        )
-        assert beta_grad.abs().max().item() > 0, (
-            f"qu.{cn_name}.beta_embedding gradient is all zeros"
-        )
+        assert gamma_grad is not None, f"qu.{cn_name}.gamma_embedding.weight.grad is None — gradient not flowing"
+        assert gamma_grad.abs().max().item() > 0, f"qu.{cn_name}.gamma_embedding gradient is all zeros"
+        assert beta_grad is not None, f"qu.{cn_name}.beta_embedding.weight.grad is None"
+        assert beta_grad.abs().max().item() > 0, f"qu.{cn_name}.beta_embedding gradient is all zeros"
 
     # sample_embed also must receive gradient
-    assert qu.sample_embed.weight.grad is not None, (
-        "qu.sample_embed.weight.grad is None — sample embedding not trained"
-    )
+    assert qu.sample_embed.weight.grad is not None, "qu.sample_embed.weight.grad is None — sample embedding not trained"
 
 
 def test_qu_encoder_donor_rows_diverge_wiring(adata_basic):
@@ -1553,14 +1517,14 @@ def test_qu_encoder_donor_rows_diverge_wiring(adata_basic):
                 diff = (gamma[i] - gamma[j]).abs().mean().item()
                 max_row_diff = max(max_row_diff, diff)
         assert max_row_diff > 0.0, (
-            f"qu.{cn_name}.gamma_embedding all donor rows are identical — "
-            f"sample conditioning is a no-op."
+            f"qu.{cn_name}.gamma_embedding all donor rows are identical — sample conditioning is a no-op."
         )
 
 
 # ---------------------------------------------------------------------------
 # (e) Learnable prior scale
 # ---------------------------------------------------------------------------
+
 
 def test_learnable_prior_scale(adata_basic):
     """learn_z_u_prior_scale=True registers pz_scale as a gradient-tracked parameter.
@@ -1616,6 +1580,7 @@ def test_learnable_prior_scale_clamp(adata_basic):
         inf_out = module._regular_inference(**module._get_inference_input(batch))
         eps = inf_out["eps"]
         from torch.distributions import Normal
+
         peps = Normal(0.0, torch.exp(pz_scale.clamp(min=-4.0)))
         kl_z = -peps.log_prob(eps).sum(dim=-1)
     assert torch.isfinite(kl_z).all(), "kl_z contains non-finite values after clamp"
@@ -1625,6 +1590,7 @@ def test_learnable_prior_scale_clamp(adata_basic):
 # ---------------------------------------------------------------------------
 # (g) scale_observations
 # ---------------------------------------------------------------------------
+
 
 def test_scale_observations(adata_basic):
     """scale_observations=True trains without error and produces finite ELBO."""
@@ -1645,6 +1611,7 @@ def test_scale_observations(adata_basic):
 # (h) use_map=False (stochastic eps)
 # ---------------------------------------------------------------------------
 
+
 def test_use_map_false(adata_basic):
     """use_map=False runs without error and produces finite ELBO."""
     import math
@@ -1655,14 +1622,13 @@ def test_use_map_false(adata_basic):
         use_map=False,
     )
     history = model.history["elbo_train"]
-    assert all(math.isfinite(v) for v in history.values.flatten()), (
-        "Non-finite ELBO encountered with use_map=False"
-    )
+    assert all(math.isfinite(v) for v in history.values.flatten()), "Non-finite ELBO encountered with use_map=False"
 
 
 # ---------------------------------------------------------------------------
 # (i) VampPrior toggle
 # ---------------------------------------------------------------------------
+
 
 def test_vamprior_trains_finite_elbo(adata_basic):
     """u_prior='vamp' constructs and trains to a finite ELBO.
@@ -1679,21 +1645,15 @@ def test_vamprior_trains_finite_elbo(adata_basic):
         u_prior_mixture_k=5,
     )
     history = model.history["elbo_train"]
-    assert all(math.isfinite(v) for v in history.values.flatten()), (
-        "Non-finite ELBO encountered with u_prior='vamp'"
-    )
+    assert all(math.isfinite(v) for v in history.values.flatten()), "Non-finite ELBO encountered with u_prior='vamp'"
 
 
 def test_mog_default_unchanged(adata_basic):
     """u_prior='mog' is the default — confirmed by checking module attributes."""
     model = _setup_and_train(adata_basic, max_epochs=1)
     assert getattr(model.module, "u_prior_type", "mog") == "mog"
-    assert hasattr(model.module, "u_prior_means"), (
-        "MoG default should register u_prior_means"
-    )
-    assert not hasattr(model.module, "u_vamp_pseudo"), (
-        "MoG default must not register u_vamp_pseudo"
-    )
+    assert hasattr(model.module, "u_prior_means"), "MoG default should register u_prior_means"
+    assert not hasattr(model.module, "u_vamp_pseudo"), "MoG default must not register u_vamp_pseudo"
 
 
 def test_vamprior_has_correct_parameters(adata_basic):
@@ -1705,19 +1665,14 @@ def test_vamprior_has_correct_parameters(adata_basic):
         batch_key="batch",
     )
     K = 6
-    model = MrTotalVI(adata_basic, sample_key="sample", n_latent=N_LATENT,
-                      u_prior="vamp", u_prior_mixture_k=K)
+    model = MrTotalVI(adata_basic, sample_key="sample", n_latent=N_LATENT, u_prior="vamp", u_prior_mixture_k=K)
     module = model.module
     assert module.u_prior_type == "vamp"
     assert hasattr(module, "u_vamp_pseudo"), "u_vamp_pseudo must be registered"
     assert module.u_vamp_pseudo.shape == (K, module.n_input_genes + module.n_input_proteins)
     assert module.u_prior_logits.shape == (K,)
-    assert not hasattr(module, "u_prior_means"), (
-        "VampPrior must not register u_prior_means"
-    )
-    assert module.u_prior_mixture is True, (
-        "VampPrior must set u_prior_mixture=True to enable MC KL path"
-    )
+    assert not hasattr(module, "u_prior_means"), "VampPrior must not register u_prior_means"
+    assert module.u_prior_mixture is True, "VampPrior must set u_prior_mixture=True to enable MC KL path"
 
 
 def test_vamprior_save_load(tmp_path):
@@ -1732,8 +1687,7 @@ def test_vamprior_save_load(tmp_path):
         batch_key="batch",
     )
     K = 4
-    model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT,
-                      u_prior="vamp", u_prior_mixture_k=K)
+    model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT, u_prior="vamp", u_prior_mixture_k=K)
     model.train(
         max_epochs=1,
         accelerator="cpu",
@@ -1762,6 +1716,7 @@ def test_vamprior_save_load(tmp_path):
 # Change E — n_obs_per_sample buffer persistence
 # ---------------------------------------------------------------------------
 
+
 def test_n_obs_per_sample_in_state_dict():
     """Test that persistent n_obs_per_sample survives a state-dict round trip."""
     import torch
@@ -1789,6 +1744,7 @@ def test_n_obs_per_sample_in_state_dict():
 # Change C — separate KL weights for kl_u and kl_z
 # ---------------------------------------------------------------------------
 
+
 def test_kl_weights_stored_and_non_default_differ():
     """Change C: kl_u_weight / kl_z_weight are stored; non-default values are set correctly."""
     adata = _make_adata()
@@ -1798,13 +1754,11 @@ def test_kl_weights_stored_and_non_default_differ():
         sample_key="sample",
         batch_key="batch",
     )
-    model_default = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT,
-                               kl_u_weight=1.0, kl_z_weight=1.0)
+    model_default = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT, kl_u_weight=1.0, kl_z_weight=1.0)
     assert model_default.module.kl_u_weight == 1.0
     assert model_default.module.kl_z_weight == 1.0
 
-    model_scaled = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT,
-                              kl_u_weight=0.5, kl_z_weight=2.0)
+    model_scaled = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT, kl_u_weight=0.5, kl_z_weight=2.0)
     assert model_scaled.module.kl_u_weight == 0.5
     assert model_scaled.module.kl_z_weight == 2.0
 
@@ -1812,6 +1766,7 @@ def test_kl_weights_stored_and_non_default_differ():
 # ---------------------------------------------------------------------------
 # Change D — data-driven VampPrior initialisation
 # ---------------------------------------------------------------------------
+
 
 def test_init_prior_from_data_vamprior():
     """Change D: init_prior_from_data=True yields finite pseudo-inputs near the data manifold."""
@@ -1826,9 +1781,9 @@ def test_init_prior_from_data_vamprior():
         batch_key="batch",
     )
     K = 4
-    model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT,
-                      u_prior="vamp", u_prior_mixture_k=K,
-                      init_prior_from_data=True)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=N_LATENT, u_prior="vamp", u_prior_mixture_k=K, init_prior_from_data=True
+    )
     model._initialize_vamp_from_training_indices(np.arange(adata.n_obs - 20))
     pseudo = model.module.u_vamp_pseudo
     dim = model.module.n_input_genes + model.module.n_input_proteins
@@ -1837,8 +1792,7 @@ def test_init_prior_from_data_vamprior():
     # Norms should be substantially larger than the default randn*0.01 init
     norms = pseudo.norm(dim=-1)
     assert (norms > 0.5).any(), (
-        f"data-driven pseudo-inputs norms {norms.tolist()} are unexpectedly small; "
-        "expected them near data centroids"
+        f"data-driven pseudo-inputs norms {norms.tolist()} are unexpectedly small; expected them near data centroids"
     )
 
 
@@ -1873,10 +1827,15 @@ def test_freeze_prior_after_init_vamp():
         batch_key="batch",
     )
     K = 4
-    model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT,
-                      u_prior="vamp", u_prior_mixture_k=K,
-                      init_prior_from_data=True,
-                      freeze_prior_after_init=True)
+    model = MrTotalVI(
+        adata,
+        sample_key="sample",
+        n_latent=N_LATENT,
+        u_prior="vamp",
+        u_prior_mixture_k=K,
+        init_prior_from_data=True,
+        freeze_prior_after_init=True,
+    )
     model._initialize_vamp_from_training_indices(np.arange(adata.n_obs - 20))
     m = model.module
     assert not m.u_vamp_pseudo.requires_grad, "u_vamp_pseudo should be frozen"
@@ -1970,9 +1929,7 @@ def test_mrtotalvi_layer_norm_trains_finite(adata_basic):
     found = next((k for k in candidates if k in history), None)
     assert found is not None, f"No loss key found in history: {list(history.keys())}"
     train_loss = list(history[found].values.ravel())
-    assert all(np.isfinite(v) for v in train_loss), (
-        f"Training loss has non-finite values with LayerNorm: {train_loss}"
-    )
+    assert all(np.isfinite(v) for v in train_loss), f"Training loss has non-finite values with LayerNorm: {train_loss}"
 
     # Smoke-check latent representation is finite
     u = model.get_latent_representation(give_z=False)
@@ -2009,14 +1966,10 @@ def test_mrtotalvi_lfc_aux_fast_path_matches_full(adata_basic):
         aux = model.module._infer_lfc_aux(**inf_inputs)
 
         # Full inference path: u_anchor provided, no cache → reruns _regular_inference
-        h_full = model.module.compute_h_from_x_eps(
-            extra_eps=extra_eps, u_anchor=u, _lfc_aux=None, **inf_inputs
-        )
+        h_full = model.module.compute_h_from_x_eps(extra_eps=extra_eps, u_anchor=u, _lfc_aux=None, **inf_inputs)
 
         # Fast path: u_anchor + cache → skips _regular_inference
-        h_fast = model.module.compute_h_from_x_eps(
-            extra_eps=extra_eps, u_anchor=u, _lfc_aux=aux, **inf_inputs
-        )
+        h_fast = model.module.compute_h_from_x_eps(extra_eps=extra_eps, u_anchor=u, _lfc_aux=aux, **inf_inputs)
 
     max_diff = (h_full - h_fast).abs().max().item()
     assert max_diff < 1e-5, (
@@ -2044,9 +1997,7 @@ def test_mrtotalvi_lfc_sign_known_positive_control():
     adata = _make_adata(n_donors=N_DONORS)
 
     # Two conditions: 'b' = donor_2 + donor_3; these will have inflated gene 0.
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
 
     # Inflate gene 0 for condition 'b' cells by an integer 20× baseline shift;
     # setup_anndata correctly refuses fractional pseudo-counts.
@@ -2062,8 +2013,7 @@ def test_mrtotalvi_lfc_sign_known_positive_control():
         sample_key="sample",
         batch_key="batch",
     )
-    model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT, n_latent_u=4,
-                      u_prior="mog")
+    model = MrTotalVI(adata, sample_key="sample", n_latent=N_LATENT, n_latent_u=4, u_prior="mog")
     model.train(max_epochs=30, accelerator="cpu")
 
     de = model._legacy_differential_expression_for_reproducibility(
@@ -2090,9 +2040,7 @@ def test_differential_abundance_trained_model_smoke(adata_basic):
     code path: outputs must be finite and have the correct shape.
     """
     adata = adata_basic.copy()
-    adata.obs["condition"] = np.where(
-        adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b"
-    )
+    adata.obs["condition"] = np.where(adata.obs["sample"].isin(["donor_0", "donor_1"]), "a", "b")
     model = _setup_and_train(adata, n_latent_u=4)
 
     da = model.differential_abundance(
@@ -2107,9 +2055,7 @@ def test_differential_abundance_trained_model_smoke(adata_basic):
     assert da["log_probs"].shape == (n_cells, n_samples), (
         f"log_probs shape {da['log_probs'].shape} != expected ({n_cells}, {n_samples})"
     )
-    assert np.all(np.isfinite(da["log_probs"].values)), (
-        "DA log_probs must be finite after real training"
-    )
+    assert np.all(np.isfinite(da["log_probs"].values)), "DA log_probs must be finite after real training"
     assert np.all(np.isfinite(da["condition_log_probs"].values)), (
         "DA condition_log_probs must be finite after real training"
     )
@@ -2147,15 +2093,11 @@ def test_mrtotalvi_n_labels_zero_mog_prior_smoke(adata_basic):
     history = model.history
     elbo_key = get_elbo_key(history)
     vals = history[elbo_key].to_numpy().astype(float).flatten()
-    assert np.all(np.isfinite(vals)), (
-        f"Training {elbo_key} is not finite with n_labels=0 + u_prior='mog': {vals}"
-    )
+    assert np.all(np.isfinite(vals)), f"Training {elbo_key} is not finite with n_labels=0 + u_prior='mog': {vals}"
 
     # Latent representation must be finite (no NaN from empty label table)
     z = model.get_latent_representation(give_z=True)
-    assert np.all(np.isfinite(z)), (
-        "get_latent_representation returned non-finite values with n_labels=0"
-    )
+    assert np.all(np.isfinite(z)), "get_latent_representation returned non-finite values with n_labels=0"
 
 
 # ---------------------------------------------------------------------------
@@ -2207,6 +2149,7 @@ def test_mrtotalvi_default_latent_is_deterministic(adata_basic):
 # batch_representation="embedding"
 # ---------------------------------------------------------------------------
 
+
 def test_mrtotalvi_batch_representation_default_is_one_hot(adata_basic):
     """The default must not change the architecture: no embedding, stock decoder."""
     from scvi.nn import DecoderTOTALVI
@@ -2239,10 +2182,7 @@ def test_mrtotalvi_batch_representation_embedding_widths(adata_basic):
     assert n_batch > 0
 
     # u-encoder: -n_batch one-hot columns, +embedding_dim embedding columns.
-    assert (
-        embedded.module.qu.fc1.in_features
-        == one_hot.module.qu.fc1.in_features - n_batch + embedding_dim
-    )
+    assert embedded.module.qu.fc1.in_features == one_hot.module.qu.fc1.in_features - n_batch + embedding_dim
 
     # Decoder: the batch category is dropped and the input widened instead.
     assert isinstance(embedded.module.decoder, BatchEmbeddingDecoderAdapter)
@@ -2623,7 +2563,9 @@ def test_known_answer_donor_recovery(donor_recovery_adata, training_seed):
 
     adata = donor_recovery_adata.copy()
     MrTotalVI.setup_anndata(
-        adata, protein_expression_obsm_key="protein_expression", sample_key="sample",
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        sample_key="sample",
         batch_key="batch",
     )
     threads = torch.get_num_threads()
@@ -2633,9 +2575,16 @@ def test_known_answer_donor_recovery(donor_recovery_adata, training_seed):
         model = MrTotalVI(adata, sample_key="sample")
         # Upstream MrVI defaults: 100 epochs with a 20-epoch KL warm-up.
         model.train(
-            max_epochs=100, n_epochs_kl_warmup=20, accelerator="cpu", devices=1,
-            batch_size=128, train_size=1.0, early_stopping=False,
-            enable_progress_bar=False, logger=False, enable_checkpointing=False,
+            max_epochs=100,
+            n_epochs_kl_warmup=20,
+            accelerator="cpu",
+            devices=1,
+            batch_size=128,
+            train_size=1.0,
+            early_stopping=False,
+            enable_progress_bar=False,
+            logger=False,
+            enable_checkpointing=False,
         )
         donors = [f"d{i}" for i in range(8)]
         distances = (

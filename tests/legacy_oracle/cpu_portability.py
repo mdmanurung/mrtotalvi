@@ -24,13 +24,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import Any
 
-EXPECTED_CHECKSUM_MANIFEST_SHA256 = (
-    "fe0f8a8ff48098579dd398e70e1f3513c02da54a6708c384f45c97592e33ea38"
-)
+EXPECTED_CHECKSUM_MANIFEST_SHA256 = "fe0f8a8ff48098579dd398e70e1f3513c02da54a6708c384f45c97592e33ea38"
 EXPECTED_SOURCE_COMMIT = "d8c8e997a67997a53f55923eb3ab14e6cf06f94c"
-EXPECTED_PORTABILITY_POLICY_SHA256 = (
-    "385fd0e959001dd7ed44437b31d1f055fb82ba3bf74014fefa221559d865ef54"
-)
+EXPECTED_PORTABILITY_POLICY_SHA256 = "385fd0e959001dd7ed44437b31d1f055fb82ba3bf74014fefa221559d865ef54"
 INTENTIONAL_PARENT_PATH = "../generate_legacy_oracle.py"
 ORACLE_MODEL_NAMES = ("mrtotalvi",)  # MrMultiVI oracle files kept for checksum integrity only
 PORTABILITY_POLICY_PATH = Path(__file__).with_name("cpu_portability_policy.json")
@@ -137,9 +133,7 @@ def _parse_checksum_records(raw: bytes) -> dict[str, str]:
         records[relative] = match.group("digest")
 
     if [path for path in records if path.startswith("../")] != [INTENTIONAL_PARENT_PATH]:
-        raise ValueError(
-            "The checksum manifest must contain only the intentional parent generator path."
-        )
+        raise ValueError("The checksum manifest must contain only the intentional parent generator path.")
     return records
 
 
@@ -193,23 +187,17 @@ def verify_oracle_inventory(
     extra_paths = sorted(actual_paths - expected_paths)
     if missing_paths or extra_paths:
         raise ValueError(
-            "Oracle inventory paths differ from the checksum authority: "
-            f"missing={missing_paths}, extra={extra_paths}."
+            f"Oracle inventory paths differ from the checksum authority: missing={missing_paths}, extra={extra_paths}."
         )
 
     for relative, expected_digest in records.items():
-        path = (
-            root.parent / "generate_legacy_oracle.py"
-            if relative == INTENTIONAL_PARENT_PATH
-            else root / relative
-        )
+        path = root.parent / "generate_legacy_oracle.py" if relative == INTENTIONAL_PARENT_PATH else root / relative
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"Oracle checksum target must be a regular file: {relative!r}.")
         actual_digest = _sha256_file(path)
         if actual_digest != expected_digest:
             raise ValueError(
-                f"Oracle checksum mismatch for {relative!r}: "
-                f"expected {expected_digest}, got {actual_digest}."
+                f"Oracle checksum mismatch for {relative!r}: expected {expected_digest}, got {actual_digest}."
             )
 
     environment = _load_json_file(
@@ -324,9 +312,7 @@ def _load_run_manifests(oracle_root: Path) -> dict[str, dict[str, Any]]:
         )
         expected = _expected_run_manifest(model_name)
         if manifest != expected:
-            raise ValueError(
-                f"{model_name} run manifest drifted from its exact source/seed/weight contract."
-            )
+            raise ValueError(f"{model_name} run manifest drifted from its exact source/seed/weight contract.")
         manifests[model_name] = manifest
     return manifests
 
@@ -360,9 +346,7 @@ def _comparison_row(
     if actual_array.dtype != np.dtype("float32") or expected_array.dtype != np.dtype("float32"):
         raise ValueError(f"{key} must be float32 in both replay and oracle.")
     if actual_array.shape != expected_array.shape:
-        raise ValueError(
-            f"{key} shape mismatch: actual={actual_array.shape}, oracle={expected_array.shape}."
-        )
+        raise ValueError(f"{key} shape mismatch: actual={actual_array.shape}, oracle={expected_array.shape}.")
     actual_finite = np.isfinite(actual_array)
     expected_finite = np.isfinite(expected_array)
     both_finite = actual_finite & expected_finite
@@ -378,9 +362,7 @@ def _comparison_row(
         denominator = tolerance["atol"] + tolerance["rtol"] * np.abs(expected64)
         normalized_values = np.zeros(actual_array.shape, dtype=np.float64)
         np.divide(delta, denominator, out=normalized_values, where=both_finite)
-        normalized[tolerance_name] = (
-            float(normalized_values[both_finite].max()) if both_finite.any() else None
-        )
+        normalized[tolerance_name] = float(normalized_values[both_finite].max()) if both_finite.any() else None
         failing[tolerance_name] = int(np.count_nonzero(~both_finite | (delta > denominator)))
 
     return {
@@ -450,8 +432,8 @@ def _assess_model(
 ) -> dict[str, Any]:
     import numpy as np
     import torch
-
     from scvi import REGISTRY_KEYS
+
     from mrtotalvi import MrTotalVI
 
     model_cls = MrTotalVI
@@ -469,10 +451,7 @@ def _assess_model(
         batch_size=batch_size,
     )
     tensors = next(iter(loader))
-    if any(
-        isinstance(value, torch.Tensor) and value.device.type != "cpu"
-        for value in tensors.values()
-    ):
+    if any(isinstance(value, torch.Tensor) and value.device.type != "cpu" for value in tensors.values()):
         raise ValueError(f"{model_name} data loader produced a non-CPU tensor.")
 
     loss_kwargs = {"kl_weight": run_manifest["kl_weight"]}
@@ -497,19 +476,14 @@ def _assess_model(
         }
     )
     actual_arrays.update(
-        {
-            f"kl_local.{key}": value.detach().cpu().numpy()
-            for key, value in loss_output.kl_local.items()
-        }
+        {f"kl_local.{key}": value.detach().cpu().numpy() for key, value in loss_output.kl_local.items()}
     )
 
     loss_output.loss.backward()
     parameters = _validate_gradient_manifest(module, model_dir)
     gradient_parts: list[np.ndarray] = []
     for parameter_name, parameter in parameters:
-        gradient = (
-            torch.zeros_like(parameter) if parameter.grad is None else parameter.grad.detach()
-        )
+        gradient = torch.zeros_like(parameter) if parameter.grad is None else parameter.grad.detach()
         gradient_array = gradient.cpu().numpy()
         actual_arrays[f"gradient.{parameter_name}"] = gradient_array
         gradient_parts.append(gradient_array.reshape(-1))
@@ -737,9 +711,7 @@ def run_assessment_subprocess(
     repository_root = Path(__file__).parents[2]
     environment = os.environ.copy()
     environment.update(_THREAD_ENV)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        [str(repository_root / "src"), str(repository_root)]
-    )
+    environment["PYTHONPATH"] = os.pathsep.join([str(repository_root / "src"), str(repository_root)])
     command = [
         sys.executable,
         "-m",
