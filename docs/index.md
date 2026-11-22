@@ -1,11 +1,32 @@
-# mrtotalvi
-
-TOTALVI with an MrVI-style sample-aware hierarchical latent space for CITE-seq.
+```{include} ../README.md
+```
 
 ```{toctree}
-:maxdepth: 2
+:caption: Getting started
+:hidden: true
+:maxdepth: 1
 
-user_guide
-api/index
-adr/index
+installation.md
+user_guide.md
+migration.md
+```
+
+```{toctree}
+:caption: Reference
+:hidden: true
+:maxdepth: 1
+
+api.md
+adr/index.md
+```
+
+```{toctree}
+:caption: Project
+:hidden: true
+:maxdepth: 1
+
+changelog.md
+contributing.md
+citation.md
+references.md
 ```
