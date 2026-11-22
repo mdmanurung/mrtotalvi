@@ -40,12 +40,12 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     The legacy default gives:
 
     .. math::
-        u \\sim q_u(x_{\\text{rna}},\\, x_{\\text{prot}},\\, d)
-        \\quad\\text{(sample-conditioned)}
+        u \sim q_u(x_{\text{rna}},\, x_{\text{prot}},\, d)
+        \quad\text{(sample-conditioned)}
 
     .. math::
-        z = z_{\\text{base}}(u) + \\varepsilon,\\quad
-        \\varepsilon \\sim \\text{AttentionBlock}(u,\\; e_d)
+        z = z_{\text{base}}(u) + \varepsilon,\quad
+        \varepsilon \sim \text{AttentionBlock}(u,\; e_d)
 
     The decoder input is ``z`` with ``n_latent`` dimensions, as in stock TotalVI, so
     the hierarchy itself needs no decoder changes. With ``n_latent_u=None`` (the module
@@ -75,8 +75,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     z_u_prior_scale
         Log-scale of the prior on ``eps``.  ``0.0`` → ``p(eps) = N(0,1)``.
     learn_z_u_prior_scale
-        If ``True``, ``pz_scale`` is a learnable :class:`~torch.nn.Parameter`;
-        otherwise it is a fixed :func:`~torch.Tensor.register_buffer`.
+        If ``True``, ``pz_scale`` is a learnable :class:`~torch.nn.parameter.Parameter`;
+        otherwise it is a fixed buffer (:meth:`~torch.nn.Module.register_buffer`).
     hierarchy_mode
         ``"legacy"`` preserves historical execution. ``"centered_v2"``
         centers raw residuals over the full registered sample universe.
@@ -933,12 +933,12 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         r"""Extend TotalVI's loss with the second-level KL for the sample residual.
 
         TotalVI's existing ``kl_div_z`` term is repurposed as ``kl_u =
-        KL(q_u \\| p_u)`` where ``p_u`` is the configured prior (default: a
+        KL(q_u \| p_u)`` where ``p_u`` is the configured prior (default: a
         learned mixture-of-Gaussians, see :attr:`u_prior_mixture`).  This
         method adds:
 
         .. math::
-            kl_z = -\\log p(\\varepsilon) = -\\log N(0,\\; \\exp(\\text{pz\\_scale}))(\\varepsilon)
+            kl_z = -\log p(\varepsilon) = -\log N(0,\; \exp(\text{pz\_scale}))(\varepsilon)
 
         and folds it into both ``loss`` and ``kl_local["kl_div_z"]``.
         """
