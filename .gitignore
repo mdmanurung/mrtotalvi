@@ -3,3 +3,5 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 lightning_logs/
+docs/_build/
+docs/api/generated/

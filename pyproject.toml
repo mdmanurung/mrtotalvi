@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest", "h5py"]
 lamin = ["lamindb"]
+docs = ["sphinx", "myst-parser", "furo"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mrtotalvi"]
