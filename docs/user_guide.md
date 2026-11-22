@@ -282,7 +282,7 @@ enrichment = model_v2.local_sample_enrichment(
 ```
 
 `donor_key` must name a column that groups the samples of one patient, with exactly one
-`treated` and one `control` sample per patient. It cannot be the model's own `sample_key`
+`treated` and one `control` sample per patient. It cannot be the model’s own `sample_key`
 (`"donor"` above), because each registered sample then belongs to its own group and the
 pairing check raises.
 
@@ -322,13 +322,13 @@ model.differential_abundance(
 ```
 
 `"scale_floor"` raises every kernel scale to `max(scale, scale_floor)`. `"knn"` counts, among
-each cell's `knn_k` nearest reference cells in `u`, the cells of each sample or group; the score
+each cell’s `knn_k` nearest reference cells in `u`, the cells of each sample or group; the score
 is `log(k + 0.5) - log(n_reference)`. In a synthetic 2-D check
 (`tests/test_da_density_estimator.py`) both recovered a planted depletion, with a per-cell null sd
-of about 0.2-0.3 (`knn_k=50`, floor 0.4); the posterior estimator's null sd there was about 10.
+of about 0.2-0.3 (`knn_k=50`, floor 0.4); the posterior estimator’s null sd there was about 10.
 Under `"knn"` the per-sample
 `log_probs` are comparable across samples of similar size within a cell, but not across cells or
-with `"posterior"` values, so read the enrichments. Where a sample's expected neighbour count
+with `"posterior"` values, so read the enrichments. Where a sample’s expected neighbour count
 `knn_k * n_g / N` is below about 1, the score favours the smaller sample. Group scores share
 this bias. The warning identifies groups with low expected counts. The neighbour method pools
 reference cells, so samples with higher yields carry more weight within a group. The two kernel
@@ -336,7 +336,7 @@ estimators give each included sample equal weight. `donor_key` is available only
 estimators. See the `differential_abundance` docstring for the full mapping.
 
 With `omit_original_sample=False` (forced by `donor_key`), `differential_abundance()` removes
-each cell's own kernel from its own sample's density (leave-one-cell-out), unlike upstream MrVI.
+each cell’s own kernel from its own sample’s density (leave-one-cell-out), unlike upstream MrVI.
 Without this, every cell looks enriched for its own group. A group with no reference sample for
 a cell (for example one sample per condition under the default `omit_original_sample=True`)
 gives NaN, not `inf`, and a warning with the affected cell count.
@@ -380,14 +380,14 @@ multiplied by the batch size, and `kl_weight` warm-up does not scale it. The pen
 reported as `kl_global`, which the training plan divides by `n_obs_training`. With a
 `train_size` below 1, the penalty is relative to all cells, not the training split.
 
-Three reporting details. First, with the legacy `scale_observations=True` each cell's data term
-is divided by its sample's cell count while the penalty is not, so one sigma shrinks relatively more
-strongly, by about the sample's cell count (the gradient ratio on `qz.embedding.weight` rose by the sample's cell count in a toy run).
+Three reporting details. First, with the legacy `scale_observations=True` each cell’s data term
+is divided by its sample’s cell count while the penalty is not, so one sigma shrinks relatively more
+strongly, by about the sample’s cell count (the gradient ratio on `qz.embedding.weight` rose by the sample’s cell count in a toy run).
 `centered_v2` weights average to 1 and are unaffected. Second, `elbo_validation` reports the
 penalty as `kl_global / n_obs_validation`, about `n_cells / n_obs_validation` times its
 size in the loss (0.035 against 0.0035 nats in a toy run), and `get_elbo` leaves the penalty out.
 Third, `MrTotalVI.load` rebuilds the model on the AnnData you pass, so `n_cells` is that
-AnnData's size. A load on a different cell set changes the penalty strength for continued
+AnnData’s size. A load on a different cell set changes the penalty strength for continued
 training, and a `UserWarning` says so when the checkpoint stores the training count (models with
 `scale_observations=True`).
 
@@ -398,7 +398,7 @@ normalisation. Check the spread of the embeddings after training before relying 
 
 ## Inherited training defaults
 
-`MrTotalVI.train()` uses MrVI's Adam `eps=1e-8`, `weight_decay=1e-8`, `lr=2e-3` and no plateau
+`MrTotalVI.train()` uses MrVI’s Adam `eps=1e-8`, `weight_decay=1e-8`, `lr=2e-3` and no plateau
 schedule (`reduce_lr_on_plateau=False`; TOTALVI uses `lr=4e-3` with the schedule).
 Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
 `reduce_lr_on_plateau` to `train()`. The small `eps` matters for the legacy
@@ -431,11 +431,11 @@ Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
 Protein scale in inherited methods. The loss fits protein counts with means
 `per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that
 efficiency (stock TOTALVI does not, and its protein samples are about `1/efficiency` too large).
-`get_normalized_expression` still returns upstream's normalised scale, without the efficiency,
+`get_normalized_expression` still returns upstream’s normalised scale, without the efficiency,
 so its protein values sit on a different scale from `get_counterfactual_expression`.
 
 Other inherited TOTALVI methods are not re-derived for `u`/`eps`: `get_marginal_ll` raises, and
-`get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell's
+`get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell’s
 own donor `eps` (use the counterfactual APIs to change the donor).
 
 ## v1 Limitations
@@ -443,6 +443,7 @@ own donor `eps` (use the counterfactual APIs to change the donor).
 These limitations are intentional cuts documented in ADR-0005.
 
 **Differential expression:**
+
 - MrTotalVI accepts only `use_vmap=False`; `use_vmap=True` raises before inference/statistics.
 
 **Differential expression in one cohort.** The historical `store_lfc=True` path decodes
@@ -492,7 +493,7 @@ plug-in; do not mix the two.
 **Admissibility (methods note):**
 `get_outlier_cell_sample_pairs` (`is_admissible`) uses one global quantile over pooled
 leave-one-out scores. `get_counterfactual_latent` (`admissible`) uses one quantile per target
-sample. They are different quantities. In both, a cell's own sample is scored leave-one-out, so
+sample. They are different quantities. In both, a cell’s own sample is scored leave-one-out, so
 about `quantile_threshold` (default 5%) of own-sample pairs fail by design, and the private DE
 filter drops that share of cells from their own sample. A one-cell sample (or
 `subsample_size=1`) has no leave-one-out reference: its cell is NaN and inadmissible for its own
@@ -503,6 +504,7 @@ The default training objective (`use_map=True`) is a MAP/cross-entropy penalty o
 `eps`, not a strict ELBO. For the legacy hierarchy, the analytic ELBO — including the `q(eps)`
 entropy term — is available via `use_map=False` at model construction. Centered v2 requires
 `use_map=True`.
+
 ```python
 model = MrTotalVI(adata, sample_key="donor", use_map=False)
 ```

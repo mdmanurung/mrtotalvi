@@ -254,9 +254,9 @@
 MrTotalVI moved from `scvi.external.mrtotalvi` in the fork to the standalone package `mrtotalvi`,
 built on upstream `scvi-tools` 1.5.2. MrMultiVI and CytoANVI stay in the fork.
 
-The fork's frozen regression oracle (`tests/legacy_oracle/`, commit `d8c8e997`) replays under
+The fork’s frozen regression oracle (`tests/legacy_oracle/`, commit `d8c8e997`) replays under
 upstream scvi-tools 1.5.2, torch 2.15 and pandas 3.1 on CPU within its portable tolerance. The
-largest strict-tolerance delta is 1.9e-6, below the fork host's 3.8e-6.
+largest strict-tolerance delta is 1.9e-6, below the fork host’s 3.8e-6.
 
 ### Fixed during extraction
 
