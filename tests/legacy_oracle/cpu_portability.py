@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 EXPECTED_CHECKSUM_MANIFEST_SHA256 = "fe0f8a8ff48098579dd398e70e1f3513c02da54a6708c384f45c97592e33ea38"
 EXPECTED_SOURCE_COMMIT = "d8c8e997a67997a53f55923eb3ab14e6cf06f94c"
-EXPECTED_PORTABILITY_POLICY_SHA256 = "385fd0e959001dd7ed44437b31d1f055fb82ba3bf74014fefa221559d865ef54"
+EXPECTED_PORTABILITY_POLICY_SHA256 = "7f6f7076fd6c22b4a4fb747b310e0e5ba7d1d47d3a57f339a696d192ad4a817a"
 INTENTIONAL_PARENT_PATH = "../generate_legacy_oracle.py"
 ORACLE_MODEL_NAMES = ("mrtotalvi",)  # MrMultiVI oracle files kept for checksum integrity only
 PORTABILITY_POLICY_PATH = Path(__file__).with_name("cpu_portability_policy.json")
@@ -255,7 +255,7 @@ def _validate_policy(policy: Mapping[str, Any]) -> None:
     derivation = policy["derivation"]
     if derivation != {
         "observed_floor_requiring_max_abs_delta": 3.814697265625e-6,
-        "observed_overall_max_abs_delta": 7.62939453125e-6,
+        "observed_overall_max_abs_delta": 9.5367431640625e-6,
         "portable_atol_ceiling": 5e-6,
         "rule": (
             "absolute_floor_is_the_decimal_ceiling_above_near_zero_cpu_float32_"
