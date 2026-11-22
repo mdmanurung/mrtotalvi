@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Tests: the legacy-oracle CPU portability policy now records an observed worst-case float32
+  delta of 9.54e-6 (was 7.63e-6), the largest seen on a GitHub Actions runner under Python 3.12.
+  The strict and portable tolerances are unchanged (user decision, 2026-11-22).
 - Tests: the donor-recovery test now also needs Spearman `rho >= 0.95`. Its exact p reaches
   the floor 4.96e-5 after 10 epochs, so `p <= 0.01` alone passed an undertrained model (rho
   0.69-0.93 at 10 epochs, 0.983 at 100, seeds 0-2; user decision, 2026-11-20). New tests
