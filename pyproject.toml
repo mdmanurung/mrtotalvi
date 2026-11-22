@@ -1,39 +1,110 @@
 [build-system]
-requires = ["hatchling"]
 build-backend = "hatchling.build"
+requires = [ "hatch-vcs", "hatchling" ]
 
 [project]
 name = "mrtotalvi"
-version = "0.1.0.dev0"
 description = "TOTALVI with an MrVI-style sample-aware hierarchical latent space for CITE-seq."
 readme = "README.md"
 license = { file = "LICENSE" }
+maintainers = [
+  { name = "mdmanurung" },
+]
+authors = [
+  { name = "mdmanurung" },
+]
 requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+]
+dynamic = [ "version" ]
 dependencies = [
-    "scvi-tools>=1.5.2",
-    "xarray",
-    "zarr",
-    "dask",
+  "dask",
+  "scvi-tools>=1.5.2",
+  # for debug logging (referenced from the issue template)
+  "session-info2",
+  "xarray",
+  "zarr",
+]
+optional-dependencies.lamin = [ "lamindb" ]
+# https://docs.pypi.org/project_metadata/#project-urls
+urls.Documentation = "https://mrtotalvi.readthedocs.io/"
+urls.Homepage = "https://github.com/mdmanurung/mrtotalvi"
+urls.Source = "https://github.com/mdmanurung/mrtotalvi"
+
+[dependency-groups]
+dev = [
+  "twine>=4.0.2",
+]
+test = [
+  "coverage>=7.10",
+  "h5py",
+  "pytest",
+  "pytest-cov",     # For VS Code’s coverage functionality
+]
+doc = [
+  "ipykernel",
+  "ipython",
+  "pandas",
+  "scverse-doc[full]>=0.5",
+  "scverse-misc[sphinx]>=0.1.8",
+  "sphinx-autodoc-typehints",
+  "sphinxcontrib-bibtex>=1",
+]
+typecheck = [
+  "mypy",
+  "pandas-stubs",
 ]
 
-[project.optional-dependencies]
-test = ["pytest", "h5py"]
-lamin = ["lamindb"]
-docs = ["sphinx", "myst-parser", "furo"]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/mrtotalvi"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-p no:cacheprovider"
+[tool.hatch]
+version.source = "vcs"
+build.targets.wheel.packages = [ "src/mrtotalvi" ]
+build.targets.sdist.exclude = [ "/docs", "/tests" ]
+envs.default.installer = "uv"
+# CPU-only torch wheels: the CUDA build adds several GB and no test or doc page needs a GPU.
+# The torch index also serves common packages at old versions, so pick the best match across both.
+envs.default.env-vars.UV_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu"
+envs.default.env-vars.UV_INDEX_STRATEGY = "unsafe-best-match"
+envs.default.dependency-groups = [ "dev" ]
+envs.docs.env-vars.UV_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu"
+envs.docs.env-vars.UV_INDEX_STRATEGY = "unsafe-best-match"
+envs.docs.scripts.build = "sphinx-build -M html docs docs/_build -W {args}"
+envs.docs.scripts.clean = "git clean -fdX -- {args:docs}"
+envs.docs.scripts.open = "python -m webbrowser -t docs/_build/html/index.html"
+envs.docs.dependency-groups = [ "doc" ]
+envs.hatch-check-code.dependencies = [ "prek" ]
+envs.hatch-check-code.scripts.lint-check = "echo 'try `hatch check code --fix`'; false"
+envs.hatch-check-code.scripts.lint-fix = "prek run -a --no-group=format --no-group=typecheck"
+envs.hatch-check-fmt.dependencies = [ "prek" ]
+envs.hatch-check-fmt.scripts.format-check = "echo 'try `hatch check fmt --fix`'; false"
+envs.hatch-check-fmt.scripts.format-fix = "prek run -a --group=format --no-group=typecheck"
+envs.hatch-check-types.scripts.check = [ "mypy" ]
+envs.hatch-check-types.dependency-groups = [ "typecheck", "test" ]
+envs.hatch-test.env-vars.UV_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu"
+envs.hatch-test.env-vars.UV_INDEX_STRATEGY = "unsafe-best-match"
+envs.hatch-test.matrix = [
+  # Test the lowest and highest supported Python versions with normal deps
+  { deps = [ "stable" ], python = [ "3.12", "3.13" ] },
+  # Test the newest supported Python version also with pre-release deps
+  { deps = [ "pre" ], python = [ "3.13" ] },
+]
+# If the matrix variable `deps` is set to "pre",
+# set the environment variable `UV_PRERELEASE` to "allow".
+envs.hatch-test.overrides.matrix.deps.env-vars = [
+  { value = "allow", key = "UV_PRERELEASE", if = [ "pre" ] },
+]
+envs.hatch-test.dependency-groups = [ "dev", "test" ]
 
 [tool.ruff]
 line-length = 120
 src = [ "src" ]
+extend-include = [ "*.ipynb" ]
 # Checksum-sealed provenance from the scvi-tools fork; never reformat.
 extend-exclude = [ "tests/legacy_oracle/generate_legacy_oracle.py" ]
-extend-include = [ "*.ipynb" ]
 format.docstring-code-format = true
 lint.select = [
   "B",      # flake8-bugbear
@@ -67,3 +138,22 @@ lint.per-file-ignores."*/__init__.py" = [ "F401" ]
 lint.per-file-ignores."docs/*" = [ "I" ]
 lint.per-file-ignores."tests/*" = [ "D" ]
 lint.pydocstyle.convention = "numpy"
+
+[tool.mypy]
+files = [ "src", "tests" ]
+
+[tool.pytest]
+addopts = [
+  "--import-mode=importlib", # allow using test files with same name
+  "-p",
+  "no:cacheprovider",
+]
+strict = true
+testpaths = [ "tests" ]
+
+[tool.coverage]
+run.source = [ "mrtotalvi" ]
+run.omit = [
+  "**/test_*.py",
+]
+run.patch = [ "subprocess" ]
