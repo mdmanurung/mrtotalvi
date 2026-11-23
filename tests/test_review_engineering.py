@@ -45,6 +45,18 @@ def test_seed_combiner_warns_when_hash_is_missing_on_some_results():
         combine_mrtotalvi_seed_results(results)
 
 
+def test_seed_combiner_rejects_mismatch_when_template_lacks_hash():
+    results = {0: _seed_result(None), 1: _seed_result("aaa", offset=1.0), 2: _seed_result("bbb", offset=2.0)}
+    with pytest.warns(UserWarning), pytest.raises(ValueError, match="context_table_sha256 differs"):
+        combine_mrtotalvi_seed_results(results)
+
+
+def test_seed_combiner_lognormal_hash_list_has_no_repeats():
+    kind = "posterior_lognormal_mean"
+    results = {0: _seed_result("aaa", kind), 1: _seed_result("aaa", kind, offset=1.0)}
+    assert combine_mrtotalvi_seed_results(results).attrs["context_table_sha256"] == "aaa"
+
+
 def test_seed_combiner_accepts_equal_hashes():
     results = {0: _seed_result("aaa"), 1: _seed_result("aaa", offset=1.0)}
     with warnings.catch_warnings():
@@ -84,7 +96,12 @@ def test_protein_subset_on_dataframe_protein_axis():
 
 @pytest.mark.parametrize(
     ("kwargs", "match"),
-    [({"gene_dispersion": "gene-cell"}, "gene-cell"), ({"protein_dispersion": "protein-cell"}, "protein-cell")],
+    [
+        ({"gene_dispersion": "gene-cell"}, "gene-cell"),
+        ({"protein_dispersion": "protein-cell"}, "protein-cell"),
+        ({"gene_dispersion": "foo"}, "gene_dispersion must be one of"),
+        ({"protein_dispersion": "foo"}, "protein_dispersion must be one of"),
+    ],
 )
 def test_cell_dispersion_is_rejected_at_construction(kwargs, match):
     adata = _make_adata(n_samples=3)
