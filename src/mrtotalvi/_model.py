@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,7 +15,7 @@ from scvi import REGISTRY_KEYS, settings
 from scvi.data import AnnDataManager, fields
 from scvi.data._utils import _check_if_view
 from scvi.model._totalvi import TOTALVI
-from scvi.model._utils import get_max_epochs_heuristic
+from scvi.model._utils import _get_var_names_from_manager, get_max_epochs_heuristic
 from scvi.model.base import EmbeddingMixin
 from scvi.model.base._save_load import _load_saved_files
 from scvi.module._constants import MODULE_KEYS
@@ -62,6 +63,9 @@ if TYPE_CHECKING:
 # Defaults taken from released MrVI (scvi.external.mrvi: DEFAULT_QZ_ATTENTION_KWARGS and
 # Adam eps=1e-8, weight_decay=1e-8), plus MrVI's two-layer u encoder (encoder_n_layers=2),
 # lr=2e-3 and no plateau schedule (candidate p05, user 2026-11-18).
+# True only while ``load`` rebuilds the model in this thread; see the empty-donor check in __init__.
+_LOADING_CHECKPOINT: ContextVar[bool] = ContextVar("mrtotalvi_loading_checkpoint", default=False)
+
 DEFAULT_QZ_KWARGS: dict = {"stop_gradients_mlp": True, "dropout_rate": 0.03}
 DEFAULT_QU_KWARGS: dict = {"n_layers": 2}
 DEFAULT_PLAN_KWARGS: dict = {"eps": 1e-8, "weight_decay": 1e-8}
@@ -282,9 +286,6 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
 
     _module_cls = MrTotalVAE
 
-    # True only while ``load`` rebuilds the model; see the empty-donor check in __init__.
-    _loading_checkpoint = False
-
     def __init__(
         self,
         adata: AnnData,
@@ -337,13 +338,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # ``None`` during ``load`` means a checkpoint that predates the flag: rebuild the old
         # architecture. Outside ``load``, ``None`` means "on".
         if spec_defaults is None:
-            spec_defaults = not MrTotalVI._loading_checkpoint
+            spec_defaults = not _LOADING_CHECKPOINT.get()
         spec_defaults = bool(spec_defaults)
         if spec_defaults:
             qz_kwargs = {**DEFAULT_QZ_KWARGS, **(qz_kwargs or {})}
             # New models save the resolved qu_kwargs. During load, take the saved value as is:
             # checkpoints from before the two-layer default saved None (one layer).
-            if not MrTotalVI._loading_checkpoint:
+            if not _LOADING_CHECKPOINT.get():
                 qu_kwargs = {**DEFAULT_QU_KWARGS, **(qu_kwargs or {})}
         resolved_u_prior, resolved_u_prior_mixture = resolve_u_prior(
             u_prior,
@@ -402,6 +403,16 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "model but training fails because the label tensor is not passed to "
                 "the generative step. Use 'gene' or 'gene-batch'."
             )
+        if model_kwargs.get("gene_dispersion", "gene") == "gene-cell":
+            raise ValueError(
+                "gene_dispersion='gene-cell' is not supported: TOTALVI has no gene-cell branch and "
+                "the first forward pass fails with UnboundLocalError. Use 'gene' or 'gene-batch'."
+            )
+        if model_kwargs.get("protein_dispersion", "protein") == "protein-cell":
+            raise ValueError(
+                "protein_dispersion='protein-cell' is not supported: TOTALVI has no protein-cell branch "
+                "and the first forward pass fails with UnboundLocalError. Use 'protein' or 'protein-batch'."
+            )
         if model_kwargs.get("protein_dispersion", "protein") == "protein-label":
             raise ValueError(
                 "protein_dispersion='protein-label' is not supported: TOTALVI builds "
@@ -453,7 +464,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # so an empty donor is allowed there. A fresh model with scale_observations=True
         # fails here because a donor weight would divide by zero cells. Other fresh models
         # fail in ``train``.
-        if missing and scale_observations and not MrTotalVI._loading_checkpoint:
+        if missing and scale_observations and not _LOADING_CHECKPOINT.get():
             raise ValueError(
                 f"Donors at index positions {missing} have no cells in the registered "
                 "AnnData, and scale_observations=True weights each cell by its donor's "
@@ -707,11 +718,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                     "subset and reorder the genes to the trained order."
                 )
 
-        MrTotalVI._loading_checkpoint = True
+        token = _LOADING_CHECKPOINT.set(True)
         try:
             model = super().load(dir_path, *args, **kwargs)
         finally:
-            MrTotalVI._loading_checkpoint = False
+            _LOADING_CHECKPOINT.reset(token)
         model._check_feature_names(model.adata)
         module = model.module
         if (
@@ -1798,10 +1809,37 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             **kwargs,
         )
         with _eval_mode(self.module):
-            if library_size is None or isinstance(library_size, str) or library_size == 1:
-                rna, protein = super().get_normalized_expression(library_size=library_size, **request)
+            library_arg = library_size if library_size is None or isinstance(library_size, str) else 1
+            # Upstream indexes the protein-name tuple with a list when it builds DataFrames, so a
+            # protein subset is requested as arrays and labelled here.
+            frame_subset = (
+                protein_list is not None
+                and n_samples_overall is None
+                and not kwargs.get("return_numpy")
+                and not (kwargs.get("n_samples", 1) > 1 and kwargs.get("return_mean", True) is False)
+            )
+            if frame_subset:
+                rna, protein = super().get_normalized_expression(
+                    library_size=library_arg, **{**request, "return_numpy": True}
+                )
+                rows = np.arange(resolved.n_obs) if loader_indices is None else loader_indices
+                rows = resolved.obs_names[rows]
+                manager = self.get_anndata_manager(resolved)
+                genes = _get_var_names_from_manager(manager)
+                if gene_list is not None:
+                    genes = genes[[gene in gene_list for gene in genes]]
+                proteins = np.asarray(self.protein_state_registry.column_names)
+                proteins = proteins[[name in protein_list for name in proteins]]
+                rna = pd.DataFrame(rna, columns=genes, index=rows)
+                protein = pd.DataFrame(protein, columns=proteins, index=rows)
             else:
-                rna, protein = super().get_normalized_expression(library_size=1, **request)
+                rna, protein = super().get_normalized_expression(library_size=library_arg, **request)
+            if (
+                library_arg == 1
+                and library_size is not None
+                and not isinstance(library_size, str)
+                and library_size != 1
+            ):
                 rna = rna * library_size
         if inverse is None:
             return rna, protein

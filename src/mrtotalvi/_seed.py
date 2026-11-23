@@ -98,6 +98,7 @@ def combine_mrtotalvi_seed_results(
             if output in dataset.data_vars and setting not in dataset.attrs
         }
         | {key for key in _LATER_SETTING_ATTRS if len({key in dataset.attrs for dataset in datasets}) > 1}
+        | {key for key in ("context_table_sha256",) if len({key in dataset.attrs for dataset in datasets}) > 1}
         | {
             "specified_panel"
             for dataset in datasets
@@ -130,6 +131,16 @@ def combine_mrtotalvi_seed_results(
             raise ValueError(
                 f"Seed results define different estimands (attributes {mismatched}); "
                 "they cannot share one between-seed SD."
+            )
+        if (
+            template.attrs.get("observed_library_estimand") != "posterior_lognormal_mean"
+            and "context_table_sha256" in dataset.attrs
+            and "context_table_sha256" in template.attrs
+            and dataset.attrs["context_table_sha256"] != template.attrs["context_table_sha256"]
+        ):
+            raise ValueError(
+                "Seed results were built from different context tables (context_table_sha256 differs), "
+                "so they do not share one between-seed SD."
             )
         try:
             xr.align(template, dataset, join="exact", copy=False)
@@ -193,6 +204,10 @@ def combine_mrtotalvi_seed_results(
     combined.attrs["uncertainty_separation"] = (
         "within-seed posterior draws and between-seed training variation are reported separately and never pooled"
     )
+    # Model-estimated library sizes make the context table differ per seed by design.
+    hashes = [dataset.attrs.get("context_table_sha256") for dataset in datasets]
+    if template.attrs.get("observed_library_estimand") == "posterior_lognormal_mean" and any(hashes):
+        combined.attrs["context_table_sha256"] = ",".join(h for h in hashes if h)
     combined.attrs["training_seed_order"] = ",".join(map(str, seeds))
     combined.attrs["between_seed_skipped_latent_variables"] = ",".join(skipped_latent)
     return combined
