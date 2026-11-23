@@ -18,12 +18,12 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Programming Language :: Python :: 3.14",
-  "Programming Language :: Python :: 3.15",
 ]
 dynamic = [ "version" ]
 dependencies = [
   "dask",
+  # Private scvi-tools API is imported (scvi.model._totalvi, scvi.module._totalvae and others), so
+  # a new scvi-tools release can break this package. Only 1.5.2 is tested locally; there is no upper pin.
   "scvi-tools>=1.5.2",
   # for debug logging (referenced from the issue template)
   "session-info2",
@@ -140,6 +140,10 @@ lint.per-file-ignores."docs/*" = [ "I" ]
 lint.per-file-ignores."docs/reviews/*" = [ "D", "I" ]
 lint.per-file-ignores."tests/*" = [ "D" ]
 lint.pydocstyle.convention = "numpy"
+
+[tool.pyproject-fmt]
+# Classifiers list only the Python versions CI tests (3.12, 3.13).
+max_supported_python = "3.13"
 
 [tool.mypy]
 files = [ "src", "tests" ]

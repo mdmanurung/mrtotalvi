@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -13,14 +16,16 @@ from scvi import REGISTRY_KEYS, settings
 from scvi.data import AnnDataManager, fields
 from scvi.data._utils import _check_if_view
 from scvi.model._totalvi import TOTALVI
-from scvi.model._utils import get_max_epochs_heuristic
+from scvi.model._utils import _get_var_names_from_manager, get_max_epochs_heuristic
 from scvi.model.base import EmbeddingMixin
+from scvi.model.base._save_load import _load_saved_files
 from scvi.module._constants import MODULE_KEYS
 from scvi.utils import setup_anndata_dsp
 from tqdm import tqdm
 
 from ._ambient import AmbientProfile
 from ._contracts import (
+    authoritative_protein_names,
     ordered_indices_sha256,
     resolve_u_prior,
     resolve_u_prior_supervision,
@@ -38,6 +43,7 @@ from ._stats import (
     _as_indices,
     _differential_expression,
     _loader_order,
+    _restore_request_order,
 )
 from ._stats import (
     differential_abundance as _differential_abundance,
@@ -58,9 +64,23 @@ if TYPE_CHECKING:
 # Defaults taken from released MrVI (scvi.external.mrvi: DEFAULT_QZ_ATTENTION_KWARGS and
 # Adam eps=1e-8, weight_decay=1e-8), plus MrVI's two-layer u encoder (encoder_n_layers=2),
 # lr=2e-3 and no plateau schedule (candidate p05, user 2026-11-18).
+# True only while ``load`` rebuilds the model in this thread; see the empty-donor check in __init__.
+_LOADING_CHECKPOINT: ContextVar[bool] = ContextVar("mrtotalvi_loading_checkpoint", default=False)
+
 DEFAULT_QZ_KWARGS: dict = {"stop_gradients_mlp": True, "dropout_rate": 0.03}
 DEFAULT_QU_KWARGS: dict = {"n_layers": 2}
 DEFAULT_PLAN_KWARGS: dict = {"eps": 1e-8, "weight_decay": 1e-8}
+
+
+@contextmanager
+def _eval_mode(module):
+    """Run ``module`` in eval mode and restore the caller's training flag, so BatchNorm stats stay put."""
+    was_training = module.training
+    module.eval()
+    try:
+        yield
+    finally:
+        module.train(was_training)
 
 
 class MrTotalVI(EmbeddingMixin, TOTALVI):
@@ -253,15 +273,19 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     * ``batch_key``  → decoder ``cat_list``.
     * ``panel_key``  → protein background prior.
 
+    The protein background prior follows scvi-tools: ``empirical_protein_background_prior``
+    defaults to ``None``, which turns it on above 10 proteins. It is computed once at
+    construction from all registered cells, including any you hold out later. For
+    held-out evaluation, pass ``empirical_protein_background_prior=False`` or construct
+    the model on the training cells only. The inherited initializer SD shrinks with the
+    number of sampled cells, as ``sqrt(sum(s_i^2)) / n``.
+
     See Also
     --------
     :class:`~._module.MrTotalVAE`
     """
 
     _module_cls = MrTotalVAE
-
-    # True only while ``load`` rebuilds the model; see the empty-donor check in __init__.
-    _loading_checkpoint = False
 
     def __init__(
         self,
@@ -315,13 +339,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # ``None`` during ``load`` means a checkpoint that predates the flag: rebuild the old
         # architecture. Outside ``load``, ``None`` means "on".
         if spec_defaults is None:
-            spec_defaults = not MrTotalVI._loading_checkpoint
+            spec_defaults = not _LOADING_CHECKPOINT.get()
         spec_defaults = bool(spec_defaults)
         if spec_defaults:
             qz_kwargs = {**DEFAULT_QZ_KWARGS, **(qz_kwargs or {})}
             # New models save the resolved qu_kwargs. During load, take the saved value as is:
             # checkpoints from before the two-layer default saved None (one layer).
-            if not MrTotalVI._loading_checkpoint:
+            if not _LOADING_CHECKPOINT.get():
                 qu_kwargs = {**DEFAULT_QU_KWARGS, **(qu_kwargs or {})}
         resolved_u_prior, resolved_u_prior_mixture = resolve_u_prior(
             u_prior,
@@ -380,12 +404,26 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "model but training fails because the label tensor is not passed to "
                 "the generative step. Use 'gene' or 'gene-batch'."
             )
+        if model_kwargs.get("gene_dispersion", "gene") == "gene-cell":
+            raise ValueError(
+                "gene_dispersion='gene-cell' is not supported: TOTALVI has no gene-cell branch and "
+                "the first forward pass fails with UnboundLocalError. Use 'gene' or 'gene-batch'."
+            )
+        if model_kwargs.get("protein_dispersion", "protein") == "protein-cell":
+            raise ValueError(
+                "protein_dispersion='protein-cell' is not supported: TOTALVI has no protein-cell branch "
+                "and the first forward pass fails with UnboundLocalError. Use 'protein' or 'protein-batch'."
+            )
         if model_kwargs.get("protein_dispersion", "protein") == "protein-label":
             raise ValueError(
                 "protein_dispersion='protein-label' is not supported: TOTALVI builds "
                 "the model but the first forward pass fails because no label tensor "
                 "reaches inference. Use 'protein' or 'protein-batch'."
             )
+        for axis, supported in (("gene", ("gene", "gene-batch")), ("protein", ("protein", "protein-batch"))):
+            value = model_kwargs.get(f"{axis}_dispersion", axis)
+            if value not in supported:
+                raise ValueError(f"{axis}_dispersion must be one of {supported}; got {value!r}.")
 
         # Call TOTALVI.__init__. n_sample / n_latent_sample / z_u_prior_scale /
         # learn_z_u_prior_scale are explicit kwargs here but are absent from
@@ -431,7 +469,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # so an empty donor is allowed there. A fresh model with scale_observations=True
         # fails here because a donor weight would divide by zero cells. Other fresh models
         # fail in ``train``.
-        if missing and scale_observations and not MrTotalVI._loading_checkpoint:
+        if missing and scale_observations and not _LOADING_CHECKPOINT.get():
             raise ValueError(
                 f"Donors at index positions {missing} have no cells in the registered "
                 "AnnData, and scale_observations=True weights each cell by its donor's "
@@ -494,6 +532,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self._init_prior_from_data = bool(init_prior_from_data)
         self._freeze_prior_after_init = bool(freeze_prior_after_init)
         self.vamp_training_indices_sha256_ = None
+        # Training cells per donor in ``sample_order``; set by train(), None when unknown.
+        self.n_train_cells_per_sample_ = None
         self.vamp_initialization_seed_ = u_prior_init_seed if init_prior_from_data else None
         self.sample_order = self.adata_manager.get_state_registry(REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
         self.label_order = self.adata_manager.get_state_registry(REGISTRY_KEYS.LABELS_KEY).categorical_mapping
@@ -670,12 +710,30 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         }:
             raise ValueError("u_encoder_mode_override must be one of {None, 'sample_conditioned', 'sample_blind'}.")
 
-        MrTotalVI._loading_checkpoint = True
+        # scvi-tools only warns on a gene mismatch and re-registers the passed adata, so the
+        # trained names come from the checkpoint itself.
+        bound = inspect.signature(TOTALVI.load).bind_partial(dir_path, *args, **kwargs).arguments
+        query = bound.get("adata")
+        if query is not None:
+            _, trained_names, _, _ = _load_saved_files(
+                dir_path,
+                False,
+                prefix=bound.get("prefix"),
+                map_location="cpu",
+                backup_url=bound.get("backup_url"),
+            )
+            if trained_names is not None and list(query.var_names) != list(trained_names):
+                raise ValueError(
+                    "adata.var_names do not match the genes the checkpoint was trained on; "
+                    "subset and reorder the genes to the trained order."
+                )
+
+        token = _LOADING_CHECKPOINT.set(True)
         try:
             model = super().load(dir_path, *args, **kwargs)
         finally:
-            MrTotalVI._loading_checkpoint = False
-        model._check_protein_names(model.adata)
+            _LOADING_CHECKPOINT.reset(token)
+        model._check_feature_names(model.adata)
         module = model.module
         if (
             module.sample_embedding_prior_scale is not None or module.u_encoder_sample_embedding_prior_scale is not None
@@ -796,6 +854,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         both are arguments of this method and overwrite the same keys in ``plan_kwargs``. KL warm-up,
         early stopping, batch size and clipping keep their TOTALVI defaults.
 
+        Early stopping monitors ``elbo_validation`` (the scvi-tools default), which is
+        cell-weighted: its reconstruction and KL terms are plain per-cell sums. With
+        ``scale_observations=True`` the training loss weights cells by donor, so
+        ``elbo_validation`` is not the quantity being minimised. The training plan then also
+        logs ``donor_balanced_loss_train`` and ``donor_balanced_loss_validation``, equal to
+        the weighted loss the module trains on. They are for monitoring only and do not
+        change the loss, the monitor or when training stops.
+
         Data-initialized Vamp pseudo-inputs are resolved from the exact training
         indices before the first optimizer step. Pass ``accelerator='cpu'``
         explicitly to suppress the no-GPU warning.
@@ -878,7 +944,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
         # would then run without dropout and skip the u-invariance penalty.
         self.module.train()
-        return super().train(
+        result = super().train(
             max_epochs=max_epochs,
             lr=lr,
             accelerator=accelerator,
@@ -898,6 +964,29 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             external_indexing=resolved_external_indexing,
             **kwargs,
         )
+        self._record_train_cells_per_sample()
+        return result
+
+    def _record_train_cells_per_sample(self) -> None:
+        """Count training cells per donor from the resolved split and warn on empty donors."""
+        train_indices = getattr(self, "train_indices_", None)
+        if train_indices is None:
+            self.n_train_cells_per_sample_ = None
+            return
+        sample_codes = np.asarray(self.adata.obs["_scvi_sample"], dtype=np.int64)
+        self.n_train_cells_per_sample_ = np.bincount(
+            sample_codes[np.asarray(train_indices, dtype=np.int64)],
+            minlength=len(self.sample_order),
+        )
+        untrained = np.asarray(self.sample_order)[self.n_train_cells_per_sample_ == 0]
+        if untrained.size:
+            warnings.warn(
+                f"Donors {untrained.tolist()} have no training cells, so their observed "
+                "response never entered the likelihood. Counterfactual outputs for these "
+                "targets are not backed by training data; see train_support.",
+                UserWarning,
+                stacklevel=3,
+            )
 
     def _warn_inherited_training_schedule(
         self,
@@ -1005,6 +1094,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             layer=layer,
             protein_expression_obsm_key=protein_expression_obsm_key,
         )
+        # Pure check: a DataFrame/uns conflict or duplicate names raise. Non-string labels
+        # stay allowed here, as before; paths that need strings check them later.
+        authoritative_protein_names(
+            adata,
+            protein_expression_obsm_key=protein_expression_obsm_key,
+            protein_names_uns_key=protein_names_uns_key,
+            required=False,
+            require_strings=False,
+        )
         # Add integer index column required by compute_local_statistics
         adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
 
@@ -1076,11 +1174,20 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # the batch registry order.
             if seed_background_prior_from_ambient:
                 raise ValueError("seed_background_prior_from_ambient needs a single pooled profile.")
+
+            # Batch categories may be numeric; match profile keys by their string form,
+            # with whole-number floats written as ints so 1, 1.0 and np.int64(1) agree.
+            def batch_name(value) -> str:
+                if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, (bool, np.bool_)):
+                    if float(value).is_integer():
+                        return str(int(value))
+                return str(value)
+
             batches = [
-                str(b) for b in self.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping
+                batch_name(b)
+                for b in self.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping
             ]
-            # Batch categories may be numeric; match profile keys by their string form.
-            by_name = {str(k): v for k, v in ambient_profile.items()}
+            by_name = {batch_name(k): v for k, v in ambient_profile.items()}
             if len(by_name) != len(ambient_profile):
                 raise ValueError("ambient_profile has keys that collide as strings (for example 1 and '1').")
             missing = sorted(set(batches) - set(by_name))
@@ -1100,6 +1207,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             profile = stacked
         else:
             profile = ambient_profile.aligned(names) if ambient_profile is not None else None
+        if profile is not None:
+            for stat in ("profile", "log1p_mean", "log1p_sd", "dsb_log_mean", "dsb_log_sd"):
+                if not np.all(np.isfinite(getattr(profile, stat))):
+                    raise ValueError(f"ambient_profile.{stat} must be finite.")
         isotype_mask = None
         if isotype_names is not None:
             unknown = sorted(set(map(str, isotype_names)) - set(names))
@@ -1136,6 +1247,23 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                     alpha.copy_(mean)
                     self.module.background_pro_log_beta.copy_(log_sd)
 
+    def _isotype_nan(self, values, protein_list=None):
+        """Set isotype control columns to NaN in ``ambient_isotype`` mode (ADR-0011)."""
+        if self.module.protein_noise_model != "ambient_isotype" or not self.isotype_names or values is None:
+            return values
+        names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+        if protein_list is not None:
+            names = names[np.isin(names, list(protein_list))]
+        is_iso = np.isin(names.astype(str), self.isotype_names)
+        if hasattr(values, "iloc"):
+            values = values.astype(float)
+            values.loc[:, is_iso] = np.nan
+        else:
+            values = np.array(values, dtype=float)
+            # Sample stacks are (cells, proteins, samples); the protein axis is 1.
+            values[:, is_iso] = np.nan
+        return values
+
     @torch.inference_mode()
     def get_protein_noise_decomposition(
         self,
@@ -1144,14 +1272,20 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         n_samples: int = 25,
         batch_size: int = 256,
     ) -> dict[str, pd.DataFrame]:
-        """Posterior expected protein components on the raw count scale (ADR-0011).
+        """Expected protein components on the raw count scale (ADR-0011).
 
         Returns DataFrames ``native``, ``ambient``, ``nonspecific``, ``observed`` and
         ``foreground_probability`` (cells x proteins), each the mean over ``n_samples``
-        posterior draws. ``observed`` is the sum of the three count components. Isotype
+        draws of ``z`` from its posterior. ``observed`` is the fitted expected total count
+        (the sum of the three components, the mixture mean), not the measured count.
+        ``foreground_probability`` is the decoder mixture weight ``1 - pi``, not the
+        posterior probability of foreground given the observed counts ``y``. Isotype
         controls are dropped from the protein columns. Proteins not measured in a
         cell's panel are ``NaN``.
         """
+        self._check_if_trained(warn=False)
+        if isinstance(n_samples, bool) or not isinstance(n_samples, (int, np.integer)) or n_samples < 1:
+            raise ValueError(f"n_samples must be an integer >= 1; got {n_samples!r}.")
         adata = self._validate_anndata(adata)
         indices = _as_indices(adata, indices)
         # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
@@ -1166,13 +1300,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         chunks: dict[str, list] = {}
         masks = []
         mask_table = self.module.protein_batch_mask
-        for tensors in loader:
-            out = self.module.protein_components(tensors, n_samples=n_samples)
-            for key, value in out.items():
-                chunks.setdefault(key, []).append(value.cpu().numpy())
-            if mask_table is not None:
-                panel = tensors[self.module.panel_key].reshape(-1).cpu().numpy().astype(int)
-                masks.append(np.stack([mask_table[str(p)] for p in panel]).astype(bool))
+        with _eval_mode(self.module):
+            for tensors in loader:
+                out = self.module.protein_components(tensors, n_samples=n_samples)
+                for key, value in out.items():
+                    chunks.setdefault(key, []).append(value.cpu().numpy())
+                if mask_table is not None:
+                    panel = tensors[self.module.panel_key].reshape(-1).cpu().numpy().astype(int)
+                    masks.append(np.stack([mask_table[str(p)] for p in panel]).astype(bool))
         if indices.dtype == np.bool_:
             indices = np.flatnonzero(indices)
         index = adata.obs_names[indices]
@@ -1688,42 +1823,95 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``library_size`` inside the ``transform_batch`` loop, so two batches at
         ``library_size=1000`` gave row sums near 500500. This runs the upstream method at
         ``library_size=1``, where that loop is exact, and scales the RNA output once.
-        Protein output and ``library_size`` of ``1`` or ``"latent"`` are unchanged.
+        Protein output and ``library_size`` of ``1`` or ``"latent"`` are unchanged, except
+        that with ``protein_noise_model="ambient_isotype"`` isotype control columns of the
+        protein output are ``NaN`` (their foreground probability is not identified).
         For backed AnnData, rows come back in the requested order (upstream returns them
         sorted but labels them in request order). See
         :meth:`scvi.model.TOTALVI.get_normalized_expression`.
         """
         resolved = self.adata if adata is None else adata
+        if n_samples_overall is not None:
+            # Same draw as upstream (with replacement); done here so backed data loads the drawn rows.
+            indices = np.random.choice(_as_indices(resolved, indices), n_samples_overall)
         loader_indices, inverse = _loader_order(resolved, indices)
         request = dict(
             adata=adata,
             indices=loader_indices,
-            n_samples_overall=n_samples_overall,
             transform_batch=transform_batch,
             gene_list=gene_list,
             protein_list=protein_list,
             **kwargs,
         )
-        if library_size is None or isinstance(library_size, str) or library_size == 1:
-            rna, protein = super().get_normalized_expression(library_size=library_size, **request)
-        else:
-            rna, protein = super().get_normalized_expression(library_size=1, **request)
-            rna = rna * library_size
+        with _eval_mode(self.module):
+            library_arg = library_size if library_size is None or isinstance(library_size, str) else 1
+            # Upstream indexes the protein-name tuple with a list when it builds DataFrames, so a
+            # protein subset is requested as arrays and labelled here.
+            frame_subset = (
+                protein_list is not None
+                and n_samples_overall is None
+                and not kwargs.get("return_numpy")
+                and not (kwargs.get("n_samples", 1) > 1 and kwargs.get("return_mean", True) is False)
+            )
+            if frame_subset:
+                rna, protein = super().get_normalized_expression(
+                    library_size=library_arg, **{**request, "return_numpy": True}
+                )
+                rows = np.arange(resolved.n_obs) if loader_indices is None else loader_indices
+                rows = resolved.obs_names[rows]
+                manager = self.get_anndata_manager(resolved)
+                genes = _get_var_names_from_manager(manager)
+                if gene_list is not None:
+                    genes = genes[[gene in gene_list for gene in genes]]
+                proteins = np.asarray(self.protein_state_registry.column_names)
+                proteins = proteins[[name in protein_list for name in proteins]]
+                rna = pd.DataFrame(rna, columns=genes, index=rows)
+                protein = pd.DataFrame(protein, columns=proteins, index=rows)
+            else:
+                rna, protein = super().get_normalized_expression(library_size=library_arg, **request)
+            if (
+                library_arg == 1
+                and library_size is not None
+                and not isinstance(library_size, str)
+                and library_size != 1
+            ):
+                rna = rna * library_size
+        protein = self._isotype_nan(protein, protein_list)
         if inverse is None:
             return rna, protein
-        requested = np.asarray(indices)
-        if requested.dtype == np.bool_:
-            requested = np.flatnonzero(requested)
-        names = np.asarray(resolved.obs_names)[requested]
+        names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
+        return _restore_request_order(rna, inverse, names), _restore_request_order(protein, inverse, names)
 
-        def request_order(values):
-            if hasattr(values, "iloc"):
-                reordered = values.iloc[inverse].copy()
-                reordered.index = names
-                return reordered
-            return values[inverse]
+    def _in_request_order(self, method, adata, indices, **kwargs):
+        """Run an inherited ``method`` loading each backed cell once, then restore request order."""
+        resolved = self.adata if adata is None else adata
+        loader_indices, inverse = _loader_order(resolved, indices)
+        output = method(adata=adata, indices=loader_indices, **kwargs)
+        if inverse is None:
+            return output
+        names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
+        return _restore_request_order(output, inverse, names)
 
-        return request_order(rna), request_order(protein)
+    def get_protein_foreground_probability(self, adata=None, indices=None, **kwargs):
+        """TOTALVI ``get_protein_foreground_probability`` in request order; isotype columns are ``NaN``.
+
+        Rows come back in the requested order on backed AnnData. With
+        ``protein_noise_model="ambient_isotype"`` the loss is the same for any mixing logit of
+        an isotype control, so its foreground probability is not identified. Those columns are
+        ``NaN``, as in :meth:`get_protein_noise_decomposition`. Other modes are unchanged. Pass
+        arguments after ``indices`` by keyword. See
+        :meth:`scvi.model.TOTALVI.get_protein_foreground_probability`.
+        """
+        out = self._in_request_order(super().get_protein_foreground_probability, adata, indices, **kwargs)
+        return self._isotype_nan(out, kwargs.get("protein_list"))
+
+    def get_latent_library_size(self, adata=None, indices=None, **kwargs):
+        """TOTALVI ``get_latent_library_size`` with rows in the requested order on backed data."""
+        return self._in_request_order(super().get_latent_library_size, adata, indices, **kwargs)
+
+    def posterior_predictive_sample(self, adata=None, indices=None, **kwargs):
+        """TOTALVI ``posterior_predictive_sample`` with rows in the requested order on backed data."""
+        return self._in_request_order(super().posterior_predictive_sample, adata, indices, **kwargs)
 
     @torch.inference_mode()
     def get_feature_correlation_matrix(
@@ -1761,16 +1949,21 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             transform_batch = [transform_batch]
         transform_batch = _get_batch_code_from_category(adata_manager, transform_batch)
 
+        # Backed AnnData rejects repeated indices; load each cell once and expand back.
+        loader_indices, inverse = _loader_order(adata, indices)
         corr_mats = []
         for b in track(transform_batch, disable=silent):
-            denoised_data = self._get_denoised_samples(
-                adata=adata,
-                n_samples=n_samples,
-                batch_size=batch_size,
-                rna_size_factor=rna_size_factor,
-                transform_batch=b,
-                indices=indices,
-            )
+            with _eval_mode(self.module):
+                denoised_data = self._get_denoised_samples(
+                    adata=adata,
+                    n_samples=n_samples,
+                    batch_size=batch_size,
+                    rna_size_factor=rna_size_factor,
+                    transform_batch=b,
+                    indices=loader_indices,
+                )
+            if inverse is not None:
+                denoised_data = denoised_data[inverse]
             # Stack the posterior samples as extra rows: (cells * samples, features).
             flattened = np.concatenate([denoised_data[:, :, i] for i in range(n_samples)], axis=0).astype(np.float64)
             if log_transform is True:
@@ -1986,12 +2179,21 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Returns ``(reps, cell_names)`` with ``reps`` of shape ``(n_cells, n_sample,
         n_latent)``; see :meth:`_iter_cf_representations`.
         """
+        # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
+        # loaded rows back to the request order.
+        loader_indices, inverse = _loader_order(adata, indices)
         all_reps = []
-        all_cell_names = []
-        for batch_reps, cell_positions in self._iter_cf_representations(adata, indices, batch_size, use_mean=use_mean):
-            all_cell_names.extend(adata.obs_names[cell_positions].tolist())
+        all_positions = []
+        for batch_reps, cell_positions in self._iter_cf_representations(
+            adata, loader_indices, batch_size, use_mean=use_mean
+        ):
+            all_positions.append(cell_positions)
             all_reps.append(batch_reps)
-        return np.concatenate(all_reps, axis=0), all_cell_names
+        reps = np.concatenate(all_reps, axis=0)
+        positions = np.concatenate(all_positions)
+        if inverse is not None:
+            reps, positions = reps[inverse], positions[inverse]
+        return reps, adata.obs_names[positions].tolist()
 
     # ------------------------------------------------------------------
     # Public counterfactual API
@@ -2009,8 +2211,31 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # copy_if_view=False), so the caller's object is registered once.
             _check_if_view(adata, copy_if_view=copy_if_view)
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
-            self._check_protein_names(adata)
+            self._check_feature_names(adata)
         return super()._validate_anndata(adata, copy_if_view=copy_if_view)
+
+    def _check_feature_names(self, adata) -> None:
+        """Raise if RNA or protein names differ from the registered names and order.
+
+        The decoder reads features by position, so an equal-width permutation gives a
+        wrong latent without an error; scvi-tools only warns about RNA names on load.
+        """
+        registered_rna = self.adata_manager.get_state_registry(REGISTRY_KEYS.X_KEY).get("column_names")
+        if registered_rna is not None and list(adata.var_names) != list(registered_rna):
+            raise ValueError(
+                "adata.var_names do not match the registered RNA names and order; "
+                "subset and reorder the genes to the registry."
+            )
+        key = self.adata_manager.registry["setup_args"]["protein_expression_obsm_key"]
+        matrix = adata.obsm[key] if key in adata.obsm else None
+        if isinstance(matrix, pd.DataFrame):
+            registered = list(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+            if list(matrix.columns) != registered:
+                raise ValueError(
+                    f"adata.obsm['{key}'] columns do not match the registered protein names "
+                    "and order; reorder the protein matrix to the registry."
+                )
+        self._check_protein_names(adata)
 
     def _check_protein_names(self, adata) -> None:
         """Raise if ``adata.uns`` protein names differ from the registered order.
@@ -2208,15 +2433,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "The per-cell distance matrices",
                 "Pass groupby with keep_cell=False for group means, or fewer indices.",
             )
-            dists = np.empty((n_cells, n_sample, n_sample), dtype=np.float32)
-        cell_names: list[str] = []
+        # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
+        # loaded rows back to the request order, and a repeated cell counts once per
+        # request in the group means, as it does for in-memory data.
+        loader_indices, inverse = _loader_order(adata, indices)
+        weight = None if inverse is None else np.bincount(inverse)
+        if keep_cell:
+            n_loaded = n_cells if inverse is None else weight.size
+            dists = np.empty((n_loaded, n_sample, n_sample), dtype=np.float32)
+        positions_seen: list[np.ndarray] = []
         sums = {key: {} for key in group_keys}  # key -> group -> [sum matrix, n cells]
         start = 0
-        for batch_reps, positions in self._iter_cf_representations(adata, indices, batch_size, use_mean=use_mean):
+        for batch_reps, positions in self._iter_cf_representations(
+            adata, loader_indices, batch_size, use_mean=use_mean
+        ):
             chunk = torch.as_tensor(batch_reps, dtype=torch.float32)
             batch_d = torch.cdist(chunk, chunk, p=p, compute_mode="donot_use_mm_for_euclid_dist").numpy()
             batch_names = adata.obs_names[positions].tolist()
-            cell_names.extend(batch_names)
+            positions_seen.append(positions)
+            w = np.ones(len(positions)) if weight is None else weight[start : start + len(positions)]
             # A pair counts for a cell only where the cell has support in both samples.
             pair_ok = np.ones(batch_d.shape, dtype=bool)
             if admissibility is not None:
@@ -2230,11 +2465,18 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 labels = adata.obs[key].to_numpy()[positions]
                 for label in np.unique(labels):
                     in_group = labels == label
-                    total = np.where(pair_ok[in_group], batch_d[in_group], 0.0).sum(axis=0, dtype=np.float64)
-                    count = pair_ok[in_group].sum(axis=0)
+                    w_g = w[in_group][:, None, None]
+                    total = (np.where(pair_ok[in_group], batch_d[in_group], 0.0) * w_g).sum(axis=0, dtype=np.float64)
+                    count = (pair_ok[in_group] * w_g).sum(axis=0).astype(np.int64)
                     prior = sums[key].get(label, [0.0, 0])
                     sums[key][label] = [prior[0] + total, prior[1] + count]
 
+        positions = np.concatenate(positions_seen)
+        if inverse is not None:
+            positions = positions[inverse]
+            if keep_cell:
+                dists = dists[inverse]
+        cell_names = adata.obs_names[positions].tolist()
         coords = {"sample_x": self.sample_order, "sample_y": self.sample_order}
         if not group_keys:
             return xr.DataArray(

@@ -907,7 +907,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         factor, so its protein samples sit on a different scale from the fitted
         distribution (stock TOTALVI shares this). This override uses the fitted means.
         """
-        from scvi.distributions import NegativeBinomial, NegativeBinomialMixture
+        from scvi.distributions import NegativeBinomial, NegativeBinomialMixture, ZeroInflatedNegativeBinomial
 
         _, generative_outputs = self.forward(
             tensors,
@@ -917,7 +917,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         px_ = generative_outputs["px_"]
         py_ = generative_outputs["py_"]
         efficiency = generative_outputs["per_batch_efficiency"]
-        rna_dist = NegativeBinomial(mu=px_["rate"], theta=px_["r"])
+        if self.gene_likelihood == "zinb":
+            rna_dist = ZeroInflatedNegativeBinomial(mu=px_["rate"], theta=px_["r"], zi_logits=px_["dropout"])
+        else:
+            rna_dist = NegativeBinomial(mu=px_["rate"], theta=px_["r"])
         protein_dist = NegativeBinomialMixture(
             mu1=efficiency * py_["rate_back"],
             mu2=efficiency * py_["rate_fore"],
@@ -964,6 +967,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             kl_z = -\log p(\varepsilon) = -\log N(0,\; \exp(\text{pz\_scale}))(\varepsilon)
 
         and folds it into both ``loss`` and ``kl_local["kl_div_z"]``.
+
+        The ``LogNormal(0, 1)`` prior on the batch-protein efficiency is applied per cell, as
+        in stock TotalVI. Each cell adds ``-log p(efficiency)`` for its batch, so the shared
+        parameter's prior weight grows with the batch's cell count.
         """
         if "eps" in inference_outputs and (
             inference_outputs[MODULE_KEYS.Z_KEY].ndim > 2 or self.protein_noise_model != "totalvi"
@@ -1075,6 +1082,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             loss_out.extra_metrics["u_invariance"] = u_pen.detach()
 
         penalty = self.sample_embedding_penalty()
+        # With donor weighting, elbo_validation stays cell-weighted (it is the early-stopping
+        # monitor). Log the loss the module trains on as a second, donor-balanced metric;
+        # scvi logs it as donor_balanced_loss_<train|validation>.
+        weighted = self._scale_observations and self.n_obs_per_sample is not None
+        if weighted:
+            full = loss if penalty is None else loss + penalty / self._n_obs_total
+            loss_out.extra_metrics["donor_balanced_loss"] = full.detach()
         if penalty is None:
             return LossOutput(
                 loss=loss,
@@ -1147,7 +1161,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             decoded = []
             for s in (sample_index, cf_sample):
                 with torch.no_grad():
-                    z_base, eps, _ = self.qz(u_detached, s)
+                    z_base, eps, _ = self.qz(u_detached, s, deterministic=True)
                 dec = self._deterministic_decoder_parameters(
                     z_base + eps, library, batch_index, cont_covs=cont_covs, cat_covs=cat_covs
                 )
@@ -1234,9 +1248,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 raise ValueError("ambient_profile must be finite, non-negative, with one column per protein.")
             if profile.shape[0] not in {1, self.n_batch}:
                 raise ValueError("ambient_profile needs one pooled row or one row per batch.")
+            if not np.all(profile.sum(axis=1) > 0):
+                raise ValueError(
+                    "ambient_profile needs a positive row sum for every row; an all-zero row has no composition."
+                )
             profile = profile / profile.sum(axis=1, keepdims=True)
             self.register_buffer("ambient_profile", torch.as_tensor(profile))
             loc, scale = ambient_burden_prior
+            if not (np.isfinite(loc) and np.isfinite(scale) and scale > 0):
+                raise ValueError("ambient_burden_prior must be a finite (loc, scale) with scale > 0.")
             self.ambient_burden_prior_loc = float(loc)
             self.ambient_burden_prior_scale = float(scale)
             n_iso = 0
@@ -1261,12 +1281,16 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             sd = np.atleast_2d(np.asarray(dsb_log_sd, dtype=np.float32))
             if mean.shape != sd.shape or mean.shape[1] != P:
                 raise ValueError("DSB statistics need one column per protein.")
+            if not (np.all(np.isfinite(mean)) and np.all(np.isfinite(sd))):
+                raise ValueError("DSB statistics must be finite.")
             self.register_buffer("dsb_log_mean", torch.as_tensor(mean))
             if not np.all(sd > 1e-3):
+                low = np.flatnonzero(~np.all(sd > 1e-3, axis=0))
                 raise ValueError(
-                    "protein_encoder_input='ambient_zscore' needs a positive empty-droplet log SD "
-                    f"for every protein; proteins at columns {np.flatnonzero(~np.all(sd > 1e-3, axis=0)).tolist()} "
-                    "have none."
+                    "protein_encoder_input='ambient_zscore' needs an empty-droplet log SD above 1e-3 "
+                    f"for every protein; proteins at columns {low.tolist()} have SD "
+                    f"{np.round(sd.min(axis=0)[low], 6).tolist()}, from few or no counts in cell-free "
+                    "droplets, so their z-scores would be undefined or extreme."
                 )
             self.register_buffer("dsb_log_sd", torch.as_tensor(sd))
             self.qu.protein_input_pretransformed = True
@@ -1316,6 +1340,38 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             base["h"] = inference_outputs.get("h")
         return base
 
+    def _snapshot_background_bn(self):
+        """Copy the BatchNorm buffers of the protein background decoder."""
+        return [
+            (m, {k: getattr(m, k).detach().clone() for k in ("running_mean", "running_var", "num_batches_tracked")})
+            for m in self.decoder.py_back_decoder.modules()
+            if isinstance(m, nn.modules.batchnorm._BatchNorm) and m.track_running_stats
+        ]
+
+    def _background_head(self, z_base, batch_index, cont_covs, cat_covs, transform_batch):
+        """Protein background parameters at ``z_base``; runs only the background head.
+
+        Mirrors ``TOTALVAE.generative`` and ``DecoderTOTALVI.forward`` for ``back_alpha``,
+        ``back_beta`` and ``rate_back``, without running the RNA and other protein heads.
+        """
+        if cont_covs is None:
+            decoder_input = z_base
+        elif z_base.dim() != cont_covs.dim():
+            decoder_input = torch.cat([z_base, cont_covs.unsqueeze(0).expand(z_base.size(0), -1, -1)], dim=-1)
+        else:
+            decoder_input = torch.cat([z_base, cont_covs], dim=-1)
+        categorical_input = torch.split(cat_covs, 1, dim=1) if cat_covs is not None else ()
+        if transform_batch is not None:
+            batch_index = torch.ones_like(batch_index) * transform_batch
+        dec = self.decoder
+        cat_list = (batch_index, *categorical_input)
+        back = dec.py_back_decoder(decoder_input, *cat_list)
+        back_cat_z = torch.cat([back, decoder_input], dim=-1)
+        alpha = dec.py_back_mean_log_alpha(back_cat_z, *cat_list)
+        beta = dec.activation_function_bg(dec.py_back_mean_log_beta(back_cat_z, *cat_list)) + 1e-8
+        rate_back = torch.exp(Normal(alpha, beta).rsample())
+        return {"back_alpha": alpha, "back_beta": beta, "rate_back": rate_back}
+
     def generative(
         self,
         z,
@@ -1331,9 +1387,16 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         h=None,
     ):
         """TOTALVAE generative step, extended by the opt-in ADR-0011 protein model."""
-        out = super().generative(z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch)
         mode = getattr(self, "protein_noise_model", "totalvi")
         source = getattr(self, "protein_background_source", "z")
+        # With source "z_base" the z pass's background BatchNorm update is dropped, so that head
+        # advances once, on z_base (see ``_background_head``).
+        bn_state = self._snapshot_background_bn() if source == "z_base" and self.training else None
+        out = super().generative(z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch)
+        if bn_state is not None:
+            for bn, saved in bn_state:
+                for name, value in saved.items():
+                    getattr(bn, name).copy_(value)
         if mode == "totalvi" and source == "z":
             return out
         py_ = out["py_"]
@@ -1342,11 +1405,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 raise NotImplementedError("protein_background_source='z_base' needs z_base from inference.")
             if z_base.ndim < z.ndim:
                 z_base = z_base.expand_as(z)
-            py_b = super().generative(
-                z_base, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch
-            )["py_"]
-            for key in ("back_alpha", "back_beta", "rate_back"):
-                py_[key] = py_b[key]
+            py_.update(self._background_head(z_base, batch_index, cont_covs, cat_covs, transform_batch))
         fore_scale = py_["fore_scale"]
         back_mean = torch.exp(py_["back_alpha"] + 0.5 * py_["back_beta"].square())
         b_idx = batch_index if transform_batch is None else torch.full_like(batch_index, int(transform_batch))
@@ -1506,9 +1565,19 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         foreground_probability = 1.0 - torch.sigmoid(mixing)
         background_contribution = (1.0 - foreground_probability) * background
         foreground_contribution = foreground_probability * foreground
+        rna_rate = library_size * rna_scale
+        rna_extra = {}
+        if self.gene_likelihood == "zinb":
+            # rna_rate stays the NB component mean; the expected count also needs the zero probability.
+            zero_probability = torch.sigmoid(decoder.px_dropout_decoder_gene(mixing_cat_z, *conditioning))
+            rna_extra = {
+                "rna_zero_probability": zero_probability,
+                "rna_expected_count": (1.0 - zero_probability) * rna_rate,
+            }
         return {
             "rna_scale": rna_scale,
-            "rna_rate": library_size * rna_scale,
+            "rna_rate": rna_rate,
+            **rna_extra,
             "protein_background_component_mean": background,
             "protein_foreground_component_mean": foreground,
             "protein_foreground_probability": foreground_probability,

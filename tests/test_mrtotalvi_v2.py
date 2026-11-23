@@ -898,6 +898,7 @@ def test_counterfactual_latent_schema_order_and_v2_only_contract():
         "target_support",
         "observed_sample",
     }
+    assert result.attrs["train_support"] == "unknown"  # untrained fixture: no recorded split
     assert result.cell_name.to_numpy().tolist() == adata.obs_names[indices].tolist()
     assert result.target_sample.to_numpy().tolist() == targets
     assert result["u"].dims == ("draw", "cell_name", "latent_u_dim")

@@ -48,10 +48,42 @@ def _rowwise_max_excluding_diagonal(matrix: torch.Tensor) -> torch.Tensor:
     return torch.where(mask, matrix, torch.tensor(-float("inf"), device=matrix.device)).max(dim=1).values
 
 
+def _leave_one_out_max(component_distribution, points: torch.Tensor, batch_size: int) -> torch.Tensor:
+    """Row-wise max of ``log_prob`` of ``points`` over their own components, excluding each row's own."""
+    out = []
+    for start in range(0, points.shape[0], batch_size):
+        rows = points[start : start + batch_size]
+        scores = component_distribution.log_prob(rows.unsqueeze(-2))
+        # Rows start..start+len(rows) sit on columns start.. of the square matrix.
+        own = torch.arange(rows.shape[0], device=scores.device)
+        scores[own, own + start] = -float("inf")
+        out.append(scores.max(dim=1).values)
+    return torch.cat(out)
+
+
 def _as_indices(adata, indices):
     if indices is None:
         return np.arange(adata.n_obs)
-    return np.asarray(indices)
+    indices = np.asarray(indices)
+    if indices.dtype == np.bool_:
+        if indices.shape != (adata.n_obs,):
+            raise ValueError(f"Boolean indices have length {indices.size}, expected n_obs={adata.n_obs}.")
+        return np.flatnonzero(indices)
+    return indices
+
+
+def _restore_request_order(values, inverse, names):
+    """Reorder loader rows (unique, ascending) back to the request order.
+
+    ``values`` may be a DataFrame (re-labelled with ``names``), an array or a dict of arrays.
+    """
+    if isinstance(values, dict):
+        return {key: _restore_request_order(value, inverse, names) for key, value in values.items()}
+    if hasattr(values, "iloc"):
+        reordered = values.iloc[inverse].copy()
+        reordered.index = names
+        return reordered
+    return values[inverse]
 
 
 def _loader_order(adata, indices):
@@ -217,6 +249,27 @@ def _knn_log_density(counts: np.ndarray, n_ref: np.ndarray) -> np.ndarray:
     with np.errstate(divide="ignore"):
         out = np.log(counts + 0.5) - np.log(n_ref)
     return np.where(n_ref > 0, out, np.nan)
+
+
+def _warn_if_posterior_below_spacing(ap, u: np.ndarray, n_sample: int = 1000) -> None:
+    """Warn when posterior kernels are narrower than the typical gap between cells (sampled)."""
+    if len(u) < 2:
+        # One cell has no neighbour, so there is no spacing to compare against.
+        return
+    rng = np.random.default_rng(0)
+    pts = torch.as_tensor(u[rng.choice(len(u), size=min(len(u), n_sample), replace=False)], dtype=torch.float32)
+    dist = torch.cdist(pts, pts)
+    dist.fill_diagonal_(float("inf"))
+    spacing = dist.min(dim=1).values.median().item()
+    scale = ap.component_distribution.base_dist.scale.float().median().item()
+    if scale < spacing:
+        warnings.warn(
+            f"The median posterior scale ({scale:.3g}) is below the median nearest-neighbour spacing "
+            f"({spacing:.3g}) of u, so density_estimator='posterior' scores are dominated by noise on "
+            "a null. Try density_estimator='scale_floor' with scale_floor, or 'knn'.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _leave_one_cell_out(ap, u_tensor, lp: np.ndarray, own: np.ndarray) -> np.ndarray:
@@ -459,6 +512,8 @@ def differential_abundance(
             sample=sample_name,
             batch_size=batch_size,
         )
+        if density_estimator == "posterior" and not log_probs:
+            _warn_if_posterior_below_spacing(ap, us_list[0])
         if density_estimator == "scale_floor":
             base = ap.component_distribution.base_dist
             ap = MixtureSameFamily(
@@ -1232,8 +1287,7 @@ def get_outlier_cell_sample_pairs(
         # A one-component mixture has no leave-one-out score, so it adds nothing to the
         # pooled threshold (its 1x1 entry would be the cell's own self-density).
         if sample_idxs.shape[0] > 1:
-            in_comp_log_probs = ap.component_distribution.log_prob(in_sample.unsqueeze(-2))
-            thresholds.append(_rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu())
+            thresholds.append(_leave_one_out_max(ap.component_distribution, in_sample, batch_size).detach().cpu())
 
         # A cell inside this sample's subsample must not match its own component,
         # mirroring the leave-one-out thresholds above.

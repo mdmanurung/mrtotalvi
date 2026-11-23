@@ -704,8 +704,11 @@ def _estimate_expression_bytes(
     n_proteins: int,
     n_quantiles: int,
     posterior_mc: bool,
+    n_gene_outputs: int = 2,
 ) -> int:
-    per_draw = n_cells * n_targets * (2 * n_genes + 7 * n_proteins)
+    # Gene outputs are rna_scale and rna_rate, plus rna_zero_probability and
+    # rna_expected_count under zinb.
+    per_draw = n_cells * n_targets * (n_gene_outputs * n_genes + 7 * n_proteins)
     float_elements = n_draws * per_draw
     if posterior_mc:
         float_elements += (1 + n_quantiles) * per_draw
@@ -1029,6 +1032,12 @@ def get_counterfactual_latent(
     one global quantile. The two rules can disagree for a cell-sample pair. In both, a
     cell's own sample is scored leave-one-out, so about ``support_quantile`` of a sample's
     own cells fail by design.
+
+    ``train_support`` is separate from ``target_support``: it is True when the target donor
+    had training cells (``model.n_train_cells_per_sample_``) and False when it had none.
+    A model with no recorded split (an older checkpoint) omits it and sets
+    ``attrs["train_support"] = "unknown"``. ``target_support`` and ``admissible`` do not
+    use it.
     """
     _preflight_zarr_path(zarr_path)
     if model.hierarchy_mode != "centered_v2":
@@ -1186,6 +1195,12 @@ def get_counterfactual_latent(
     )
     registered_labels = np.asarray([str(value) for value in model.sample_order])
     observed_labels = registered_labels[observed_indices]
+    # True = target donor has training cells. None when the split is unknown (older
+    # checkpoint): the variable is then omitted rather than given a truthy sentinel.
+    n_train = getattr(model, "n_train_cells_per_sample_", None)
+    train_support = (
+        None if n_train is None else np.broadcast_to(np.asarray(n_train)[target_indices] > 0, support.shape).copy()
+    )
     dataset = xr.Dataset(
         {
             "u": (
@@ -1253,6 +1268,10 @@ def get_counterfactual_latent(
             "interpretation": INTERPRETATION,
         },
     )
+    if train_support is None:
+        dataset.attrs["train_support"] = "unknown"
+    else:
+        dataset["train_support"] = (("cell_name", "target_sample"), train_support)
     if inference_mode == "posterior_mc":
         dataset = _add_posterior_summaries(
             dataset,
@@ -1346,6 +1365,7 @@ def get_counterfactual_expression(
         n_targets=target_indices.size,
         n_draws=n_draws,
         n_genes=gene_indices.size,
+        n_gene_outputs=4 if model.module.gene_likelihood == "zinb" else 2,
         n_proteins=protein_indices.size,
         n_quantiles=quantile_values.size,
         posterior_mc=inference_mode == "posterior_mc",
@@ -1402,6 +1422,7 @@ def get_counterfactual_expression(
             n_targets=target_indices.size,
             n_draws=n_draws,
             n_genes=gene_indices.size,
+            n_gene_outputs=4 if model.module.gene_likelihood == "zinb" else 2,
             n_proteins=protein_indices.size,
             n_quantiles=quantile_values.size,
             posterior_mc=inference_mode == "posterior_mc",
@@ -1495,6 +1516,12 @@ def get_counterfactual_expression(
     protein_shape = (*draw_cell_target, protein_indices.size)
     rna_scale = np.zeros(rna_shape, dtype=np.float32)
     rna_rate = np.zeros(rna_shape, dtype=np.float32)
+    # ZINB only: accumulated per scenario from per-draw values, so no product of averages.
+    rna_zinb = {}
+    if model.module.gene_likelihood == "zinb":
+        rna_zinb = {
+            name: np.zeros(rna_shape, dtype=np.float32) for name in ("rna_zero_probability", "rna_expected_count")
+        }
     protein_values = {
         name: np.zeros(protein_shape, dtype=np.float32)
         for name in (
@@ -1582,7 +1609,7 @@ def get_counterfactual_expression(
                         else None
                     ),
                 )
-                for key in ("rna_scale", "rna_rate"):
+                for key in ("rna_scale", "rna_rate", *rna_zinb):
                     pieces.setdefault(key, []).append(chunk[key].index_select(1, gene_index_t).detach().cpu())
                 for key in protein_values:
                     pieces.setdefault(key, []).append(chunk[key].index_select(1, protein_index_t).detach().cpu())
@@ -1607,6 +1634,11 @@ def get_counterfactual_expression(
                 )
                 rna_scale[..., feature_start:feature_stop] += weights * decoded_rna_scale
                 rna_rate[..., feature_start:feature_stop] += weights * decoded_rna_rate
+                for name, values in rna_zinb.items():
+                    decoded_zinb = (
+                        decoded[name][:, feature_start:feature_stop].reshape(selected_shape).detach().cpu().numpy()
+                    )
+                    values[..., feature_start:feature_stop] += weights * decoded_zinb
 
             protein_step = feature_chunk_size or protein_indices.size
             for feature_start in range(0, protein_indices.size, protein_step):
@@ -1658,6 +1690,7 @@ def get_counterfactual_expression(
             ("draw", "cell_name", "target_sample", "gene"),
             rna_rate,
         ),
+        **{name: (("draw", "cell_name", "target_sample", "gene"), values) for name, values in rna_zinb.items()},
         **{
             variable_name: (
                 ("draw", "cell_name", "target_sample", "protein"),

@@ -296,6 +296,12 @@ Write `r` for the vector of within-donor log density ratios at one query cell.
 The grouped log enrichment equals `logsumexp(r / 2) - logsumexp(-r / 2)`.
 Its sign can differ from `mean(r)`. Both summaries describe fitted local densities.
 
+## Ambient protein noise: isotype outputs
+
+With `protein_noise_model="ambient_isotype"`, the loss is the same for any mixing logit of an isotype control. Its foreground probability is not identified. `get_protein_foreground_probability` and the protein part of `get_normalized_expression` return `NaN` for isotype columns. `get_protein_noise_decomposition` drops them. Other modes are unchanged.
+
+In `get_protein_noise_decomposition`, `observed` is the fitted expected total count (the mixture mean), not the measured count. `foreground_probability` is the decoder mixture weight `1 - pi`, not the probability of foreground given the observed counts.
+
 ## Statistical APIs
 
 MrTotalVI exposes aggregated-posterior and outlier utilities and descriptive DA:
@@ -380,13 +386,18 @@ multiplied by the batch size, and `kl_weight` warm-up does not scale it. The pen
 reported as `kl_global`, which the training plan divides by `n_obs_training`. With a
 `train_size` below 1, the penalty is relative to all cells, not the training split.
 
-Three reporting details. First, with the legacy `scale_observations=True` each cell’s data term
+Four reporting details. First, with the legacy `scale_observations=True` each cell’s data term
 is divided by its sample’s cell count while the penalty is not, so one sigma shrinks relatively more
 strongly, by about the sample’s cell count (the gradient ratio on `qz.embedding.weight` rose by the sample’s cell count in a toy run).
 `centered_v2` weights average to 1 and are unaffected. Second, `elbo_validation` reports the
 penalty as `kl_global / n_obs_validation`, about `n_cells / n_obs_validation` times its
 size in the loss (0.035 against 0.0035 nats in a toy run), and `get_elbo` leaves the penalty out.
-Third, `MrTotalVI.load` rebuilds the model on the AnnData you pass, so `n_cells` is that
+Third, early stopping monitors `elbo_validation`, which is cell-weighted. With
+`scale_observations=True` the training loss weights cells by donor, so the monitor is not the
+loss being minimised. `model.history` then also holds `donor_balanced_loss_train` and
+`donor_balanced_loss_validation`, the weighted loss the module trains on. They are logged only;
+the monitor and the stopping rule are unchanged.
+Fourth, `MrTotalVI.load` rebuilds the model on the AnnData you pass, so `n_cells` is that
 AnnData’s size. A load on a different cell set changes the penalty strength for continued
 training, and a `UserWarning` says so when the checkpoint stores the training count (models with
 `scale_observations=True`).
@@ -402,7 +413,10 @@ normalisation. Check the spread of the embeddings after training before relying 
 schedule (`reduce_lr_on_plateau=False`; TOTALVI uses `lr=4e-3` with the schedule).
 Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
 `reduce_lr_on_plateau` to `train()`. The small `eps` matters for the legacy
-`scale_observations=True` loss, whose gradients are divided by the cells per sample. Two defaults act on the `u`/`eps` hierarchy, and
+`scale_observations=True` loss, whose gradients are divided by the cells per sample. Early
+stopping monitors `elbo_validation`, which is cell-weighted even when
+`scale_observations=True` weights the training loss by donor. The two can rank fits
+differently. Two defaults act on the `u`/`eps` hierarchy, and
 `train()` warns when either applies.
 
 - **KL warm-up.** `n_steps_kl_warmup` defaults to `0.75 * n_obs` steps, while the default
@@ -437,6 +451,15 @@ so its protein values sit on a different scale from `get_counterfactual_expressi
 Other inherited TOTALVI methods are not re-derived for `u`/`eps`: `get_marginal_ll` raises, and
 `get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell’s
 own donor `eps` (use the counterfactual APIs to change the donor).
+
+### Empirical protein background prior
+
+`empirical_protein_background_prior` keeps the scvi-tools default: `None`, which
+enables the prior above 10 proteins. The model computes it at construction from all
+registered cells, including any you hold out later. For held-out evaluation, pass
+`empirical_protein_background_prior=False` or construct the model on the training cells
+only. The inherited initializer SD shrinks with the number of sampled cells, as
+`sqrt(sum(s_i^2)) / n`.
 
 ## v1 Limitations
 

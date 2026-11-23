@@ -50,13 +50,17 @@ With `A = c_i a` (free ambient; `a` the pooled profile, `log c_i ~ N(0, 2)`),
 - `"z_base"` decodes `B` (its log mean and SD) from `z_base(u)` instead of `z`.
 
 `eff` (`log_per_batch_efficiency`, prior `LogNormal(0, 1)`) multiplies every
-component (C7). `q(log c)` reads `log1p` of all protein counts and the log total;
+component (C7). The prior is applied per cell, as in stock totalVI: each cell adds
+`-log p(eff)` for its batch, and the loss takes the mean over cells, so a batch's prior weight
+grows with its cell count. It is not counted once per shared parameter. `q(log c)` reads `log1p` of all protein counts and the log total;
 `q(h)` reads the isotype block and the log total only.
 
 Posterior component means on the raw count scale come from
 `MrTotalVI.get_protein_noise_decomposition`: `native = eff (1 - pi) S`,
 `ambient = eff A`, `nonspecific = eff B` or `eff N`, and `observed` is their sum.
 Isotypes are dropped from its columns, and unmeasured panel entries are `NaN`.
+`observed` is the fitted mixture mean, and `foreground_probability` is the decoder mixture weight `1 - pi`, not P(foreground | y).
+In `ambient_isotype` mode the foreground probability of isotypes is unidentified, so the inherited getters return `NaN` for them.
 
 ### Calibration (`mrtotalvi.preprocessing.estimate_adt_ambient`)
 

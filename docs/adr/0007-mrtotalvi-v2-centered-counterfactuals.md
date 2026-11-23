@@ -122,16 +122,22 @@ absent gradients. This mode changes only `EncoderXU_TotalVI`; MrMultiVI behavior
 - `z_base(draw, cell_name, latent_dim)`
 - `eps_raw`, `eps_centered`, `z(draw, cell_name, target_sample, latent_dim)`
 - `admissible`, `target_support(cell_name, target_sample)`
+- `train_support(cell_name, target_sample)`, bool (omitted when the split is unknown)
 - `observed_sample(cell_name)`
 
 `target_support` means that a target is registered and retains at least one reference cell after
 factual self-exclusion. `admissible` is the separate aggregated-posterior threshold result.
+`train_support` is True when the target donor had training cells and False when it had none. A
+model with no recorded split (older checkpoint) omits it and sets `attrs["train_support"] = "unknown"`. It never changes `target_support` or `admissible`.
 
 ### Counterfactual expression dataset
 
 `get_counterfactual_expression()` is available only for `centered_v2` and returns:
 
 - `rna_scale`, `rna_rate(draw, cell_name, target_sample, gene)`
+- `rna_zero_probability`, `rna_expected_count(draw, cell_name, target_sample, gene)`, only with
+  `gene_likelihood="zinb"`. `rna_rate` is the NB mean before dropout; `rna_expected_count` is
+  `(1 - rna_zero_probability) * rna_rate`, computed per draw.
 - `protein_background_component_mean`
 - `protein_foreground_component_mean`
 - `protein_foreground_probability`
