@@ -1079,10 +1079,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             batches = [
                 str(b) for b in self.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping
             ]
-            missing = sorted(set(batches) - set(map(str, ambient_profile)))
+            # Batch categories may be numeric; match profile keys by their string form.
+            by_name = {str(k): v for k, v in ambient_profile.items()}
+            if len(by_name) != len(ambient_profile):
+                raise ValueError("ambient_profile has keys that collide as strings (for example 1 and '1').")
+            missing = sorted(set(batches) - set(by_name))
             if missing:
                 raise ValueError(f"No ambient profile for batches {missing}.")
-            parts = [ambient_profile[b].aligned(names) for b in batches]
+            parts = [by_name[b].aligned(names) for b in batches]
             stacked = AmbientProfile(
                 feature_names=names,
                 profile=np.stack([p.profile for p in parts]),

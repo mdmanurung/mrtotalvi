@@ -190,3 +190,28 @@ def test_decomposition_follows_request_order_on_backed_adata(sim, tmp_path, batc
         assert list(out[key].index) == list(backed.obs_names[request])
         np.testing.assert_allclose(out[key].values, ref[key].loc[backed.obs_names[request]].values, rtol=1e-6)
 
+
+def test_per_batch_profiles_accept_numeric_batch_keys():
+    adata, _, empties = simulate_citeseq(seed=1, cells_per_donor=40, n_empty=800, batch_specific_ambient=True)
+    adata.obs["batch_num"] = adata.obs["batch"].map({"well0": 0, "well1": 1}).astype(int)
+    by = empties["droplet_batch"]
+    profiles = {
+        int(b[-1]): estimate_adt_ambient(
+            empties["raw_counts"][by == b],
+            np.asarray(empties["raw_barcodes"])[by == b],
+            adata.obs_names,
+            empties["feature_names"],
+            adt_features=empties["adt_features"],
+        )
+        for b in np.unique(by)
+    }
+    MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch_num")
+    model = MrTotalVI(adata, sample_key="donor", ambient_profile=profiles, protein_noise_model="ambient", n_latent=4)
+    np.testing.assert_allclose(model.module.ambient_profile.numpy()[1], profiles[1].profile, rtol=1e-5)
+    with pytest.raises(ValueError, match="collide as strings"):
+        MrTotalVI(
+            adata,
+            sample_key="donor",
+            ambient_profile={0: profiles[0], 1: profiles[1], "1": profiles[1]},
+            protein_noise_model="ambient",
+        )
