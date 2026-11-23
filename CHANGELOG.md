@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- Opt-in ambient- and isotype-aware protein noise models (ADR-0011). Defaults are unchanged.
+  `mrtotalvi.preprocessing.estimate_adt_ambient` builds a pooled ambient ADT profile from
+  unfiltered droplets, selecting them over RNA and ADT as scAR does. `MrTotalVI` takes
+  `protein_noise_model` (`"ambient"`, `"ambient_isotype"`), `protein_background_source="z_base"`,
+  `protein_encoder_input="ambient_zscore"`, `seed_background_prior_from_ambient` and per-batch
+  profiles. `get_protein_noise_decomposition` returns native, ambient, nonspecific and observed
+  means. Counterfactual and differential-expression decoding raise `NotImplementedError` in the
+  opt-in modes for now. On planted simulations, `"ambient"` with
+  `anneal_protein_likelihood=False` cut native log1p RMSE against the matched baseline on all five
+  data sets (for example 0.37 vs 0.54), and cut spurious null-marker log2 fold changes under a
+  condition-confounded ambient burden from 0.19-0.21 to 0.02-0.04. Seeding the prior from empty
+  droplets and the z-score encoder input made results worse. These are simulation results only;
+  no real-data check has run.
+
 ### Fixed
 
 - Tests: the legacy-oracle CPU portability policy now records an observed worst-case float32
