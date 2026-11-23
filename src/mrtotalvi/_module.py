@@ -1154,7 +1154,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             decoded = []
             for s in (sample_index, cf_sample):
                 with torch.no_grad():
-                    z_base, eps, _ = self.qz(u_detached, s)
+                    z_base, eps, _ = self.qz(u_detached, s, deterministic=True)
                 dec = self._deterministic_decoder_parameters(
                     z_base + eps, library, batch_index, cont_covs=cont_covs, cat_covs=cat_covs
                 )
