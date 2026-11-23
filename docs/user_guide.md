@@ -296,6 +296,12 @@ Write `r` for the vector of within-donor log density ratios at one query cell.
 The grouped log enrichment equals `logsumexp(r / 2) - logsumexp(-r / 2)`.
 Its sign can differ from `mean(r)`. Both summaries describe fitted local densities.
 
+## Ambient protein noise: isotype outputs
+
+With `protein_noise_model="ambient_isotype"`, the loss is the same for any mixing logit of an isotype control. Its foreground probability is not identified. `get_protein_foreground_probability` and the protein part of `get_normalized_expression` return `NaN` for isotype columns. `get_protein_noise_decomposition` drops them. Other modes are unchanged.
+
+In `get_protein_noise_decomposition`, `observed` is the fitted expected total count (the mixture mean), not the measured count. `foreground_probability` is the decoder mixture weight `1 - pi`, not the probability of foreground given the observed counts.
+
 ## Statistical APIs
 
 MrTotalVI exposes aggregated-posterior and outlier utilities and descriptive DA:

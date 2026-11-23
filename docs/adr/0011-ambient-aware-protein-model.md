@@ -59,6 +59,8 @@ Posterior component means on the raw count scale come from
 `MrTotalVI.get_protein_noise_decomposition`: `native = eff (1 - pi) S`,
 `ambient = eff A`, `nonspecific = eff B` or `eff N`, and `observed` is their sum.
 Isotypes are dropped from its columns, and unmeasured panel entries are `NaN`.
+`observed` is the fitted mixture mean, and `foreground_probability` is the decoder mixture weight `1 - pi`, not P(foreground | y).
+In `ambient_isotype` mode the foreground probability of isotypes is unidentified, so the inherited getters return `NaN` for them.
 
 ### Calibration (`mrtotalvi.preprocessing.estimate_adt_ambient`)
 

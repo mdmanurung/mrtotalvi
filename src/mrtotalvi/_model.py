@@ -1234,6 +1234,23 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                     alpha.copy_(mean)
                     self.module.background_pro_log_beta.copy_(log_sd)
 
+    def _isotype_nan(self, values, protein_list=None):
+        """Set isotype control columns to NaN in ``ambient_isotype`` mode (ADR-0011)."""
+        if self.module.protein_noise_model != "ambient_isotype" or not self.isotype_names or values is None:
+            return values
+        names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+        if protein_list is not None:
+            names = names[np.isin(names, list(protein_list))]
+        is_iso = np.isin(names.astype(str), self.isotype_names)
+        if hasattr(values, "iloc"):
+            values = values.astype(float)
+            values.loc[:, is_iso] = np.nan
+        else:
+            values = np.array(values, dtype=float)
+            # Sample stacks are (cells, proteins, samples); the protein axis is 1.
+            values[:, is_iso] = np.nan
+        return values
+
     @torch.inference_mode()
     def get_protein_noise_decomposition(
         self,
@@ -1242,11 +1259,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         n_samples: int = 25,
         batch_size: int = 256,
     ) -> dict[str, pd.DataFrame]:
-        """Posterior expected protein components on the raw count scale (ADR-0011).
+        """Expected protein components on the raw count scale (ADR-0011).
 
         Returns DataFrames ``native``, ``ambient``, ``nonspecific``, ``observed`` and
         ``foreground_probability`` (cells x proteins), each the mean over ``n_samples``
-        posterior draws. ``observed`` is the sum of the three count components. Isotype
+        draws of ``z`` from its posterior. ``observed`` is the fitted expected total count
+        (the sum of the three components, the mixture mean), not the measured count.
+        ``foreground_probability`` is the decoder mixture weight ``1 - pi``, not the
+        posterior probability of foreground given the observed counts ``y``. Isotype
         controls are dropped from the protein columns. Proteins not measured in a
         cell's panel are ``NaN``.
         """
@@ -1790,7 +1810,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``library_size`` inside the ``transform_batch`` loop, so two batches at
         ``library_size=1000`` gave row sums near 500500. This runs the upstream method at
         ``library_size=1``, where that loop is exact, and scales the RNA output once.
-        Protein output and ``library_size`` of ``1`` or ``"latent"`` are unchanged.
+        Protein output and ``library_size`` of ``1`` or ``"latent"`` are unchanged, except
+        that with ``protein_noise_model="ambient_isotype"`` isotype control columns of the
+        protein output are ``NaN`` (their foreground probability is not identified).
         For backed AnnData, rows come back in the requested order (upstream returns them
         sorted but labels them in request order). See
         :meth:`scvi.model.TOTALVI.get_normalized_expression`.
@@ -1841,6 +1863,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 and library_size != 1
             ):
                 rna = rna * library_size
+        protein = self._isotype_nan(protein, protein_list)
         if inverse is None:
             return rna, protein
         names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
@@ -1857,8 +1880,17 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         return _restore_request_order(output, inverse, names)
 
     def get_protein_foreground_probability(self, adata=None, indices=None, **kwargs):
-        """TOTALVI ``get_protein_foreground_probability`` with rows in the requested order on backed data."""
-        return self._in_request_order(super().get_protein_foreground_probability, adata, indices, **kwargs)
+        """TOTALVI ``get_protein_foreground_probability`` in request order; isotype columns are ``NaN``.
+
+        Rows come back in the requested order on backed AnnData. With
+        ``protein_noise_model="ambient_isotype"`` the loss is the same for any mixing logit of
+        an isotype control, so its foreground probability is not identified. Those columns are
+        ``NaN``, as in :meth:`get_protein_noise_decomposition`. Other modes are unchanged. Pass
+        arguments after ``indices`` by keyword. See
+        :meth:`scvi.model.TOTALVI.get_protein_foreground_probability`.
+        """
+        out = self._in_request_order(super().get_protein_foreground_probability, adata, indices, **kwargs)
+        return self._isotype_nan(out, kwargs.get("protein_list"))
 
     def get_latent_library_size(self, adata=None, indices=None, **kwargs):
         """TOTALVI ``get_latent_library_size`` with rows in the requested order on backed data."""
