@@ -896,6 +896,7 @@ def test_counterfactual_latent_schema_order_and_v2_only_contract():
         "z",
         "admissible",
         "target_support",
+        "train_support",
         "observed_sample",
     }
     assert result.cell_name.to_numpy().tolist() == adata.obs_names[indices].tolist()

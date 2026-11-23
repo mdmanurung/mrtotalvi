@@ -494,6 +494,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self._init_prior_from_data = bool(init_prior_from_data)
         self._freeze_prior_after_init = bool(freeze_prior_after_init)
         self.vamp_training_indices_sha256_ = None
+        # Training cells per donor in ``sample_order``; set by train(), None when unknown.
+        self.n_train_cells_per_sample_ = None
         self.vamp_initialization_seed_ = u_prior_init_seed if init_prior_from_data else None
         self.sample_order = self.adata_manager.get_state_registry(REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
         self.label_order = self.adata_manager.get_state_registry(REGISTRY_KEYS.LABELS_KEY).categorical_mapping
@@ -878,7 +880,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
         # would then run without dropout and skip the u-invariance penalty.
         self.module.train()
-        return super().train(
+        super().train(
             max_epochs=max_epochs,
             lr=lr,
             accelerator=accelerator,
@@ -898,6 +900,28 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             external_indexing=resolved_external_indexing,
             **kwargs,
         )
+        self._record_train_cells_per_sample()
+
+    def _record_train_cells_per_sample(self) -> None:
+        """Count training cells per donor from the resolved split and warn on empty donors."""
+        train_indices = getattr(self, "train_indices_", None)
+        if train_indices is None:
+            self.n_train_cells_per_sample_ = None
+            return
+        sample_codes = np.asarray(self.adata.obs["_scvi_sample"], dtype=np.int64)
+        self.n_train_cells_per_sample_ = np.bincount(
+            sample_codes[np.asarray(train_indices, dtype=np.int64)],
+            minlength=len(self.sample_order),
+        )
+        untrained = np.asarray(self.sample_order)[self.n_train_cells_per_sample_ == 0]
+        if untrained.size:
+            warnings.warn(
+                f"Donors {untrained.tolist()} have no training cells, so their observed "
+                "response never entered the likelihood. Counterfactual outputs for these "
+                "targets are not backed by training data; see train_support.",
+                UserWarning,
+                stacklevel=3,
+            )
 
     def _warn_inherited_training_schedule(
         self,

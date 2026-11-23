@@ -1029,6 +1029,11 @@ def get_counterfactual_latent(
     one global quantile. The two rules can disagree for a cell-sample pair. In both, a
     cell's own sample is scored leave-one-out, so about ``support_quantile`` of a sample's
     own cells fail by design.
+
+    ``train_support`` is separate from ``target_support``: it is 1 when the target donor
+    had training cells (``model.n_train_cells_per_sample_``), 0 when it had none, and -1
+    when the model has no recorded split (an older checkpoint). ``target_support`` and
+    ``admissible`` do not use it.
     """
     _preflight_zarr_path(zarr_path)
     if model.hierarchy_mode != "centered_v2":
@@ -1186,6 +1191,12 @@ def get_counterfactual_latent(
     )
     registered_labels = np.asarray([str(value) for value in model.sample_order])
     observed_labels = registered_labels[observed_indices]
+    # 1 = target donor has training cells, 0 = none, -1 = unknown (no recorded split).
+    n_train = getattr(model, "n_train_cells_per_sample_", None)
+    if n_train is None:
+        train_support = np.full(support.shape, -1, dtype=np.int8)
+    else:
+        train_support = np.broadcast_to((np.asarray(n_train)[target_indices] > 0).astype(np.int8), support.shape).copy()
     dataset = xr.Dataset(
         {
             "u": (
@@ -1215,6 +1226,10 @@ def get_counterfactual_latent(
             "target_support": (
                 ("cell_name", "target_sample"),
                 support,
+            ),
+            "train_support": (
+                ("cell_name", "target_sample"),
+                train_support,
             ),
             "observed_sample": (("cell_name",), observed_labels),
         },

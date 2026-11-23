@@ -122,10 +122,13 @@ absent gradients. This mode changes only `EncoderXU_TotalVI`; MrMultiVI behavior
 - `z_base(draw, cell_name, latent_dim)`
 - `eps_raw`, `eps_centered`, `z(draw, cell_name, target_sample, latent_dim)`
 - `admissible`, `target_support(cell_name, target_sample)`
+- `train_support(cell_name, target_sample)`, int8
 - `observed_sample(cell_name)`
 
 `target_support` means that a target is registered and retains at least one reference cell after
 factual self-exclusion. `admissible` is the separate aggregated-posterior threshold result.
+`train_support` is 1 when the target donor had training cells, 0 when it had none, and -1 when the
+model has no recorded split (older checkpoint). It never changes `target_support` or `admissible`.
 
 ### Counterfactual expression dataset
 
