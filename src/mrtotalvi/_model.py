@@ -15,12 +15,14 @@ from scvi.data._utils import _check_if_view
 from scvi.model._totalvi import TOTALVI
 from scvi.model._utils import get_max_epochs_heuristic
 from scvi.model.base import EmbeddingMixin
+from scvi.model.base._save_load import _load_saved_files
 from scvi.module._constants import MODULE_KEYS
 from scvi.utils import setup_anndata_dsp
 from tqdm import tqdm
 
 from ._ambient import AmbientProfile
 from ._contracts import (
+    authoritative_protein_names,
     ordered_indices_sha256,
     resolve_u_prior,
     resolve_u_prior_supervision,
@@ -679,12 +681,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         }:
             raise ValueError("u_encoder_mode_override must be one of {None, 'sample_conditioned', 'sample_blind'}.")
 
+        # scvi-tools only warns on a gene mismatch and re-registers the passed adata, so the
+        # trained names come from the checkpoint itself.
+        query = args[0] if args else kwargs.get("adata")
+        if query is not None:
+            _, trained_names, _, _ = _load_saved_files(
+                dir_path, False, prefix=kwargs.get("prefix"), map_location="cpu", backup_url=kwargs.get("backup_url")
+            )
+            if trained_names is not None and list(query.var_names) != list(trained_names):
+                raise ValueError(
+                    "adata.var_names do not match the genes the checkpoint was trained on; "
+                    "subset and reorder the genes to the trained order."
+                )
+
         MrTotalVI._loading_checkpoint = True
         try:
             model = super().load(dir_path, *args, **kwargs)
         finally:
             MrTotalVI._loading_checkpoint = False
-        model._check_protein_names(model.adata)
+        model._check_feature_names(model.adata)
         module = model.module
         if (
             module.sample_embedding_prior_scale is not None or module.u_encoder_sample_embedding_prior_scale is not None
@@ -1043,6 +1058,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             adata,
             layer=layer,
             protein_expression_obsm_key=protein_expression_obsm_key,
+        )
+        # Pure check: a DataFrame/uns conflict, duplicates or non-string names raise.
+        authoritative_protein_names(
+            adata,
+            protein_expression_obsm_key=protein_expression_obsm_key,
+            protein_names_uns_key=protein_names_uns_key,
+            required=False,
         )
         # Add integer index column required by compute_local_statistics
         adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
@@ -2070,8 +2092,31 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # copy_if_view=False), so the caller's object is registered once.
             _check_if_view(adata, copy_if_view=copy_if_view)
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
-            self._check_protein_names(adata)
+            self._check_feature_names(adata)
         return super()._validate_anndata(adata, copy_if_view=copy_if_view)
+
+    def _check_feature_names(self, adata) -> None:
+        """Raise if RNA or protein names differ from the registered names and order.
+
+        The decoder reads features by position, so an equal-width permutation gives a
+        wrong latent without an error; scvi-tools only warns about RNA names on load.
+        """
+        registered_rna = self.adata_manager.get_state_registry(REGISTRY_KEYS.X_KEY).get("column_names")
+        if registered_rna is not None and list(adata.var_names) != list(registered_rna):
+            raise ValueError(
+                "adata.var_names do not match the registered RNA names and order; "
+                "subset and reorder the genes to the registry."
+            )
+        key = self.adata_manager.registry["setup_args"]["protein_expression_obsm_key"]
+        matrix = adata.obsm[key] if key in adata.obsm else None
+        if isinstance(matrix, pd.DataFrame):
+            registered = list(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+            if list(matrix.columns) != registered:
+                raise ValueError(
+                    f"adata.obsm['{key}'] columns do not match the registered protein names "
+                    "and order; reorder the protein matrix to the registry."
+                )
+        self._check_protein_names(adata)
 
     def _check_protein_names(self, adata) -> None:
         """Raise if ``adata.uns`` protein names differ from the registered order.
