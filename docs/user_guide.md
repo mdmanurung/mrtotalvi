@@ -407,7 +407,10 @@ normalisation. Check the spread of the embeddings after training before relying 
 schedule (`reduce_lr_on_plateau=False`; TOTALVI uses `lr=4e-3` with the schedule).
 Pass `eps` and `weight_decay` in `plan_kwargs` (your keys win); pass `lr` and
 `reduce_lr_on_plateau` to `train()`. The small `eps` matters for the legacy
-`scale_observations=True` loss, whose gradients are divided by the cells per sample. Two defaults act on the `u`/`eps` hierarchy, and
+`scale_observations=True` loss, whose gradients are divided by the cells per sample. Early
+stopping monitors `elbo_validation`, which is cell-weighted even when
+`scale_observations=True` weights the training loss by donor. The two can rank fits
+differently. Two defaults act on the `u`/`eps` hierarchy, and
 `train()` warns when either applies.
 
 - **KL warm-up.** `n_steps_kl_warmup` defaults to `0.75 * n_obs` steps, while the default

@@ -42,7 +42,7 @@ MrTotalVI.setup_anndata(
 model = MrTotalVI(adata, sample_key="donor_timepoint")
 model.train(n_epochs_kl_warmup=40)  # set warm-up here; train() overwrites plan_kwargs values
 
-u = model.get_latent_representation(give_z=False)  # sample-free cell state
+u = model.get_latent_representation(give_z=False)  # cell state; donor information can remain in u
 z = model.get_latent_representation(give_z=True)  # cell state with the sample residual
 ```
 

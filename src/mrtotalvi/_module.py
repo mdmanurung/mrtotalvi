@@ -967,6 +967,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             kl_z = -\log p(\varepsilon) = -\log N(0,\; \exp(\text{pz\_scale}))(\varepsilon)
 
         and folds it into both ``loss`` and ``kl_local["kl_div_z"]``.
+
+        The ``LogNormal(0, 1)`` prior on the batch-protein efficiency is applied per cell, as
+        in stock TotalVI. Each cell adds ``-log p(efficiency)`` for its batch, so the shared
+        parameter's prior weight grows with the batch's cell count.
         """
         if "eps" in inference_outputs and (
             inference_outputs[MODULE_KEYS.Z_KEY].ndim > 2 or self.protein_noise_model != "totalvi"
