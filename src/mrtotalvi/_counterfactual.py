@@ -1511,6 +1511,12 @@ def get_counterfactual_expression(
     protein_shape = (*draw_cell_target, protein_indices.size)
     rna_scale = np.zeros(rna_shape, dtype=np.float32)
     rna_rate = np.zeros(rna_shape, dtype=np.float32)
+    # ZINB only: accumulated per scenario from per-draw values, so no product of averages.
+    rna_zinb = {}
+    if model.module.gene_likelihood == "zinb":
+        rna_zinb = {
+            name: np.zeros(rna_shape, dtype=np.float32) for name in ("rna_zero_probability", "rna_expected_count")
+        }
     protein_values = {
         name: np.zeros(protein_shape, dtype=np.float32)
         for name in (
@@ -1598,7 +1604,7 @@ def get_counterfactual_expression(
                         else None
                     ),
                 )
-                for key in ("rna_scale", "rna_rate"):
+                for key in ("rna_scale", "rna_rate", *rna_zinb):
                     pieces.setdefault(key, []).append(chunk[key].index_select(1, gene_index_t).detach().cpu())
                 for key in protein_values:
                     pieces.setdefault(key, []).append(chunk[key].index_select(1, protein_index_t).detach().cpu())
@@ -1623,6 +1629,11 @@ def get_counterfactual_expression(
                 )
                 rna_scale[..., feature_start:feature_stop] += weights * decoded_rna_scale
                 rna_rate[..., feature_start:feature_stop] += weights * decoded_rna_rate
+                for name, values in rna_zinb.items():
+                    decoded_zinb = (
+                        decoded[name][:, feature_start:feature_stop].reshape(selected_shape).detach().cpu().numpy()
+                    )
+                    values[..., feature_start:feature_stop] += weights * decoded_zinb
 
             protein_step = feature_chunk_size or protein_indices.size
             for feature_start in range(0, protein_indices.size, protein_step):
@@ -1674,6 +1685,7 @@ def get_counterfactual_expression(
             ("draw", "cell_name", "target_sample", "gene"),
             rna_rate,
         ),
+        **{name: (("draw", "cell_name", "target_sample", "gene"), values) for name, values in rna_zinb.items()},
         **{
             variable_name: (
                 ("draw", "cell_name", "target_sample", "protein"),

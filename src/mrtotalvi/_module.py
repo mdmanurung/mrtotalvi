@@ -907,7 +907,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         factor, so its protein samples sit on a different scale from the fitted
         distribution (stock TOTALVI shares this). This override uses the fitted means.
         """
-        from scvi.distributions import NegativeBinomial, NegativeBinomialMixture
+        from scvi.distributions import NegativeBinomial, NegativeBinomialMixture, ZeroInflatedNegativeBinomial
 
         _, generative_outputs = self.forward(
             tensors,
@@ -917,7 +917,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         px_ = generative_outputs["px_"]
         py_ = generative_outputs["py_"]
         efficiency = generative_outputs["per_batch_efficiency"]
-        rna_dist = NegativeBinomial(mu=px_["rate"], theta=px_["r"])
+        if self.gene_likelihood == "zinb":
+            rna_dist = ZeroInflatedNegativeBinomial(mu=px_["rate"], theta=px_["r"], zi_logits=px_["dropout"])
+        else:
+            rna_dist = NegativeBinomial(mu=px_["rate"], theta=px_["r"])
         protein_dist = NegativeBinomialMixture(
             mu1=efficiency * py_["rate_back"],
             mu2=efficiency * py_["rate_fore"],
@@ -1550,9 +1553,19 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         foreground_probability = 1.0 - torch.sigmoid(mixing)
         background_contribution = (1.0 - foreground_probability) * background
         foreground_contribution = foreground_probability * foreground
+        rna_rate = library_size * rna_scale
+        rna_extra = {}
+        if self.gene_likelihood == "zinb":
+            # rna_rate stays the NB component mean; the expected count also needs the zero probability.
+            zero_probability = torch.sigmoid(decoder.px_dropout_decoder_gene(mixing_cat_z, *conditioning))
+            rna_extra = {
+                "rna_zero_probability": zero_probability,
+                "rna_expected_count": (1.0 - zero_probability) * rna_rate,
+            }
         return {
             "rna_scale": rna_scale,
-            "rna_rate": library_size * rna_scale,
+            "rna_rate": rna_rate,
+            **rna_extra,
             "protein_background_component_mean": background,
             "protein_foreground_component_mean": foreground,
             "protein_foreground_probability": foreground_probability,
