@@ -302,3 +302,29 @@ def test_protein_absent_from_empties_warns_and_blocks_zscore(sim):
     MrTotalVI.setup_anndata(data, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch")
     with pytest.raises(ValueError, match="positive empty-droplet log SD"):
         MrTotalVI(data, sample_key="donor", ambient_profile=profile, protein_encoder_input="ambient_zscore")
+
+
+def test_decomposition_drops_isotypes_with_integer_protein_names(sim):
+    # Integer protein column labels: isotype_names are matched as strings at setup,
+    # so the decomposition must compare str names too, or isotypes leak through.
+    import dataclasses
+
+    adata, truth, empties, profile = sim
+    adata = adata.copy()
+    old = list(adata.obsm["protein"].columns)
+    adata.obsm["protein"].columns = range(len(old))
+    int_profile = dataclasses.replace(profile, feature_names=[old.index(str(n)) for n in profile.feature_names])
+    iso = [str(old.index(n)) for n in ISOTYPES]
+    MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch")
+    model = MrTotalVI(
+        adata,
+        sample_key="donor",
+        ambient_profile=int_profile,
+        n_latent=4,
+        protein_noise_model="ambient_isotype",
+        isotype_names=iso,
+    )
+    out = model.get_protein_noise_decomposition(indices=np.arange(8), n_samples=2)
+    for frame in out.values():
+        assert not set(map(str, frame.columns)) & set(iso)
+        assert frame.shape[1] == len(old) - len(iso)

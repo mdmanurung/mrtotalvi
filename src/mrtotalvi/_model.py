@@ -1160,7 +1160,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
         keep = np.ones(names.size, dtype=bool)
         if getattr(self, "isotype_names", None):
-            keep = ~np.isin(names, self.isotype_names)
+            # self.isotype_names holds str names; registry names keep their dtype.
+            keep = ~np.isin(names.astype(str), self.isotype_names)
         loader = self._make_data_loader(adata=adata, indices=loader_indices, batch_size=batch_size)
         chunks: dict[str, list] = {}
         masks = []
