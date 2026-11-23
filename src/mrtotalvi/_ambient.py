@@ -15,6 +15,7 @@ The per-protein log statistics are DSB's step-I ambient statistics (niaid/dsb,
 from __future__ import annotations
 
 import hashlib
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -140,6 +141,8 @@ def estimate_adt_ambient(
         raise ValueError("raw_counts must be finite non-negative integer counts.")
     if not 0.0 < prob < 1.0:
         raise ValueError("prob must lie in (0, 1).")
+    if int(iterations) != iterations or iterations < 1:
+        raise ValueError("iterations must be a positive integer.")
 
     is_cell = np.isin(raw_barcodes, np.asarray(cell_barcodes).astype(str))
     totals_all = np.asarray(counts.sum(axis=1)).ravel()
@@ -179,6 +182,15 @@ def estimate_adt_ambient(
     if adt_sum.sum() <= 0:
         raise ValueError("Cell-free droplets carry no ADT counts.")
     profile = adt_sum / adt_sum.sum()
+    absent = [n for n, total in zip(adt_features, adt_sum, strict=True) if total == 0]
+    if absent:
+        # Their ambient share is 0 and their log SD is 0, so a z-scored encoder input
+        # for them is undefined (the model refuses it).
+        warnings.warn(
+            f"No ADT counts in any cell-free droplet for {absent}; their ambient statistics are not estimable.",
+            UserWarning,
+            stacklevel=2,
+        )
     l1_mean, l1_sd = _log_stats(cell_free, 1.0)
     dsb_mean, dsb_sd = _log_stats(cell_free, DSB_PSEUDOCOUNT)
     stats = (profile, l1_mean, l1_sd, dsb_mean, dsb_sd)

@@ -229,3 +229,37 @@ def test_counterfactual_u_encoding_uses_zscored_protein_input(sim):
     with torch.no_grad():
         ref = module.inference(**module._get_inference_input(tensors))["qu"].loc
     np.testing.assert_allclose(np.asarray(loc), ref.numpy(), atol=1e-5)
+
+
+def test_iterations_must_be_positive(sim):
+    _, _, empties, _ = sim
+    adata = sim[0]
+    with pytest.raises(ValueError, match="iterations must be a positive integer"):
+        estimate_adt_ambient(
+            empties["raw_counts"],
+            empties["raw_barcodes"],
+            adata.obs_names,
+            empties["feature_names"],
+            adt_features=empties["adt_features"],
+            iterations=0,
+        )
+
+
+def test_protein_absent_from_empties_warns_and_blocks_zscore(sim):
+    adata, _, empties, _ = sim
+    raw = empties["raw_counts"].tolil()
+    col = empties["feature_names"].index(empties["adt_features"][0])
+    is_cell = np.isin(empties["raw_barcodes"], adata.obs_names)
+    raw[np.flatnonzero(~is_cell), col] = 0
+    with pytest.warns(UserWarning, match="not estimable"):
+        profile = estimate_adt_ambient(
+            raw.tocsr(),
+            empties["raw_barcodes"],
+            adata.obs_names,
+            empties["feature_names"],
+            adt_features=empties["adt_features"],
+        )
+    data = adata.copy()
+    MrTotalVI.setup_anndata(data, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch")
+    with pytest.raises(ValueError, match="positive empty-droplet log SD"):
+        MrTotalVI(data, sample_key="donor", ambient_profile=profile, protein_encoder_input="ambient_zscore")

@@ -1262,7 +1262,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             if mean.shape != sd.shape or mean.shape[1] != P:
                 raise ValueError("DSB statistics need one column per protein.")
             self.register_buffer("dsb_log_mean", torch.as_tensor(mean))
-            self.register_buffer("dsb_log_sd", torch.as_tensor(np.maximum(sd, 1e-3)))
+            if not np.all(sd > 1e-3):
+                raise ValueError(
+                    "protein_encoder_input='ambient_zscore' needs a positive empty-droplet log SD "
+                    f"for every protein; proteins at columns {np.flatnonzero(~np.all(sd > 1e-3, axis=0)).tolist()} "
+                    "have none."
+                )
+            self.register_buffer("dsb_log_sd", torch.as_tensor(sd))
             self.qu.protein_input_pretransformed = True
 
     def _context_rows(self, table: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
