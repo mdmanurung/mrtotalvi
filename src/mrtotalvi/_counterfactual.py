@@ -704,8 +704,11 @@ def _estimate_expression_bytes(
     n_proteins: int,
     n_quantiles: int,
     posterior_mc: bool,
+    n_gene_outputs: int = 2,
 ) -> int:
-    per_draw = n_cells * n_targets * (2 * n_genes + 7 * n_proteins)
+    # Gene outputs are rna_scale and rna_rate, plus rna_zero_probability and
+    # rna_expected_count under zinb.
+    per_draw = n_cells * n_targets * (n_gene_outputs * n_genes + 7 * n_proteins)
     float_elements = n_draws * per_draw
     if posterior_mc:
         float_elements += (1 + n_quantiles) * per_draw
@@ -1362,6 +1365,7 @@ def get_counterfactual_expression(
         n_targets=target_indices.size,
         n_draws=n_draws,
         n_genes=gene_indices.size,
+        n_gene_outputs=4 if model.module.gene_likelihood == "zinb" else 2,
         n_proteins=protein_indices.size,
         n_quantiles=quantile_values.size,
         posterior_mc=inference_mode == "posterior_mc",
@@ -1418,6 +1422,7 @@ def get_counterfactual_expression(
             n_targets=target_indices.size,
             n_draws=n_draws,
             n_genes=gene_indices.size,
+            n_gene_outputs=4 if model.module.gene_likelihood == "zinb" else 2,
             n_proteins=protein_indices.size,
             n_quantiles=quantile_values.size,
             posterior_mc=inference_mode == "posterior_mc",
