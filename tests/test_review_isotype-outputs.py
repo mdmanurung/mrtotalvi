@@ -59,3 +59,23 @@ def test_other_modes_keep_all_columns_finite(sim, mode):
     model, _ = _model(sim, protein_noise_model=mode)
     assert model.get_protein_foreground_probability().notna().all().all()
     assert model.get_normalized_expression()[1].notna().all().all()
+
+
+def test_isotype_nan_on_sample_stacks(sim):
+    # return_mean=False stacks draws as (cells, proteins, samples); the mask is on axis 1.
+    model, _ = _model(sim, protein_noise_model="ambient_isotype", isotype_names=ISOTYPES)
+    names = list(model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+    is_iso = np.isin(names, ISOTYPES)
+    fg = model.get_protein_foreground_probability(n_samples=2, return_mean=False)
+    _, protein = model.get_normalized_expression(n_samples=2, return_mean=False)
+    for values in (fg, protein):
+        assert values.ndim == 3 and values.shape[1] == len(names)
+        assert np.isnan(values[:, is_iso]).all()
+        assert np.isfinite(values[:, ~is_iso]).all()
+
+
+def test_isotype_names_in_ambient_mode_keep_columns(sim):
+    # isotype_names alone do not trigger NaN; only ambient_isotype mode leaves them unidentified.
+    model, _ = _model(sim, protein_noise_model="ambient", isotype_names=ISOTYPES)
+    assert model.get_protein_foreground_probability().notna().all().all()
+    assert model.get_normalized_expression()[1].notna().all().all()
