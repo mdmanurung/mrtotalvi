@@ -23,6 +23,7 @@ import scipy.sparse as sp
 
 MIN_CELL_FREE_DROPLETS = 50
 DSB_PSEUDOCOUNT = 10.0
+_STAT_CHUNK_ROWS = 8192  # rows densified at once when summarising cell-free droplets
 
 
 def feature_digest(names) -> str:
@@ -86,9 +87,13 @@ class AmbientProfile:
         )
 
 
-def _log_stats(counts: np.ndarray, pseudocount: float) -> tuple[np.ndarray, np.ndarray]:
-    logged = np.log(counts + pseudocount)
-    return logged.mean(axis=0), logged.std(axis=0, ddof=1)
+def _log_stats(counts: sp.csr_matrix, pseudocount: float) -> tuple[np.ndarray, np.ndarray]:
+    """Column mean and ddof=1 SD of ``log(counts + pseudocount)``, densifying one row chunk at a time."""
+    n = counts.shape[0]
+    chunks = [counts[i : i + _STAT_CHUNK_ROWS] for i in range(0, n, _STAT_CHUNK_ROWS)]
+    mean = sum(np.log(c.toarray() + pseudocount).sum(axis=0) for c in chunks) / n
+    ss = sum(((np.log(c.toarray() + pseudocount) - mean) ** 2).sum(axis=0) for c in chunks)
+    return mean, np.sqrt(ss / (n - 1))
 
 
 def estimate_adt_ambient(
@@ -177,8 +182,8 @@ def estimate_adt_ambient(
         profile_all = summed / summed.sum()
 
     cols = [feature_names.index(n) for n in adt_features]
-    cell_free = candidates[selected][:, cols].toarray()
-    adt_sum = cell_free.sum(axis=0)
+    cell_free = candidates[selected][:, cols]
+    adt_sum = np.asarray(cell_free.sum(axis=0)).ravel()
     if adt_sum.sum() <= 0:
         raise ValueError("Cell-free droplets carry no ADT counts.")
     profile = adt_sum / adt_sum.sum()

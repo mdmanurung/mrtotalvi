@@ -48,6 +48,19 @@ def _rowwise_max_excluding_diagonal(matrix: torch.Tensor) -> torch.Tensor:
     return torch.where(mask, matrix, torch.tensor(-float("inf"), device=matrix.device)).max(dim=1).values
 
 
+def _leave_one_out_max(component_distribution, points: torch.Tensor, batch_size: int) -> torch.Tensor:
+    """Row-wise max of ``log_prob`` of ``points`` over their own components, excluding each row's own."""
+    out = []
+    for start in range(0, points.shape[0], batch_size):
+        rows = points[start : start + batch_size]
+        scores = component_distribution.log_prob(rows.unsqueeze(-2))
+        # Rows start..start+len(rows) sit on columns start.. of the square matrix.
+        own = torch.arange(rows.shape[0], device=scores.device)
+        scores[own, own + start] = -float("inf")
+        out.append(scores.max(dim=1).values)
+    return torch.cat(out)
+
+
 def _as_indices(adata, indices):
     if indices is None:
         return np.arange(adata.n_obs)
@@ -1232,8 +1245,7 @@ def get_outlier_cell_sample_pairs(
         # A one-component mixture has no leave-one-out score, so it adds nothing to the
         # pooled threshold (its 1x1 entry would be the cell's own self-density).
         if sample_idxs.shape[0] > 1:
-            in_comp_log_probs = ap.component_distribution.log_prob(in_sample.unsqueeze(-2))
-            thresholds.append(_rowwise_max_excluding_diagonal(in_comp_log_probs).detach().cpu())
+            thresholds.append(_leave_one_out_max(ap.component_distribution, in_sample, batch_size).detach().cpu())
 
         # A cell inside this sample's subsample must not match its own component,
         # mirroring the leave-one-out thresholds above.
