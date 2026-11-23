@@ -16,6 +16,7 @@ from scvi.nn import DecoderTOTALVI
 from torch.distributions import Normal, kl_divergence
 
 from ._components import (
+    AmbientNuisanceEncoder,
     BatchEmbeddingDecoderAdapter,
     EncoderUZ,
     EncoderXU_TotalVI,
@@ -167,6 +168,12 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         qu_encode_covariates = kwargs.get("encode_covariates", False)
 
         super().__init__(n_input_genes, n_input_proteins, **kwargs)
+
+        # ADR-0011 protein noise model. The defaults reproduce stock totalVI; the
+        # opt-in modes are configured by ``configure_protein_noise``.
+        self.protein_noise_model = "totalvi"
+        self.protein_background_source = "z"
+        self.protein_encoder_input = "raw"
 
         # Store hyperparams so _setup_hierarchy can use them if called deferred
         self._n_sample = n_sample
@@ -690,7 +697,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         qu_batch_index = batch_index if self.qu_encode_covariates else None
         qu = self.qu(
             x,
-            y,
+            self._qu_protein_input(y, batch_index),
             sample_index,
             batch_index=qu_batch_index,
             cont_covs=cont_covs if self.qu_encode_covariates else None,
@@ -726,6 +733,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         out[MODULE_KEYS.Z_KEY] = z
         out["u"] = u
         out["z_base"] = z_base
+        if self.protein_noise_model != "totalvi":
+            qc, qh = self.nuisance_encoder(y, getattr(self, "isotype_index", None))
+            out["qc"] = qc
+            out["log_c"] = qc.rsample((n_samples,)) if n_samples > 1 else qc.rsample()
+            out["qh"] = qh
+            if qh is not None:
+                out["h"] = qh.rsample((n_samples,)) if n_samples > 1 else qh.rsample()
         out["eps"] = eps
         out["eps_dist"] = eps_dist  # None when use_map=True
         return out
@@ -818,9 +832,17 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             torch.tensor([0.0], device=x.device),
             torch.tensor([1.0], device=x.device),
         ).log_prob(per_batch_efficiency)
-        lkl_protein_expressed = -1e-3 * torch.distributions.Bernoulli(logits=py_["mixing"]).log_prob(
+        # totalVI's fixed 1e-3 pull of the mixing toward background; opt-in models may
+        # reweight it (``background_mixing_reg``).
+        reg = getattr(self, "background_mixing_reg", 1e-3)
+        lkl_protein_expressed = -reg * torch.distributions.Bernoulli(logits=py_["mixing"]).log_prob(
             torch.ones_like(py_["mixing"])
         )
+        if self.protein_noise_model == "ambient_isotype":
+            # The background is A + N with its own priors; the totalVI background
+            # prior no longer describes any term (ADR-0011).
+            kl_div_back_pro_full = torch.zeros_like(kl_div_back_pro_full)
+            lkl_protein_expressed = lkl_protein_expressed * self.target_mask
         if pro_batch_mask_minibatch is not None:
             while pro_batch_mask_minibatch.ndim < kl_div_back_pro_full.ndim:
                 pro_batch_mask_minibatch = pro_batch_mask_minibatch.unsqueeze(0)
@@ -849,6 +871,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             reconst_loss_protein = reconst_loss_protein.mean(dim=0)
         if kl_div_back_pro.ndim > 1:
             kl_div_back_pro = kl_div_back_pro.mean(dim=0)
+        kl_div_back_pro = kl_div_back_pro + self._nuisance_kl(inference_outputs)
         reconst_losses = {
             "reconst_loss_gene": reconst_loss_gene,
             "reconst_loss_protein": reconst_loss_protein,
@@ -942,7 +965,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
 
         and folds it into both ``loss`` and ``kl_local["kl_div_z"]``.
         """
-        if "eps" in inference_outputs and inference_outputs[MODULE_KEYS.Z_KEY].ndim > 2:
+        if "eps" in inference_outputs and (
+            inference_outputs[MODULE_KEYS.Z_KEY].ndim > 2 or self.protein_noise_model != "totalvi"
+        ):
             loss_out = self._loss_with_mc_samples(
                 tensors,
                 inference_outputs,
@@ -1146,6 +1171,249 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         ]
         return (means[1] - means[0]).square().sum(dim=-1).mean()
 
+    # ------------------------------------------------------------------
+    # ADR-0011: ambient- and isotype-aware protein noise model (opt-in)
+    # ------------------------------------------------------------------
+
+    def configure_protein_noise(
+        self,
+        protein_noise_model: str = "totalvi",
+        protein_background_source: str = "z",
+        protein_encoder_input: str = "raw",
+        ambient_profile: np.ndarray | None = None,
+        dsb_log_mean: np.ndarray | None = None,
+        dsb_log_sd: np.ndarray | None = None,
+        isotype_mask: np.ndarray | None = None,
+        ambient_burden_prior: tuple[float, float] = (0.0, 2.0),
+        n_nuisance: int = 1,
+        native_form: str = "scale",
+        background_mixing_reg: float = 1e-3,
+    ) -> None:
+        """Switch on an opt-in protein noise model (ADR-0011).
+
+        ``"totalvi"`` keeps the stock mixture. ``"ambient"`` adds the free-ambient
+        term ``A = c * a`` to both mixture means. ``"ambient_isotype"`` replaces the
+        decoded background with ``A + N(h)``, fits isotype controls with background
+        only, and drops the totalVI background prior. ``protein_background_source=
+        "z_base"`` decodes the background from ``z_base(u)`` so a sample switch does
+        not move it. ``protein_encoder_input="ambient_zscore"`` feeds ``qu`` the DSB
+        step-I standardized protein counts.
+        """
+        if protein_noise_model not in {"totalvi", "ambient", "ambient_isotype"}:
+            raise ValueError("protein_noise_model must be 'totalvi', 'ambient' or 'ambient_isotype'.")
+        if protein_background_source not in {"z", "z_base"}:
+            raise ValueError("protein_background_source must be 'z' or 'z_base'.")
+        if protein_encoder_input not in {"raw", "ambient_zscore"}:
+            raise ValueError("protein_encoder_input must be 'raw' or 'ambient_zscore'.")
+        non_default = (
+            protein_noise_model != "totalvi" or protein_background_source != "z" or protein_encoder_input != "raw"
+        )
+        if non_default and self.u_invariance_weight > 0:
+            raise ValueError("u_invariance_weight > 0 is only supported with the default protein model.")
+        if protein_encoder_input == "ambient_zscore" and self.u_prior_type == "vamp":
+            raise ValueError(
+                "protein_encoder_input='ambient_zscore' is blocked with u_prior='vamp': the "
+                "pseudo-inputs live in raw count space."
+            )
+        if native_form not in {"scale", "excess"}:
+            raise ValueError("native_form must be 'scale' or 'excess'.")
+        self.native_form = native_form
+        if protein_noise_model == "totalvi" and background_mixing_reg != 1e-3:
+            raise ValueError("background_mixing_reg applies to the opt-in protein noise models only.")
+        self.background_mixing_reg = float(background_mixing_reg)
+        P = self.n_input_proteins
+        self.protein_noise_model = protein_noise_model
+        self.protein_background_source = protein_background_source
+        self.protein_encoder_input = protein_encoder_input
+
+        if protein_noise_model != "totalvi":
+            if ambient_profile is None:
+                raise ValueError(f"protein_noise_model={protein_noise_model!r} needs an ambient profile.")
+            profile = np.atleast_2d(np.asarray(ambient_profile, dtype=np.float32))
+            if profile.shape[1] != P or not np.all(np.isfinite(profile)) or profile.min() < 0:
+                raise ValueError("ambient_profile must be finite, non-negative, with one column per protein.")
+            if profile.shape[0] not in {1, self.n_batch}:
+                raise ValueError("ambient_profile needs one pooled row or one row per batch.")
+            profile = profile / profile.sum(axis=1, keepdims=True)
+            self.register_buffer("ambient_profile", torch.as_tensor(profile))
+            loc, scale = ambient_burden_prior
+            self.ambient_burden_prior_loc = float(loc)
+            self.ambient_burden_prior_scale = float(scale)
+            n_iso = 0
+            target = np.ones(P, dtype=np.float32)
+            if protein_noise_model == "ambient_isotype":
+                mask = np.zeros(P, dtype=bool) if isotype_mask is None else np.asarray(isotype_mask, dtype=bool)
+                if mask.shape != (P,) or not mask.any():
+                    # C11: fail closed, never invent controls.
+                    raise ValueError("protein_noise_model='ambient_isotype' needs at least one isotype control.")
+                n_iso = int(mask.sum())
+                target = (~mask).astype(np.float32)
+                self.register_buffer("isotype_index", torch.as_tensor(np.flatnonzero(mask), dtype=torch.long))
+                self.nuisance_eta = nn.Parameter(torch.zeros(max(self.n_batch, 1), P))
+                self.nuisance_lambda = nn.Parameter(0.1 * torch.ones(int(n_nuisance), P))
+            self.register_buffer("target_mask", torch.as_tensor(target))
+            self.nuisance_encoder = AmbientNuisanceEncoder(P, n_isotypes=n_iso, n_nuisance=int(n_nuisance))
+
+        if protein_encoder_input == "ambient_zscore":
+            if dsb_log_mean is None or dsb_log_sd is None:
+                raise ValueError("protein_encoder_input='ambient_zscore' needs DSB log mean and SD.")
+            mean = np.atleast_2d(np.asarray(dsb_log_mean, dtype=np.float32))
+            sd = np.atleast_2d(np.asarray(dsb_log_sd, dtype=np.float32))
+            if mean.shape != sd.shape or mean.shape[1] != P:
+                raise ValueError("DSB statistics need one column per protein.")
+            self.register_buffer("dsb_log_mean", torch.as_tensor(mean))
+            if not np.all(sd > 1e-3):
+                raise ValueError(
+                    "protein_encoder_input='ambient_zscore' needs a positive empty-droplet log SD "
+                    f"for every protein; proteins at columns {np.flatnonzero(~np.all(sd > 1e-3, axis=0)).tolist()} "
+                    "have none."
+                )
+            self.register_buffer("dsb_log_sd", torch.as_tensor(sd))
+            self.qu.protein_input_pretransformed = True
+
+    def _context_rows(self, table: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
+        if table.shape[0] == 1 or batch_index is None:
+            return table[0]
+        return table[batch_index.reshape(-1).to(torch.long)]
+
+    def _qu_protein_input(self, y: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
+        if getattr(self, "protein_encoder_input", "raw") != "ambient_zscore":
+            return y
+        mean = self._context_rows(self.dsb_log_mean, batch_index)
+        sd = self._context_rows(self.dsb_log_sd, batch_index)
+        return (torch.log(y + 10.0) - mean) / sd
+
+    def _nuisance_kl(self, inference_outputs) -> torch.Tensor | float:
+        if getattr(self, "protein_noise_model", "totalvi") == "totalvi":
+            return 0.0
+        qc = inference_outputs["qc"]
+        prior_c = Normal(
+            torch.full_like(qc.loc, self.ambient_burden_prior_loc),
+            torch.full_like(qc.scale, self.ambient_burden_prior_scale),
+        )
+        kl = kl_divergence(qc, prior_c).sum(dim=-1)
+        qh = inference_outputs.get("qh")
+        if qh is not None:
+            kl = kl + kl_divergence(qh, Normal(torch.zeros_like(qh.loc), torch.ones_like(qh.scale))).sum(dim=-1)
+        return kl
+
+    def _require_default_protein_model(self, what: str) -> None:
+        if (
+            getattr(self, "protein_noise_model", "totalvi") != "totalvi"
+            or getattr(self, "protein_background_source", "z") != "z"
+            or getattr(self, "protein_encoder_input", "raw") != "raw"
+        ):
+            raise NotImplementedError(f"{what} is not implemented for the opt-in ADR-0011 protein noise models yet.")
+
+    def _get_generative_input(self, tensors, inference_outputs):
+        base = super()._get_generative_input(tensors, inference_outputs)
+        if (
+            getattr(self, "protein_background_source", "z") == "z_base"
+            or getattr(self, "protein_noise_model", "totalvi") != "totalvi"
+        ):
+            base["z_base"] = inference_outputs.get("z_base")
+            base["log_c"] = inference_outputs.get("log_c")
+            base["h"] = inference_outputs.get("h")
+        return base
+
+    def generative(
+        self,
+        z,
+        library_gene,
+        batch_index,
+        label,
+        cont_covs=None,
+        cat_covs=None,
+        size_factor=None,
+        transform_batch=None,
+        z_base=None,
+        log_c=None,
+        h=None,
+    ):
+        """TOTALVAE generative step, extended by the opt-in ADR-0011 protein model."""
+        out = super().generative(z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch)
+        mode = getattr(self, "protein_noise_model", "totalvi")
+        source = getattr(self, "protein_background_source", "z")
+        if mode == "totalvi" and source == "z":
+            return out
+        py_ = out["py_"]
+        if source == "z_base":
+            if z_base is None:
+                raise NotImplementedError("protein_background_source='z_base' needs z_base from inference.")
+            if z_base.ndim < z.ndim:
+                z_base = z_base.expand_as(z)
+            py_b = super().generative(
+                z_base, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch
+            )["py_"]
+            for key in ("back_alpha", "back_beta", "rate_back"):
+                py_[key] = py_b[key]
+        fore_scale = py_["fore_scale"]
+        back_mean = torch.exp(py_["back_alpha"] + 0.5 * py_["back_beta"].square())
+        b_idx = batch_index if transform_batch is None else torch.full_like(batch_index, int(transform_batch))
+        zeros = torch.zeros_like(fore_scale)
+        if mode == "totalvi":
+            py_["rate_fore"] = py_["rate_back"] * fore_scale
+            ambient, nonspecific, native = zeros, back_mean, back_mean * (fore_scale - 1.0)
+        else:
+            if log_c is None:
+                raise NotImplementedError(f"protein_noise_model={mode!r} needs the ambient burden from inference.")
+            ambient = torch.exp(log_c) * self._context_rows(self.ambient_profile, b_idx)
+            if mode == "ambient":
+                py_["rate_back"] = ambient + py_["rate_back"]
+                py_["rate_fore"] = ambient + (py_["rate_back"] - ambient) * fore_scale
+                nonspecific, native = back_mean, back_mean * (fore_scale - 1.0)
+            else:
+                if h is None:
+                    raise NotImplementedError("protein_noise_model='ambient_isotype' needs h from inference.")
+                eta = self.nuisance_eta[b_idx.reshape(-1).to(torch.long)]
+                nonspecific = F.softplus(eta + h @ self.nuisance_lambda)
+                # "scale": S = exp(alpha) f (f >= 1, so S never vanishes);
+                # "excess": S = exp(alpha) (f - 1), which can reach zero.
+                shift = 1.0 if getattr(self, "native_form", "scale") == "excess" else 0.0
+                native = torch.exp(py_["back_alpha"]) * (fore_scale - shift) * self.target_mask
+                py_["rate_back"] = ambient + nonspecific
+                py_["rate_fore"] = ambient + nonspecific + native
+        py_["ambient_mean"] = ambient
+        py_["nonspecific_mean"] = nonspecific
+        py_["native_mean"] = native
+        eff = out["per_batch_efficiency"]
+        out["py_norm_"] = {**py_, "rate_back": eff * py_["rate_back"], "rate_fore": eff * py_["rate_fore"]}
+        return out
+
+    @torch.inference_mode()
+    def protein_components(self, tensors: dict[str, torch.Tensor], n_samples: int = 1) -> dict[str, torch.Tensor]:
+        """Posterior expected protein components on the raw count scale (ADR-0011).
+
+        Returns ``native``, ``ambient``, ``nonspecific``, ``observed`` (their sum) and
+        ``foreground_probability``, each ``(cells, proteins)``, averaged over
+        ``n_samples`` posterior draws. ``efficiency`` multiplies every component (C7).
+        """
+        inf_in = self._get_inference_input(tensors)
+        inf_out = self.inference(**inf_in, n_samples=n_samples)
+        gen_in = self._get_generative_input(tensors, inf_out)
+        gen_out = self.generative(**gen_in)
+        py_ = gen_out["py_"]
+        eff = gen_out["per_batch_efficiency"]
+        if "native_mean" not in py_:
+            back_mean = torch.exp(py_["back_alpha"] + 0.5 * py_["back_beta"].square())
+            py_ = {
+                **py_,
+                "ambient_mean": torch.zeros_like(back_mean),
+                "nonspecific_mean": back_mean,
+                "native_mean": back_mean * (py_["fore_scale"] - 1.0),
+            }
+        fg = 1.0 - torch.sigmoid(py_["mixing"])
+        res = {
+            "native": eff * fg * py_["native_mean"],
+            "ambient": eff * py_["ambient_mean"].expand_as(fg),
+            "nonspecific": eff * py_["nonspecific_mean"].expand_as(fg),
+            "foreground_probability": fg,
+        }
+        res["observed"] = res["native"] + res["ambient"] + res["nonspecific"]
+        if n_samples > 1:
+            res = {k: v.mean(dim=0) for k, v in res.items()}
+        return res
+
     @torch.inference_mode()
     def _deterministic_decoder_parameters(
         self,
@@ -1156,6 +1424,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         cat_covs: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Decode RNA and protein means without using stochastic ``rate_back``."""
+        self._require_default_protein_model("Deterministic counterfactual decoding")
         if cont_covs is None:
             decoder_input = z
         else:

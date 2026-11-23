@@ -6,6 +6,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import torch
 import xarray as xr
 from scvi import REGISTRY_KEYS, settings
@@ -18,6 +19,7 @@ from scvi.module._constants import MODULE_KEYS
 from scvi.utils import setup_anndata_dsp
 from tqdm import tqdm
 
+from ._ambient import AmbientProfile
 from ._contracts import (
     ordered_indices_sha256,
     resolve_u_prior,
@@ -33,6 +35,7 @@ from ._counterfactual import get_counterfactual_latent as _get_counterfactual_la
 from ._counterfactual import local_sample_enrichment as _local_sample_enrichment
 from ._module import MrTotalVAE
 from ._stats import (
+    _as_indices,
     _differential_expression,
     _loader_order,
 )
@@ -296,6 +299,16 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         spec_defaults: bool | None = None,
+        protein_noise_model: Literal["totalvi", "ambient", "ambient_isotype"] = "totalvi",
+        protein_background_source: Literal["z", "z_base"] = "z",
+        protein_encoder_input: Literal["raw", "ambient_zscore"] = "raw",
+        ambient_profile: AmbientProfile | None = None,
+        isotype_names: list[str] | None = None,
+        seed_background_prior_from_ambient: bool = False,
+        ambient_burden_prior: tuple[float, float] = (0.0, 2.0),
+        n_nuisance: int = 1,
+        native_form: Literal["scale", "excess"] = "scale",
+        background_mixing_reg: float = 1e-3,
         **model_kwargs,
     ) -> None:
         # MrVI-matching encoder defaults. New models save the resolved True/False, so
@@ -446,6 +459,19 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             sample_embedding_prior_scale,
             u_encoder_sample_embedding_prior_scale,
             float(n_obs_per_sample.sum()),
+        )
+
+        self._configure_protein_noise(
+            protein_noise_model=protein_noise_model,
+            protein_background_source=protein_background_source,
+            protein_encoder_input=protein_encoder_input,
+            ambient_profile=ambient_profile,
+            isotype_names=isotype_names,
+            seed_background_prior_from_ambient=seed_background_prior_from_ambient,
+            ambient_burden_prior=ambient_burden_prior,
+            n_nuisance=n_nuisance,
+            native_form=native_form,
+            background_mixing_reg=background_mixing_reg,
         )
 
         registered_sample_key = self.adata_manager.registry.get("setup_args", {}).get("sample_key")
@@ -1021,6 +1047,147 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     # ------------------------------------------------------------------
     # u-space statistical APIs
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # ADR-0011: ambient- and isotype-aware protein noise model
+    # ------------------------------------------------------------------
+
+    def _configure_protein_noise(
+        self,
+        protein_noise_model,
+        protein_background_source,
+        protein_encoder_input,
+        ambient_profile,
+        isotype_names,
+        seed_background_prior_from_ambient,
+        ambient_burden_prior,
+        n_nuisance,
+        native_form="scale",
+        background_mixing_reg=1e-3,
+    ) -> None:
+        names = [str(n) for n in self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names]
+        needs_profile = (
+            protein_noise_model != "totalvi" or protein_encoder_input != "raw" or seed_background_prior_from_ambient
+        )
+        if needs_profile and ambient_profile is None:
+            raise ValueError("This protein noise configuration needs `ambient_profile`.")
+        if isinstance(ambient_profile, dict):
+            # One profile per registered batch (ADR-0011 C4 alternative), stacked in
+            # the batch registry order.
+            if seed_background_prior_from_ambient:
+                raise ValueError("seed_background_prior_from_ambient needs a single pooled profile.")
+            batches = [
+                str(b) for b in self.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping
+            ]
+            # Batch categories may be numeric; match profile keys by their string form.
+            by_name = {str(k): v for k, v in ambient_profile.items()}
+            if len(by_name) != len(ambient_profile):
+                raise ValueError("ambient_profile has keys that collide as strings (for example 1 and '1').")
+            missing = sorted(set(batches) - set(by_name))
+            if missing:
+                raise ValueError(f"No ambient profile for batches {missing}.")
+            parts = [by_name[b].aligned(names) for b in batches]
+            stacked = AmbientProfile(
+                feature_names=names,
+                profile=np.stack([p.profile for p in parts]),
+                log1p_mean=np.stack([p.log1p_mean for p in parts]),
+                log1p_sd=np.stack([p.log1p_sd for p in parts]),
+                dsb_log_mean=np.stack([p.dsb_log_mean for p in parts]),
+                dsb_log_sd=np.stack([p.dsb_log_sd for p in parts]),
+                n_cell_free=sum(p.n_cell_free for p in parts),
+                settings={"per_batch": batches},
+            )
+            profile = stacked
+        else:
+            profile = ambient_profile.aligned(names) if ambient_profile is not None else None
+        isotype_mask = None
+        if isotype_names is not None:
+            unknown = sorted(set(map(str, isotype_names)) - set(names))
+            if unknown:
+                raise ValueError(f"Isotype names not on the protein axis: {unknown}.")
+            isotype_mask = np.isin(names, [str(n) for n in isotype_names])
+        self.module.configure_protein_noise(
+            protein_noise_model=protein_noise_model,
+            protein_background_source=protein_background_source,
+            protein_encoder_input=protein_encoder_input,
+            ambient_profile=None if profile is None else profile.profile,
+            dsb_log_mean=None if profile is None else profile.dsb_log_mean,
+            dsb_log_sd=None if profile is None else profile.dsb_log_sd,
+            isotype_mask=isotype_mask,
+            ambient_burden_prior=tuple(ambient_burden_prior),
+            n_nuisance=n_nuisance,
+            native_form=native_form,
+            background_mixing_reg=background_mixing_reg,
+        )
+        self.isotype_names = (
+            None if isotype_mask is None else [n for n, m in zip(names, isotype_mask, strict=True) if m]
+        )
+        if seed_background_prior_from_ambient:
+            # C1-C3: seed the learnable totalVI background prior per protein from the
+            # empty-droplet log1p mean and SD; training may still move it.
+            alpha = self.module.background_pro_alpha
+            mean = torch.as_tensor(profile.log1p_mean, dtype=alpha.dtype)
+            log_sd = torch.log(torch.as_tensor(np.maximum(profile.log1p_sd, 1e-2), dtype=alpha.dtype))
+            with torch.no_grad():
+                if alpha.ndim == 2:
+                    alpha.copy_(mean[:, None].expand_as(alpha))
+                    self.module.background_pro_log_beta.copy_(log_sd[:, None].expand_as(alpha))
+                else:
+                    alpha.copy_(mean)
+                    self.module.background_pro_log_beta.copy_(log_sd)
+
+    @torch.inference_mode()
+    def get_protein_noise_decomposition(
+        self,
+        adata: AnnData | None = None,
+        indices: npt.ArrayLike | None = None,
+        n_samples: int = 25,
+        batch_size: int = 256,
+    ) -> dict[str, pd.DataFrame]:
+        """Posterior expected protein components on the raw count scale (ADR-0011).
+
+        Returns DataFrames ``native``, ``ambient``, ``nonspecific``, ``observed`` and
+        ``foreground_probability`` (cells x proteins), each the mean over ``n_samples``
+        posterior draws. ``observed`` is the sum of the three count components. Isotype
+        controls are dropped from the protein columns. Proteins not measured in a
+        cell's panel are ``NaN``.
+        """
+        adata = self._validate_anndata(adata)
+        indices = _as_indices(adata, indices)
+        # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
+        # loaded rows back to the request order.
+        loader_indices, inverse = _loader_order(adata, indices)
+        names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+        keep = np.ones(names.size, dtype=bool)
+        if getattr(self, "isotype_names", None):
+            # self.isotype_names holds str names; registry names keep their dtype.
+            keep = ~np.isin(names.astype(str), self.isotype_names)
+        loader = self._make_data_loader(adata=adata, indices=loader_indices, batch_size=batch_size)
+        chunks: dict[str, list] = {}
+        masks = []
+        mask_table = self.module.protein_batch_mask
+        for tensors in loader:
+            out = self.module.protein_components(tensors, n_samples=n_samples)
+            for key, value in out.items():
+                chunks.setdefault(key, []).append(value.cpu().numpy())
+            if mask_table is not None:
+                panel = tensors[self.module.panel_key].reshape(-1).cpu().numpy().astype(int)
+                masks.append(np.stack([mask_table[str(p)] for p in panel]).astype(bool))
+        if indices.dtype == np.bool_:
+            indices = np.flatnonzero(indices)
+        index = adata.obs_names[indices]
+        available = np.concatenate(masks) if masks else None
+        if available is not None and inverse is not None:
+            available = available[inverse]
+        result = {}
+        for key, parts in chunks.items():
+            values = np.concatenate(parts)
+            if inverse is not None:
+                values = values[inverse]
+            if available is not None:
+                values = np.where(available, values, np.nan)
+            result[key] = pd.DataFrame(values[:, keep], index=index, columns=names[keep])
+        return result
 
     def get_aggregated_posterior(
         self,
