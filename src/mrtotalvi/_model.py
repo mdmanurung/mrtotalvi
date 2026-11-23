@@ -805,6 +805,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         both are arguments of this method and overwrite the same keys in ``plan_kwargs``. KL warm-up,
         early stopping, batch size and clipping keep their TOTALVI defaults.
 
+        Early stopping monitors ``elbo_validation`` (the scvi-tools default), which is
+        cell-weighted: its reconstruction and KL terms are plain per-cell sums. With
+        ``scale_observations=True`` the training loss weights cells by donor, so
+        ``elbo_validation`` is not the quantity being minimised. The training plan then also
+        logs ``donor_balanced_loss_train`` and ``donor_balanced_loss_validation``, equal to
+        the weighted loss the module trains on. They are for monitoring only and do not
+        change the loss, the monitor or when training stops.
+
         Data-initialized Vamp pseudo-inputs are resolved from the exact training
         indices before the first optimizer step. Pass ``accelerator='cpu'``
         explicitly to suppress the no-GPU warning.

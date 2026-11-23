@@ -1075,6 +1075,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             loss_out.extra_metrics["u_invariance"] = u_pen.detach()
 
         penalty = self.sample_embedding_penalty()
+        # With donor weighting, elbo_validation stays cell-weighted (it is the early-stopping
+        # monitor). Log the loss the module trains on as a second, donor-balanced metric;
+        # scvi logs it as donor_balanced_loss_<train|validation>.
+        weighted = self._scale_observations and self.n_obs_per_sample is not None
+        if weighted:
+            full = loss if penalty is None else loss + penalty / self._n_obs_total
+            loss_out.extra_metrics["donor_balanced_loss"] = full.detach()
         if penalty is None:
             return LossOutput(
                 loss=loss,
