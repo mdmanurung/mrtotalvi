@@ -296,6 +296,37 @@ def test_backed_adata_returns_rows_in_request_order(tmp_path, batch_size):
     np.testing.assert_allclose(posterior_loc.numpy(), ref_loc[BACKED_REQUEST], atol=1e-6)
 
 
+@pytest.mark.parametrize("batch_size", [4, 256])
+def test_backed_counterfactual_outputs_match_in_memory(tmp_path, batch_size):
+    """Backed requests follow the request order, and a repeated cell counts per request."""
+    from tests.test_mrtotalvi_v2 import _make_v2_model
+
+    model, adata = _make_v2_model()
+    adata.obs["group"] = np.where(np.arange(adata.n_obs) % 2 == 0, "even", "odd")
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+    model._validate_anndata(backed)
+
+    # In-memory data loads rows as requested, so it is the reference for backed data.
+    rep = model.get_local_sample_representation(backed, indices=BACKED_REQUEST, batch_size=batch_size)
+    ref_rep = model.get_local_sample_representation(adata, indices=BACKED_REQUEST, batch_size=batch_size)
+    assert list(rep.cell_name.values) == list(adata.obs_names[BACKED_REQUEST])
+    np.testing.assert_allclose(rep.values, ref_rep.values, atol=1e-6)
+
+    dist = model.get_local_sample_distances(backed, indices=BACKED_REQUEST, batch_size=batch_size, groupby="group")
+    ref_dist = model.get_local_sample_distances(adata, indices=BACKED_REQUEST, batch_size=batch_size, groupby="group")
+    assert list(dist.cell_name.values) == list(adata.obs_names[BACKED_REQUEST])
+    np.testing.assert_allclose(dist["cell"].values, ref_dist["cell"].values, atol=1e-6)
+    np.testing.assert_allclose(
+        dist["group_distances"].sel(group=["even", "odd"]).values,
+        ref_dist["group_distances"].sel(group=["even", "odd"]).values,
+        atol=1e-6,
+    )
+
+    corr = model.get_feature_correlation_matrix(backed, indices=BACKED_REQUEST, n_samples=2, batch_size=batch_size)
+    assert np.isfinite(corr.to_numpy()).sum() > 0
+
+
 # Marginal scenario memory and context hash -----------------------------------
 
 

@@ -1076,11 +1076,20 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # the batch registry order.
             if seed_background_prior_from_ambient:
                 raise ValueError("seed_background_prior_from_ambient needs a single pooled profile.")
+
+            # Batch categories may be numeric; match profile keys by their string form,
+            # with whole-number floats written as ints so 1, 1.0 and np.int64(1) agree.
+            def batch_name(value) -> str:
+                if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, (bool, np.bool_)):
+                    if float(value).is_integer():
+                        return str(int(value))
+                return str(value)
+
             batches = [
-                str(b) for b in self.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping
+                batch_name(b)
+                for b in self.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY).categorical_mapping
             ]
-            # Batch categories may be numeric; match profile keys by their string form.
-            by_name = {str(k): v for k, v in ambient_profile.items()}
+            by_name = {batch_name(k): v for k, v in ambient_profile.items()}
             if len(by_name) != len(ambient_profile):
                 raise ValueError("ambient_profile has keys that collide as strings (for example 1 and '1').")
             missing = sorted(set(batches) - set(by_name))
@@ -1761,6 +1770,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             transform_batch = [transform_batch]
         transform_batch = _get_batch_code_from_category(adata_manager, transform_batch)
 
+        # Backed AnnData rejects repeated indices; load each cell once and expand back.
+        loader_indices, inverse = _loader_order(adata, indices)
         corr_mats = []
         for b in track(transform_batch, disable=silent):
             denoised_data = self._get_denoised_samples(
@@ -1769,8 +1780,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 batch_size=batch_size,
                 rna_size_factor=rna_size_factor,
                 transform_batch=b,
-                indices=indices,
+                indices=loader_indices,
             )
+            if inverse is not None:
+                denoised_data = denoised_data[inverse]
             # Stack the posterior samples as extra rows: (cells * samples, features).
             flattened = np.concatenate([denoised_data[:, :, i] for i in range(n_samples)], axis=0).astype(np.float64)
             if log_transform is True:
@@ -1986,12 +1999,21 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Returns ``(reps, cell_names)`` with ``reps`` of shape ``(n_cells, n_sample,
         n_latent)``; see :meth:`_iter_cf_representations`.
         """
+        # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
+        # loaded rows back to the request order.
+        loader_indices, inverse = _loader_order(adata, indices)
         all_reps = []
-        all_cell_names = []
-        for batch_reps, cell_positions in self._iter_cf_representations(adata, indices, batch_size, use_mean=use_mean):
-            all_cell_names.extend(adata.obs_names[cell_positions].tolist())
+        all_positions = []
+        for batch_reps, cell_positions in self._iter_cf_representations(
+            adata, loader_indices, batch_size, use_mean=use_mean
+        ):
+            all_positions.append(cell_positions)
             all_reps.append(batch_reps)
-        return np.concatenate(all_reps, axis=0), all_cell_names
+        reps = np.concatenate(all_reps, axis=0)
+        positions = np.concatenate(all_positions)
+        if inverse is not None:
+            reps, positions = reps[inverse], positions[inverse]
+        return reps, adata.obs_names[positions].tolist()
 
     # ------------------------------------------------------------------
     # Public counterfactual API
@@ -2208,15 +2230,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 "The per-cell distance matrices",
                 "Pass groupby with keep_cell=False for group means, or fewer indices.",
             )
-            dists = np.empty((n_cells, n_sample, n_sample), dtype=np.float32)
-        cell_names: list[str] = []
+        # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
+        # loaded rows back to the request order, and a repeated cell counts once per
+        # request in the group means, as it does for in-memory data.
+        loader_indices, inverse = _loader_order(adata, indices)
+        weight = None if inverse is None else np.bincount(inverse)
+        if keep_cell:
+            n_loaded = n_cells if inverse is None else weight.size
+            dists = np.empty((n_loaded, n_sample, n_sample), dtype=np.float32)
+        positions_seen: list[np.ndarray] = []
         sums = {key: {} for key in group_keys}  # key -> group -> [sum matrix, n cells]
         start = 0
-        for batch_reps, positions in self._iter_cf_representations(adata, indices, batch_size, use_mean=use_mean):
+        for batch_reps, positions in self._iter_cf_representations(
+            adata, loader_indices, batch_size, use_mean=use_mean
+        ):
             chunk = torch.as_tensor(batch_reps, dtype=torch.float32)
             batch_d = torch.cdist(chunk, chunk, p=p, compute_mode="donot_use_mm_for_euclid_dist").numpy()
             batch_names = adata.obs_names[positions].tolist()
-            cell_names.extend(batch_names)
+            positions_seen.append(positions)
+            w = np.ones(len(positions)) if weight is None else weight[start : start + len(positions)]
             # A pair counts for a cell only where the cell has support in both samples.
             pair_ok = np.ones(batch_d.shape, dtype=bool)
             if admissibility is not None:
@@ -2230,11 +2262,18 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 labels = adata.obs[key].to_numpy()[positions]
                 for label in np.unique(labels):
                     in_group = labels == label
-                    total = np.where(pair_ok[in_group], batch_d[in_group], 0.0).sum(axis=0, dtype=np.float64)
-                    count = pair_ok[in_group].sum(axis=0)
+                    w_g = w[in_group][:, None, None]
+                    total = (np.where(pair_ok[in_group], batch_d[in_group], 0.0) * w_g).sum(axis=0, dtype=np.float64)
+                    count = (pair_ok[in_group] * w_g).sum(axis=0).astype(np.int64)
                     prior = sums[key].get(label, [0.0, 0])
                     sums[key][label] = [prior[0] + total, prior[1] + count]
 
+        positions = np.concatenate(positions_seen)
+        if inverse is not None:
+            positions = positions[inverse]
+            if keep_cell:
+                dists = dists[inverse]
+        cell_names = adata.obs_names[positions].tolist()
         coords = {"sample_x": self.sample_order, "sample_y": self.sample_order}
         if not group_keys:
             return xr.DataArray(
