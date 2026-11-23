@@ -34,7 +34,7 @@
   as using all registered cells (user decision, 2026-11-23).
 - Feature identity: queries and `load(adata=...)` with RNA or protein names that differ from
   training in name or order now raise. `setup_anndata` raises on a protein DataFrame/uns name
-  conflict, duplicate names and non-string names.
+  conflict and duplicate names; integer labels stay allowed.
 - Backed AnnData: `get_protein_foreground_probability`, `get_latent_library_size`,
   `posterior_predictive_sample`, `get_local_sample_representation` and
   `get_normalized_expression(n_samples_overall=...)` return rows in request order. Arguments after
