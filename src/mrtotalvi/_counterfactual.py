@@ -198,7 +198,9 @@ def _encode_u_params(model, adata, indices: np.ndarray, batch_size: int):
                 qu_batch_index = inputs.get("batch_index") if qu_covs else None
                 qu = model.module.qu(
                     inputs["x"],
-                    inputs["y"],
+                    # The protein block as inference() feeds it: z-scored in
+                    # ambient_zscore mode (per-batch statistics need the batch).
+                    model.module._qu_protein_input(inputs["y"], inputs.get("batch_index")),
                     inputs["sample_index"],
                     batch_index=qu_batch_index,
                     cont_covs=inputs.get("cont_covs") if qu_covs else None,

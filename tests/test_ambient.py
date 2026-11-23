@@ -215,3 +215,17 @@ def test_per_batch_profiles_accept_numeric_batch_keys():
             ambient_profile={0: profiles[0], 1: profiles[1], "1": profiles[1]},
             protein_noise_model="ambient",
         )
+
+
+def test_counterfactual_u_encoding_uses_zscored_protein_input(sim):
+    from mrtotalvi._counterfactual import _encode_u_params
+
+    model, adata = _model(sim, protein_encoder_input="ambient_zscore")
+    idx = np.arange(20)
+    loc, _, _ = _encode_u_params(model, adata, idx, 32)
+    module = model.module
+    module.eval()
+    tensors = next(iter(model._make_data_loader(adata=adata, indices=idx, batch_size=32)))
+    with torch.no_grad():
+        ref = module.inference(**module._get_inference_input(tensors))["qu"].loc
+    np.testing.assert_allclose(np.asarray(loc), ref.numpy(), atol=1e-5)
