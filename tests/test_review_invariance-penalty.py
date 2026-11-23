@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import scvi
 import torch
 
@@ -43,4 +44,5 @@ def test_default_map_penalty_is_unchanged():
     # use_map=True ignores `deterministic`, so the default penalty must not change.
     scvi.settings.seed = 0
     model, tensors = _model()
-    assert float(_penalty(model, tensors)) == MAP_PENALTY
+    # float32 sums differ by ~1e-5 relative across CPU types; a decode change moves it far more.
+    assert float(_penalty(model, tensors)) == pytest.approx(MAP_PENALTY, rel=1e-4)
