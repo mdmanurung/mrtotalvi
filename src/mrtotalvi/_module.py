@@ -1263,10 +1263,12 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 raise ValueError("DSB statistics need one column per protein.")
             self.register_buffer("dsb_log_mean", torch.as_tensor(mean))
             if not np.all(sd > 1e-3):
+                low = np.flatnonzero(~np.all(sd > 1e-3, axis=0))
                 raise ValueError(
-                    "protein_encoder_input='ambient_zscore' needs a positive empty-droplet log SD "
-                    f"for every protein; proteins at columns {np.flatnonzero(~np.all(sd > 1e-3, axis=0)).tolist()} "
-                    "have none."
+                    "protein_encoder_input='ambient_zscore' needs an empty-droplet log SD above 1e-3 "
+                    f"for every protein; proteins at columns {low.tolist()} have SD "
+                    f"{np.round(sd.min(axis=0)[low], 6).tolist()}, from few or no counts in cell-free "
+                    "droplets, so their z-scores would be undefined or extreme."
                 )
             self.register_buffer("dsb_log_sd", torch.as_tensor(sd))
             self.qu.protein_input_pretransformed = True

@@ -208,6 +208,16 @@ def test_per_batch_profiles_accept_numeric_batch_keys():
     }
     MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch_num")
     model = MrTotalVI(adata, sample_key="donor", ambient_profile=profiles, protein_noise_model="ambient", n_latent=4)
+    np.testing.assert_allclose(model.module.ambient_profile.numpy()[0], profiles[0].profile, rtol=1e-5)
+    np.testing.assert_allclose(model.module.ambient_profile.numpy()[1], profiles[1].profile, rtol=1e-5)
+    # Float batch labels (as read from a column with NaNs) match integer keys, and back.
+    adata.obs["batch_float"] = adata.obs["batch_num"].astype(float)
+    MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch_float")
+    model = MrTotalVI(adata, sample_key="donor", ambient_profile=profiles, protein_noise_model="ambient", n_latent=4)
+    np.testing.assert_allclose(model.module.ambient_profile.numpy()[1], profiles[1].profile, rtol=1e-5)
+    MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch_num")
+    float_keys = {float(k): v for k, v in profiles.items()}
+    model = MrTotalVI(adata, sample_key="donor", ambient_profile=float_keys, protein_noise_model="ambient", n_latent=4)
     np.testing.assert_allclose(model.module.ambient_profile.numpy()[1], profiles[1].profile, rtol=1e-5)
     with pytest.raises(ValueError, match="collide as strings"):
         MrTotalVI(
@@ -300,7 +310,7 @@ def test_protein_absent_from_empties_warns_and_blocks_zscore(sim):
         )
     data = adata.copy()
     MrTotalVI.setup_anndata(data, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch")
-    with pytest.raises(ValueError, match="positive empty-droplet log SD"):
+    with pytest.raises(ValueError, match="empty-droplet log SD above 1e-3"):
         MrTotalVI(data, sample_key="donor", ambient_profile=profile, protein_encoder_input="ambient_zscore")
 
 
