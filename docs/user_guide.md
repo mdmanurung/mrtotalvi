@@ -380,18 +380,18 @@ multiplied by the batch size, and `kl_weight` warm-up does not scale it. The pen
 reported as `kl_global`, which the training plan divides by `n_obs_training`. With a
 `train_size` below 1, the penalty is relative to all cells, not the training split.
 
-Five reporting details. First, with the legacy `scale_observations=True` each cell’s data term
+Four reporting details. First, with the legacy `scale_observations=True` each cell’s data term
 is divided by its sample’s cell count while the penalty is not, so one sigma shrinks relatively more
 strongly, by about the sample’s cell count (the gradient ratio on `qz.embedding.weight` rose by the sample’s cell count in a toy run).
 `centered_v2` weights average to 1 and are unaffected. Second, `elbo_validation` reports the
 penalty as `kl_global / n_obs_validation`, about `n_cells / n_obs_validation` times its
 size in the loss (0.035 against 0.0035 nats in a toy run), and `get_elbo` leaves the penalty out.
-Fourth, early stopping monitors `elbo_validation`, which is cell-weighted. With
+Third, early stopping monitors `elbo_validation`, which is cell-weighted. With
 `scale_observations=True` the training loss weights cells by donor, so the monitor is not the
 loss being minimised. `model.history` then also holds `donor_balanced_loss_train` and
 `donor_balanced_loss_validation`, the weighted loss the module trains on. They are logged only;
 the monitor and the stopping rule are unchanged.
-Fifth, `MrTotalVI.load` rebuilds the model on the AnnData you pass, so `n_cells` is that
+Fourth, `MrTotalVI.load` rebuilds the model on the AnnData you pass, so `n_cells` is that
 AnnData’s size. A load on a different cell set changes the penalty strength for continued
 training, and a `UserWarning` says so when the checkpoint stores the training count (models with
 `scale_observations=True`).

@@ -46,8 +46,8 @@ def test_counts_match_split_and_donor_is_flagged(fitted):
         adata=adata, indices=np.asarray(model.train_indices_[:2]), target_samples=list(model.sample_order), n_draws=1
     )
     flag = result["train_support"].to_numpy()
-    assert flag.dtype == np.int8
-    assert flag[0].tolist() == (expected > 0).astype(int).tolist()
+    assert flag.dtype == np.bool_
+    assert flag[0].tolist() == (expected > 0).tolist()
     # target_support is a separate quantity and still counts validation/test cells.
     empty = int(np.flatnonzero(expected == 0)[0])
     assert result["target_support"].to_numpy()[:, empty].all()
@@ -68,7 +68,8 @@ def test_checkpoint_round_trip_and_old_checkpoint_unknown(fitted, tmp_path):
     result = old.get_counterfactual_latent(
         adata=adata, indices=np.arange(2), target_samples=list(old.sample_order), n_draws=1
     )
-    assert (result["train_support"].to_numpy() == -1).all()
+    assert "train_support" not in result
+    assert result.attrs["train_support"] == "unknown"
 
 
 def test_no_warning_when_every_donor_has_training_cells():
