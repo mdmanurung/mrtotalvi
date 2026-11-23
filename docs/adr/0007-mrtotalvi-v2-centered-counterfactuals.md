@@ -135,6 +135,9 @@ model with no recorded split (older checkpoint) omits it and sets `attrs["train_
 `get_counterfactual_expression()` is available only for `centered_v2` and returns:
 
 - `rna_scale`, `rna_rate(draw, cell_name, target_sample, gene)`
+- `rna_zero_probability`, `rna_expected_count(draw, cell_name, target_sample, gene)`, only with
+  `gene_likelihood="zinb"`. `rna_rate` is the NB mean before dropout; `rna_expected_count` is
+  `(1 - rna_zero_probability) * rna_rate`, computed per draw.
 - `protein_background_component_mean`
 - `protein_foreground_component_mean`
 - `protein_foreground_probability`
