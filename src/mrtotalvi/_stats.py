@@ -64,7 +64,26 @@ def _leave_one_out_max(component_distribution, points: torch.Tensor, batch_size:
 def _as_indices(adata, indices):
     if indices is None:
         return np.arange(adata.n_obs)
-    return np.asarray(indices)
+    indices = np.asarray(indices)
+    if indices.dtype == np.bool_:
+        if indices.shape != (adata.n_obs,):
+            raise ValueError(f"Boolean indices have length {indices.size}, expected n_obs={adata.n_obs}.")
+        return np.flatnonzero(indices)
+    return indices
+
+
+def _restore_request_order(values, inverse, names):
+    """Reorder loader rows (unique, ascending) back to the request order.
+
+    ``values`` may be a DataFrame (re-labelled with ``names``), an array or a dict of arrays.
+    """
+    if isinstance(values, dict):
+        return {key: _restore_request_order(value, inverse, names) for key, value in values.items()}
+    if hasattr(values, "iloc"):
+        reordered = values.iloc[inverse].copy()
+        reordered.index = names
+        return reordered
+    return values[inverse]
 
 
 def _loader_order(adata, indices):

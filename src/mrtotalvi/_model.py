@@ -40,6 +40,7 @@ from ._stats import (
     _as_indices,
     _differential_expression,
     _loader_order,
+    _restore_request_order,
 )
 from ._stats import (
     differential_abundance as _differential_abundance,
@@ -1764,11 +1765,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         :meth:`scvi.model.TOTALVI.get_normalized_expression`.
         """
         resolved = self.adata if adata is None else adata
+        if n_samples_overall is not None:
+            # Same draw as upstream (with replacement); done here so backed data loads the drawn rows.
+            indices = np.random.choice(_as_indices(resolved, indices), n_samples_overall)
         loader_indices, inverse = _loader_order(resolved, indices)
         request = dict(
             adata=adata,
             indices=loader_indices,
-            n_samples_overall=n_samples_overall,
             transform_batch=transform_batch,
             gene_list=gene_list,
             protein_list=protein_list,
@@ -1781,19 +1784,30 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             rna = rna * library_size
         if inverse is None:
             return rna, protein
-        requested = np.asarray(indices)
-        if requested.dtype == np.bool_:
-            requested = np.flatnonzero(requested)
-        names = np.asarray(resolved.obs_names)[requested]
+        names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
+        return _restore_request_order(rna, inverse, names), _restore_request_order(protein, inverse, names)
 
-        def request_order(values):
-            if hasattr(values, "iloc"):
-                reordered = values.iloc[inverse].copy()
-                reordered.index = names
-                return reordered
-            return values[inverse]
+    def _in_request_order(self, method, adata, indices, **kwargs):
+        """Run an inherited ``method`` loading each backed cell once, then restore request order."""
+        resolved = self.adata if adata is None else adata
+        loader_indices, inverse = _loader_order(resolved, indices)
+        output = method(adata=adata, indices=loader_indices, **kwargs)
+        if inverse is None:
+            return output
+        names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
+        return _restore_request_order(output, inverse, names)
 
-        return request_order(rna), request_order(protein)
+    def get_protein_foreground_probability(self, adata=None, indices=None, **kwargs):
+        """TOTALVI ``get_protein_foreground_probability`` with rows in the requested order on backed data."""
+        return self._in_request_order(super().get_protein_foreground_probability, adata, indices, **kwargs)
+
+    def get_latent_library_size(self, adata=None, indices=None, **kwargs):
+        """TOTALVI ``get_latent_library_size`` with rows in the requested order on backed data."""
+        return self._in_request_order(super().get_latent_library_size, adata, indices, **kwargs)
+
+    def posterior_predictive_sample(self, adata=None, indices=None, **kwargs):
+        """TOTALVI ``posterior_predictive_sample`` with rows in the requested order on backed data."""
+        return self._in_request_order(super().posterior_predictive_sample, adata, indices, **kwargs)
 
     @torch.inference_mode()
     def get_feature_correlation_matrix(
