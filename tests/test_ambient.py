@@ -177,6 +177,7 @@ def test_decomposition_follows_request_order_on_backed_adata(sim, tmp_path, batc
     import anndata as ad
 
     model, adata = _model(sim, protein_noise_model="ambient")
+    model.is_trained_ = True  # request order is the subject here, not fitting
     adata.write_h5ad(tmp_path / "a.h5ad")
     backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
     model._validate_anndata(backed)
@@ -334,6 +335,7 @@ def test_decomposition_drops_isotypes_with_integer_protein_names(sim):
         protein_noise_model="ambient_isotype",
         isotype_names=iso,
     )
+    model.is_trained_ = True
     out = model.get_protein_noise_decomposition(indices=np.arange(8), n_samples=2)
     for frame in out.values():
         assert not set(map(str, frame.columns)) & set(iso)

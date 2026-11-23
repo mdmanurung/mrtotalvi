@@ -1248,9 +1248,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 raise ValueError("ambient_profile must be finite, non-negative, with one column per protein.")
             if profile.shape[0] not in {1, self.n_batch}:
                 raise ValueError("ambient_profile needs one pooled row or one row per batch.")
+            if not np.all(profile.sum(axis=1) > 0):
+                raise ValueError(
+                    "ambient_profile needs a positive row sum for every row; an all-zero row has no composition."
+                )
             profile = profile / profile.sum(axis=1, keepdims=True)
             self.register_buffer("ambient_profile", torch.as_tensor(profile))
             loc, scale = ambient_burden_prior
+            if not (np.isfinite(loc) and np.isfinite(scale) and scale > 0):
+                raise ValueError("ambient_burden_prior must be a finite (loc, scale) with scale > 0.")
             self.ambient_burden_prior_loc = float(loc)
             self.ambient_burden_prior_scale = float(scale)
             n_iso = 0
@@ -1275,6 +1281,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             sd = np.atleast_2d(np.asarray(dsb_log_sd, dtype=np.float32))
             if mean.shape != sd.shape or mean.shape[1] != P:
                 raise ValueError("DSB statistics need one column per protein.")
+            if not (np.all(np.isfinite(mean)) and np.all(np.isfinite(sd))):
+                raise ValueError("DSB statistics must be finite.")
             self.register_buffer("dsb_log_mean", torch.as_tensor(mean))
             if not np.all(sd > 1e-3):
                 low = np.flatnonzero(~np.all(sd > 1e-3, axis=0))

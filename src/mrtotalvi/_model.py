@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -64,6 +65,17 @@ if TYPE_CHECKING:
 DEFAULT_QZ_KWARGS: dict = {"stop_gradients_mlp": True, "dropout_rate": 0.03}
 DEFAULT_QU_KWARGS: dict = {"n_layers": 2}
 DEFAULT_PLAN_KWARGS: dict = {"eps": 1e-8, "weight_decay": 1e-8}
+
+
+@contextmanager
+def _eval_mode(module):
+    """Run ``module`` in eval mode and restore the caller's training flag, so BatchNorm stats stay put."""
+    was_training = module.training
+    module.eval()
+    try:
+        yield
+    finally:
+        module.train(was_training)
 
 
 class MrTotalVI(EmbeddingMixin, TOTALVI):
@@ -1171,6 +1183,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             profile = stacked
         else:
             profile = ambient_profile.aligned(names) if ambient_profile is not None else None
+        if profile is not None:
+            for stat in ("profile", "log1p_mean", "log1p_sd", "dsb_log_mean", "dsb_log_sd"):
+                if not np.all(np.isfinite(getattr(profile, stat))):
+                    raise ValueError(f"ambient_profile.{stat} must be finite.")
         isotype_mask = None
         if isotype_names is not None:
             unknown = sorted(set(map(str, isotype_names)) - set(names))
@@ -1223,6 +1239,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         controls are dropped from the protein columns. Proteins not measured in a
         cell's panel are ``NaN``.
         """
+        self._check_if_trained(warn=False)
+        if isinstance(n_samples, bool) or not isinstance(n_samples, (int, np.integer)) or n_samples < 1:
+            raise ValueError(f"n_samples must be an integer >= 1; got {n_samples!r}.")
         adata = self._validate_anndata(adata)
         indices = _as_indices(adata, indices)
         # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
@@ -1237,13 +1256,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         chunks: dict[str, list] = {}
         masks = []
         mask_table = self.module.protein_batch_mask
-        for tensors in loader:
-            out = self.module.protein_components(tensors, n_samples=n_samples)
-            for key, value in out.items():
-                chunks.setdefault(key, []).append(value.cpu().numpy())
-            if mask_table is not None:
-                panel = tensors[self.module.panel_key].reshape(-1).cpu().numpy().astype(int)
-                masks.append(np.stack([mask_table[str(p)] for p in panel]).astype(bool))
+        with _eval_mode(self.module):
+            for tensors in loader:
+                out = self.module.protein_components(tensors, n_samples=n_samples)
+                for key, value in out.items():
+                    chunks.setdefault(key, []).append(value.cpu().numpy())
+                if mask_table is not None:
+                    panel = tensors[self.module.panel_key].reshape(-1).cpu().numpy().astype(int)
+                    masks.append(np.stack([mask_table[str(p)] for p in panel]).astype(bool))
         if indices.dtype == np.bool_:
             indices = np.flatnonzero(indices)
         index = adata.obs_names[indices]
@@ -1777,11 +1797,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             protein_list=protein_list,
             **kwargs,
         )
-        if library_size is None or isinstance(library_size, str) or library_size == 1:
-            rna, protein = super().get_normalized_expression(library_size=library_size, **request)
-        else:
-            rna, protein = super().get_normalized_expression(library_size=1, **request)
-            rna = rna * library_size
+        with _eval_mode(self.module):
+            if library_size is None or isinstance(library_size, str) or library_size == 1:
+                rna, protein = super().get_normalized_expression(library_size=library_size, **request)
+            else:
+                rna, protein = super().get_normalized_expression(library_size=1, **request)
+                rna = rna * library_size
         if inverse is None:
             return rna, protein
         names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
@@ -1849,14 +1870,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         loader_indices, inverse = _loader_order(adata, indices)
         corr_mats = []
         for b in track(transform_batch, disable=silent):
-            denoised_data = self._get_denoised_samples(
-                adata=adata,
-                n_samples=n_samples,
-                batch_size=batch_size,
-                rna_size_factor=rna_size_factor,
-                transform_batch=b,
-                indices=loader_indices,
-            )
+            with _eval_mode(self.module):
+                denoised_data = self._get_denoised_samples(
+                    adata=adata,
+                    n_samples=n_samples,
+                    batch_size=batch_size,
+                    rna_size_factor=rna_size_factor,
+                    transform_batch=b,
+                    indices=loader_indices,
+                )
             if inverse is not None:
                 denoised_data = denoised_data[inverse]
             # Stack the posterior samples as extra rows: (cells * samples, features).
