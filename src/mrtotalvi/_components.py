@@ -698,7 +698,12 @@ class EncoderXU_TotalVI(nn.Module):
             Distribution over ``u`` with parameters of shape
             ``(batch, n_latent)``.
         """
-        x = torch.log1p(torch.cat([x_rna, x_protein], dim=-1))
+        if getattr(self, "protein_input_pretransformed", False):
+            # ADR-0011 PR 4: the caller already z-scored the protein block; it may be
+            # negative and must not pass through log1p a second time.
+            x = torch.cat([torch.log1p(x_rna), x_protein], dim=-1)
+        else:
+            x = torch.log1p(torch.cat([x_rna, x_protein], dim=-1))
         x = _append_covariates(
             x,
             batch_index=batch_index,
@@ -1222,3 +1227,34 @@ class EncoderUZ(nn.Module):
         else:
             # Isomorphic: z_base = u (preserves decoder input unchanged)
             return u, residual, eps_dist
+
+
+class AmbientNuisanceEncoder(nn.Module):
+    """Amortised posteriors for the ambient burden ``log c`` and isotype factor ``h``.
+
+    ADR-0011: ``q(log c | y) = Normal`` from ``log1p`` protein counts and the log total;
+    ``q(h | y_iso) = Normal`` from the isotype block only, so ``h`` is identified by the
+    controls rather than by target proteins.
+    """
+
+    def __init__(self, n_proteins: int, n_isotypes: int = 0, n_nuisance: int = 1, n_hidden: int = 64):
+        super().__init__()
+        self.c_net = nn.Sequential(nn.Linear(n_proteins + 1, n_hidden), nn.GELU(), nn.Linear(n_hidden, 2))
+        self.n_isotypes = int(n_isotypes)
+        self.n_nuisance = int(n_nuisance)
+        if self.n_isotypes > 0:
+            self.h_net = nn.Sequential(
+                nn.Linear(self.n_isotypes + 1, n_hidden), nn.GELU(), nn.Linear(n_hidden, 2 * self.n_nuisance)
+            )
+
+    def forward(self, y: torch.Tensor, isotype_index: torch.Tensor | None = None):
+        log_total = torch.log1p(y.sum(dim=-1, keepdim=True))
+        c_out = self.c_net(torch.cat([torch.log1p(y), log_total], dim=-1))
+        qc = Normal(c_out[..., :1], F.softplus(c_out[..., 1:]) + 1e-4)
+        qh = None
+        if self.n_isotypes > 0:
+            y_iso = y[..., isotype_index]
+            h_out = self.h_net(torch.cat([torch.log1p(y_iso), log_total], dim=-1))
+            k = self.n_nuisance
+            qh = Normal(h_out[..., :k], F.softplus(h_out[..., k:]) + 1e-4)
+        return qc, qh
