@@ -141,6 +141,10 @@ lint.per-file-ignores."docs/reviews/*" = [ "D", "I" ]
 lint.per-file-ignores."tests/*" = [ "D" ]
 lint.pydocstyle.convention = "numpy"
 
+[tool.pyproject-fmt]
+# Classifiers list only the Python versions CI tests (3.12, 3.13).
+max_supported_python = "3.13"
+
 [tool.mypy]
 files = [ "src", "tests" ]
 
