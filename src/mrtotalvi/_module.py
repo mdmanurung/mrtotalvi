@@ -1325,6 +1325,38 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             base["h"] = inference_outputs.get("h")
         return base
 
+    def _snapshot_background_bn(self):
+        """Copy the BatchNorm buffers of the protein background decoder."""
+        return [
+            (m, {k: getattr(m, k).detach().clone() for k in ("running_mean", "running_var", "num_batches_tracked")})
+            for m in self.decoder.py_back_decoder.modules()
+            if isinstance(m, nn.modules.batchnorm._BatchNorm) and m.track_running_stats
+        ]
+
+    def _background_head(self, z_base, batch_index, cont_covs, cat_covs, transform_batch):
+        """Protein background parameters at ``z_base``; runs only the background head.
+
+        Mirrors ``TOTALVAE.generative`` and ``DecoderTOTALVI.forward`` for ``back_alpha``,
+        ``back_beta`` and ``rate_back``, without running the RNA and other protein heads.
+        """
+        if cont_covs is None:
+            decoder_input = z_base
+        elif z_base.dim() != cont_covs.dim():
+            decoder_input = torch.cat([z_base, cont_covs.unsqueeze(0).expand(z_base.size(0), -1, -1)], dim=-1)
+        else:
+            decoder_input = torch.cat([z_base, cont_covs], dim=-1)
+        categorical_input = torch.split(cat_covs, 1, dim=1) if cat_covs is not None else ()
+        if transform_batch is not None:
+            batch_index = torch.ones_like(batch_index) * transform_batch
+        dec = self.decoder
+        cat_list = (batch_index, *categorical_input)
+        back = dec.py_back_decoder(decoder_input, *cat_list)
+        back_cat_z = torch.cat([back, decoder_input], dim=-1)
+        alpha = dec.py_back_mean_log_alpha(back_cat_z, *cat_list)
+        beta = dec.activation_function_bg(dec.py_back_mean_log_beta(back_cat_z, *cat_list)) + 1e-8
+        rate_back = torch.exp(Normal(alpha, beta).rsample())
+        return {"back_alpha": alpha, "back_beta": beta, "rate_back": rate_back}
+
     def generative(
         self,
         z,
@@ -1340,9 +1372,16 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         h=None,
     ):
         """TOTALVAE generative step, extended by the opt-in ADR-0011 protein model."""
-        out = super().generative(z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch)
         mode = getattr(self, "protein_noise_model", "totalvi")
         source = getattr(self, "protein_background_source", "z")
+        # With source "z_base" the z pass's background BatchNorm update is dropped, so that head
+        # advances once, on z_base (see ``_background_head``).
+        bn_state = self._snapshot_background_bn() if source == "z_base" and self.training else None
+        out = super().generative(z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch)
+        if bn_state is not None:
+            for bn, saved in bn_state:
+                for name, value in saved.items():
+                    getattr(bn, name).copy_(value)
         if mode == "totalvi" and source == "z":
             return out
         py_ = out["py_"]
@@ -1351,11 +1390,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 raise NotImplementedError("protein_background_source='z_base' needs z_base from inference.")
             if z_base.ndim < z.ndim:
                 z_base = z_base.expand_as(z)
-            py_b = super().generative(
-                z_base, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch
-            )["py_"]
-            for key in ("back_alpha", "back_beta", "rate_back"):
-                py_[key] = py_b[key]
+            py_.update(self._background_head(z_base, batch_index, cont_covs, cat_covs, transform_batch))
         fore_scale = py_["fore_scale"]
         back_mean = torch.exp(py_["back_alpha"] + 0.5 * py_["back_beta"].square())
         b_idx = batch_index if transform_batch is None else torch.full_like(batch_index, int(transform_batch))
