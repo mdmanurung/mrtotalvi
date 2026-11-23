@@ -168,3 +168,25 @@ def test_per_batch_profiles_stack_in_registry_order():
         MrTotalVI(
             adata, sample_key="donor", ambient_profile={"well0": profiles["well0"]}, protein_noise_model="ambient"
         )
+
+
+@pytest.mark.parametrize("batch_size", [16, 256])  # 16 crosses minibatch boundaries
+def test_decomposition_follows_request_order_on_backed_adata(sim, tmp_path, batch_size):
+    """scvi sorts backed minibatches; the returned rows must follow the requested order."""
+    import anndata as ad
+
+    model, adata = _model(sim, protein_noise_model="ambient")
+    adata.write_h5ad(tmp_path / "a.h5ad")
+    backed = ad.read_h5ad(tmp_path / "a.h5ad", backed="r")
+    model._validate_anndata(backed)
+    request = np.array([37, 2, 25, 0, 30, 1, 2])  # unsorted, with a duplicate
+    # Both calls load the same unique rows in ascending order, so with the same seed
+    # they draw the same posterior samples; only the final reordering differs.
+    torch.manual_seed(0)
+    ref = model.get_protein_noise_decomposition(backed, indices=np.unique(request), batch_size=batch_size)
+    torch.manual_seed(0)
+    out = model.get_protein_noise_decomposition(backed, indices=request, batch_size=batch_size)
+    for key in ("native", "observed"):
+        assert list(out[key].index) == list(backed.obs_names[request])
+        np.testing.assert_allclose(out[key].values, ref[key].loc[backed.obs_names[request]].values, rtol=1e-6)
+

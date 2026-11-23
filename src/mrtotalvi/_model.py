@@ -35,6 +35,7 @@ from ._counterfactual import get_counterfactual_latent as _get_counterfactual_la
 from ._counterfactual import local_sample_enrichment as _local_sample_enrichment
 from ._module import MrTotalVAE
 from ._stats import (
+    _as_indices,
     _differential_expression,
     _loader_order,
 )
@@ -1148,13 +1149,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         cell's panel are ``NaN``.
         """
         adata = self._validate_anndata(adata)
-        if indices is None:
-            indices = np.arange(adata.n_obs)
+        indices = _as_indices(adata, indices)
+        # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
+        # loaded rows back to the request order.
+        loader_indices, inverse = _loader_order(adata, indices)
         names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
         keep = np.ones(names.size, dtype=bool)
         if getattr(self, "isotype_names", None):
             keep = ~np.isin(names, self.isotype_names)
-        loader = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+        loader = self._make_data_loader(adata=adata, indices=loader_indices, batch_size=batch_size)
         chunks: dict[str, list] = {}
         masks = []
         mask_table = self.module.protein_batch_mask
@@ -1165,11 +1168,17 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             if mask_table is not None:
                 panel = tensors[self.module.panel_key].reshape(-1).cpu().numpy().astype(int)
                 masks.append(np.stack([mask_table[str(p)] for p in panel]).astype(bool))
-        index = adata.obs_names[np.asarray(indices)]
+        if indices.dtype == np.bool_:
+            indices = np.flatnonzero(indices)
+        index = adata.obs_names[indices]
         available = np.concatenate(masks) if masks else None
+        if available is not None and inverse is not None:
+            available = available[inverse]
         result = {}
         for key, parts in chunks.items():
             values = np.concatenate(parts)
+            if inverse is not None:
+                values = values[inverse]
             if available is not None:
                 values = np.where(available, values, np.nan)
             result[key] = pd.DataFrame(values[:, keep], index=index, columns=names[keep])
