@@ -253,6 +253,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     * ``batch_key``  → decoder ``cat_list``.
     * ``panel_key``  → protein background prior.
 
+    The protein background prior follows scvi-tools: ``empirical_protein_background_prior``
+    defaults to ``None``, which turns it on above 10 proteins. It is computed once at
+    construction from all registered cells, including any you hold out later. For
+    held-out evaluation, pass ``empirical_protein_background_prior=False`` or construct
+    the model on the training cells only. The inherited initializer SD shrinks with the
+    number of sampled cells, as ``sqrt(sum(s_i^2)) / n``.
+
     See Also
     --------
     :class:`~._module.MrTotalVAE`

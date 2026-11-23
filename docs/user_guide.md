@@ -438,6 +438,15 @@ Other inherited TOTALVI methods are not re-derived for `u`/`eps`: `get_marginal_
 `get_normalized_expression` and `get_protein_foreground_probability` decode `z` with each cell’s
 own donor `eps` (use the counterfactual APIs to change the donor).
 
+### Empirical protein background prior
+
+`empirical_protein_background_prior` keeps the scvi-tools default: `None`, which
+enables the prior above 10 proteins. The model computes it at construction from all
+registered cells, including any you hold out later. For held-out evaluation, pass
+`empirical_protein_background_prior=False` or construct the model on the training cells
+only. The inherited initializer SD shrinks with the number of sampled cells, as
+`sqrt(sum(s_i^2)) / n`.
+
 ## v1 Limitations
 
 These limitations are intentional cuts documented in ADR-0005.
