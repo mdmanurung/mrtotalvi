@@ -20,6 +20,40 @@
 
 ### Fixed
 
+- Review fixes (docs/reviews/2026-11-23). Two change fitted results, by user decision
+  (2026-11-23). The u-invariance penalty now decodes deterministically from the qz mean, so it
+  is exactly 0 for identical donors; this changes fits with `use_map=False`. With
+  `protein_background_source="z_base"` only the protein background head runs on `z_base`, and
+  BatchNorm statistics update once per step.
+- Training records `n_train_cells_per_sample_` and warns when a donor has no training cells.
+  Counterfactual outputs add `train_support(cell_name, target_sample)` (bool); without a recorded
+  split it is omitted and `attrs["train_support"] = "unknown"` (user decision: flag and warn,
+  2026-11-23). With `scale_observations=True` training also logs `donor_balanced_loss_train` and
+  `donor_balanced_loss_validation`; early stopping still monitors `elbo_validation` (user
+  decision, 2026-11-23). The empirical protein background prior is unchanged and now documented
+  as using all registered cells (user decision, 2026-11-23).
+- Feature identity: queries and `load(adata=...)` with RNA or protein names that differ from
+  training in name or order now raise. `setup_anndata` raises on a protein DataFrame/uns name
+  conflict, duplicate names and non-string names.
+- Backed AnnData: `get_protein_foreground_probability`, `get_latent_library_size`,
+  `posterior_predictive_sample`, `get_local_sample_representation` and
+  `get_normalized_expression(n_samples_overall=...)` return rows in request order. Arguments after
+  `indices` must be passed by keyword. A boolean mask with `sample=` in
+  `get_aggregated_posterior` now selects the masked cells; a mask of the wrong length raises.
+- `protein_noise_model="ambient_isotype"`: isotype columns of foreground probability and
+  normalized protein output are `NaN`, because their mixing logit is not identified.
+- `gene_likelihood="zinb"`: counterfactual outputs add `rna_zero_probability` and
+  `rna_expected_count`; `rna_rate` stays the NB mean. The memory gate counts both.
+- `get_protein_noise_decomposition` refuses an untrained model and `n_samples < 1`, and it and
+  the denoised getters run in eval mode. Ambient profiles with non-finite statistics, zero row
+  sums or a bad burden prior raise.
+- The seed combiner compares `context_table_sha256` across all seeds that record it.
+  `protein_list` works with a DataFrame protein axis. Unsupported dispersions (`gene-cell`,
+  `protein-cell`, unknown strings) raise at construction. The checkpoint-load flag is a
+  `ContextVar`; the class attribute `MrTotalVI._loading_checkpoint` is gone.
+- Ambient statistics and the legacy outlier cutoff run in row chunks (same results to 1e-12).
+  `density_estimator="posterior"` warns when its kernels are narrower than cell spacing.
+  pyproject lists only tested Python versions; docs note the private scvi-tools API used.
 - Tests: the legacy-oracle CPU portability policy now records an observed worst-case float32
   delta of 9.54e-6 (was 7.63e-6), the largest seen on a GitHub Actions runner under Python 3.12.
   The strict and portable tolerances are unchanged (user decision, 2026-11-22).
