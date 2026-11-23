@@ -104,13 +104,14 @@ def test_opt_in_modes_train_and_decompose(sim, kwargs):
     model, adata = _model(sim, **kwargs)
     model.train(max_epochs=2, accelerator="cpu", batch_size=128)
     comp = model.get_protein_noise_decomposition(n_samples=3)
-    # The three count components sum to the observed mean.
-    np.testing.assert_allclose(
-        comp["observed"].values,
-        comp["native"].values + comp["ambient"].values + comp["nonspecific"].values,
-        rtol=1e-5,
-    )
-    assert np.isfinite(comp["observed"].values).all()
+    for key in ("native", "ambient", "nonspecific", "observed"):
+        assert np.isfinite(comp[key].values).all()
+        assert (comp[key].values >= 0).all()
+    # The free-ambient component exists only in the ambient modes.
+    if kwargs.get("protein_noise_model", "totalvi") == "totalvi":
+        assert (comp["ambient"].values == 0).all()
+    else:
+        assert (comp["ambient"].values > 0).all()
     if "isotype_names" in kwargs:
         assert not set(ISOTYPES) & set(comp["native"].columns)
 
@@ -170,7 +171,7 @@ def test_per_batch_profiles_stack_in_registry_order():
         )
 
 
-@pytest.mark.parametrize("batch_size", [16, 256])  # 16 crosses minibatch boundaries
+@pytest.mark.parametrize("batch_size", [2, 256])  # 2 crosses minibatch boundaries
 def test_decomposition_follows_request_order_on_backed_adata(sim, tmp_path, batch_size):
     """scvi sorts backed minibatches; the returned rows must follow the requested order."""
     import anndata as ad
@@ -186,7 +187,7 @@ def test_decomposition_follows_request_order_on_backed_adata(sim, tmp_path, batc
     ref = model.get_protein_noise_decomposition(backed, indices=np.unique(request), batch_size=batch_size)
     torch.manual_seed(0)
     out = model.get_protein_noise_decomposition(backed, indices=request, batch_size=batch_size)
-    for key in ("native", "observed"):
+    for key in ("native", "ambient", "nonspecific", "observed", "foreground_probability"):
         assert list(out[key].index) == list(backed.obs_names[request])
         np.testing.assert_allclose(out[key].values, ref[key].loc[backed.obs_names[request]].values, rtol=1e-6)
 
@@ -215,6 +216,44 @@ def test_per_batch_profiles_accept_numeric_batch_keys():
             ambient_profile={0: profiles[0], 1: profiles[1], "1": profiles[1]},
             protein_noise_model="ambient",
         )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"protein_noise_model": "ambient"},
+        {"protein_noise_model": "ambient_isotype", "isotype_names": ISOTYPES},
+        {"protein_background_source": "z_base"},
+    ],
+)
+def test_observed_equals_the_likelihood_mixture_mean(sim, kwargs):
+    """observed = eff * (pi * mean_back + (1 - pi) * mean_fore), rebuilt from the model."""
+    model, adata = _model(sim, **kwargs)
+    module = model.module
+    module.eval()
+    tensors = next(iter(model._make_data_loader(adata=adata, batch_size=32)))
+    torch.manual_seed(0)
+    out = module.protein_components(tensors)
+    torch.manual_seed(0)
+    with torch.no_grad():
+        inf = module.inference(**module._get_inference_input(tensors))
+        gen = module.generative(**module._get_generative_input(tensors, inf))
+    py_, eff = gen["py_"], gen["per_batch_efficiency"]
+    pi = torch.sigmoid(py_["mixing"])
+    amb = py_["ambient_mean"]
+    if kwargs.get("protein_noise_model") == "ambient_isotype":
+        back = amb + py_["nonspecific_mean"]
+        fore = back + py_["native_mean"]
+        # Free ambient is the burden times this batch's profile row.
+        np.testing.assert_allclose(
+            amb.numpy(), (torch.exp(inf["log_c"]) * module.ambient_profile[0]).numpy(), rtol=1e-5
+        )
+    else:
+        b_mean = torch.exp(py_["back_alpha"] + 0.5 * py_["back_beta"].square())
+        back = amb + b_mean
+        fore = amb + b_mean * py_["fore_scale"]
+    expected = eff * (pi * back + (1 - pi) * fore)
+    np.testing.assert_allclose(out["observed"].numpy(), expected.numpy(), rtol=1e-4)
 
 
 def test_counterfactual_u_encoding_uses_zscored_protein_input(sim):
