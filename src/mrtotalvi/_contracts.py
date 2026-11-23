@@ -243,8 +243,13 @@ def authoritative_protein_names(
     protein_expression_obsm_key: str,
     protein_names_uns_key: str | None,
     required: bool,
+    require_strings: bool = True,
 ) -> np.ndarray | None:
-    """Resolve and validate an authoritative protein axis for one AnnData."""
+    """Resolve and validate an authoritative protein axis for one AnnData.
+
+    ``require_strings=False`` accepts non-string labels (for example the integer columns of
+    ``pd.DataFrame(array)``) and still checks emptiness, uniqueness and agreement.
+    """
     matrix = adata.obsm[protein_expression_obsm_key]
     width = int(matrix.shape[1])
 
@@ -260,7 +265,7 @@ def authoritative_protein_names(
         for value in names.tolist():
             # Check the scalar type before any missingness predicate: pd.isna on
             # a list-like value returns an array whose truth value is ambiguous.
-            if not isinstance(value, str) or not value.strip():
+            if require_strings and (not isinstance(value, str) or not value.strip()):
                 raise ValueError("Protein names must be non-empty strings.")
             normalized.append(value)
         if len(set(normalized)) != len(normalized):
