@@ -112,13 +112,6 @@ def combine_mrtotalvi_seed_results(
             UserWarning,
             stacklevel=2,
         )
-    # Compare every seed that records a hash, so a template without one cannot hide a mismatch.
-    present_hashes = {d.attrs["context_table_sha256"] for d in datasets if "context_table_sha256" in d.attrs}
-    if template.attrs.get("observed_library_estimand") != "posterior_lognormal_mean" and len(present_hashes) > 1:
-        raise ValueError(
-            "Seed results were built from different context tables (context_table_sha256 differs), "
-            "so they do not share one between-seed SD."
-        )
     for dataset in datasets[1:]:
         if set(dataset.data_vars) != set(template.data_vars):
             raise ValueError("Seed results must contain identical data variables.")
@@ -143,6 +136,13 @@ def combine_mrtotalvi_seed_results(
             xr.align(template, dataset, join="exact", copy=False)
         except ValueError as error:
             raise ValueError("Seed result coordinates must match exactly.") from error
+    # Compare every seed that records a hash, so a template without one cannot hide a mismatch.
+    present_hashes = {d.attrs["context_table_sha256"] for d in datasets if "context_table_sha256" in d.attrs}
+    if template.attrs.get("observed_library_estimand") != "posterior_lognormal_mean" and len(present_hashes) > 1:
+        raise ValueError(
+            "Seed results were built from different context tables (context_table_sha256 differs), "
+            "so they do not share one between-seed SD."
+        )
 
     combined = xr.concat(
         datasets,
