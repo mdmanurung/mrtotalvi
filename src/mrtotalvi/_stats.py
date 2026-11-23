@@ -232,6 +232,24 @@ def _knn_log_density(counts: np.ndarray, n_ref: np.ndarray) -> np.ndarray:
     return np.where(n_ref > 0, out, np.nan)
 
 
+def _warn_if_posterior_below_spacing(ap, u: np.ndarray, n_sample: int = 1000) -> None:
+    """Warn when posterior kernels are narrower than the typical gap between cells (sampled)."""
+    rng = np.random.default_rng(0)
+    pts = torch.as_tensor(u[rng.choice(len(u), size=min(len(u), n_sample), replace=False)], dtype=torch.float32)
+    dist = torch.cdist(pts, pts)
+    dist.fill_diagonal_(float("inf"))
+    spacing = dist.min(dim=1).values.median().item()
+    scale = ap.component_distribution.base_dist.scale.float().median().item()
+    if scale < spacing:
+        warnings.warn(
+            f"The median posterior scale ({scale:.3g}) is below the median nearest-neighbour spacing "
+            f"({spacing:.3g}) of u, so density_estimator='posterior' scores are dominated by noise on "
+            "a null. Try density_estimator='scale_floor' with scale_floor, or 'knn'.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def _leave_one_cell_out(ap, u_tensor, lp: np.ndarray, own: np.ndarray) -> np.ndarray:
     """Remove each cell's own Normal component from its own sample's mixture density.
 
@@ -472,6 +490,8 @@ def differential_abundance(
             sample=sample_name,
             batch_size=batch_size,
         )
+        if density_estimator == "posterior" and not log_probs:
+            _warn_if_posterior_below_spacing(ap, us_list[0])
         if density_estimator == "scale_floor":
             base = ap.component_distribution.base_dist
             ap = MixtureSameFamily(
