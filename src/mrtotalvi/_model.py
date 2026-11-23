@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -711,10 +712,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
 
         # scvi-tools only warns on a gene mismatch and re-registers the passed adata, so the
         # trained names come from the checkpoint itself.
-        query = args[0] if args else kwargs.get("adata")
+        bound = inspect.signature(TOTALVI.load).bind_partial(dir_path, *args, **kwargs).arguments
+        query = bound.get("adata")
         if query is not None:
             _, trained_names, _, _ = _load_saved_files(
-                dir_path, False, prefix=kwargs.get("prefix"), map_location="cpu", backup_url=kwargs.get("backup_url")
+                dir_path,
+                False,
+                prefix=bound.get("prefix"),
+                map_location="cpu",
+                backup_url=bound.get("backup_url"),
             )
             if trained_names is not None and list(query.var_names) != list(trained_names):
                 raise ValueError(
@@ -938,7 +944,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
         # would then run without dropout and skip the u-invariance penalty.
         self.module.train()
-        super().train(
+        result = super().train(
             max_epochs=max_epochs,
             lr=lr,
             accelerator=accelerator,
@@ -959,6 +965,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             **kwargs,
         )
         self._record_train_cells_per_sample()
+        return result
 
     def _record_train_cells_per_sample(self) -> None:
         """Count training cells per donor from the resolved split and warn on empty donors."""
@@ -1087,12 +1094,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             layer=layer,
             protein_expression_obsm_key=protein_expression_obsm_key,
         )
-        # Pure check: a DataFrame/uns conflict, duplicates or non-string names raise.
+        # Pure check: a DataFrame/uns conflict or duplicate names raise. Non-string labels
+        # stay allowed here, as before; paths that need strings check them later.
         authoritative_protein_names(
             adata,
             protein_expression_obsm_key=protein_expression_obsm_key,
             protein_names_uns_key=protein_names_uns_key,
             required=False,
+            require_strings=False,
         )
         # Add integer index column required by compute_local_statistics
         adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
