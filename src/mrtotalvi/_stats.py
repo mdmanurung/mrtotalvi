@@ -253,6 +253,9 @@ def _knn_log_density(counts: np.ndarray, n_ref: np.ndarray) -> np.ndarray:
 
 def _warn_if_posterior_below_spacing(ap, u: np.ndarray, n_sample: int = 1000) -> None:
     """Warn when posterior kernels are narrower than the typical gap between cells (sampled)."""
+    if len(u) < 2:
+        # One cell has no neighbour, so there is no spacing to compare against.
+        return
     rng = np.random.default_rng(0)
     pts = torch.as_tensor(u[rng.choice(len(u), size=min(len(u), n_sample), replace=False)], dtype=torch.float32)
     dist = torch.cdist(pts, pts)
