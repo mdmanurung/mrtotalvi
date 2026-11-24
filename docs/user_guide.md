@@ -302,6 +302,26 @@ With `protein_noise_model="ambient_isotype"`, the loss is the same for any mixin
 
 In `get_protein_noise_decomposition`, `observed` is the fitted expected total count (the mixture mean), not the measured count. `foreground_probability` is the decoder mixture weight `1 - pi`, not the probability of foreground given the observed counts.
 
+### Reading protein values
+
+Read denoised protein from `native` in `get_protein_noise_decomposition`. It is the expected count with the ambient and nonspecific parts removed, on the raw count scale. Do not read expression from `observed` (it still holds ambient and nonspecific counts) or from `foreground_probability` (a mixture weight, see above).
+
+```python
+import numpy as np
+
+comp = model.get_protein_noise_decomposition(adata, n_samples=25)
+native = np.log1p(comp["native"])  # cells x proteins; isotype controls dropped
+dead = comp["native"].max() < 1e-3  # proteins the fit switched off
+```
+
+Three checks come from one real data set: macaque PBMC CITE-seq, 137 ADTs, three training seeds. They are not validated defaults.
+
+- **Dead proteins.** A protein whose `native` is about 0 in every cell carries no signal in that fit. In that data set, `protein_noise_model="ambient"` switched off 7 to 14 of 137 proteins per seed (CD8 among them), and `"ambient_isotype"` none.
+- **Rank metrics hide weak signals.** An AUROC on `native` can be high when the values are near 0 everywhere: there, the latent orders near-zero values by cell identity. Before calling a marker, also check its size, for example the fold change of mean `native` between groups or the native share `native / observed`.
+- **Display transform.** `log1p` and `arcsinh(x / 1)` give the same picture. The cytometry cofactors 5 (mass) and 150 (flow) fold weak markers toward 0, because `native` values are counts, mostly below 150.
+
+In the same data set, the protein output of `protein_noise_model="totalvi"` (and of stock totalVI) moved every protein with one per-cell factor: in biaxial plots, unrelated markers rose together along one diagonal.
+
 ## Statistical APIs
 
 MrTotalVI exposes aggregated-posterior and outlier utilities and descriptive DA:
