@@ -2,6 +2,7 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
+from ._autotune import run_autotune
 from ._model import MrTotalVI
 from ._module import MrTotalVAE
 from ._seed import combine_mrtotalvi_seed_results
@@ -16,4 +17,5 @@ __all__ = [
     "MrTotalVI",
     "MrTotalVAE",
     "combine_mrtotalvi_seed_results",
+    "run_autotune",
 ]

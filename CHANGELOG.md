@@ -10,6 +10,12 @@
 
 ### Added
 
+- `mrtotalvi.run_autotune` wraps `scvi.autotune.run_autotune` for MrTotalVI (ADR-0013). It fills
+  `sample_key` from the setup registry and reports two residual-collapse metrics to Ray next to an
+  ELBO-type target. Training now logs `residual_active_units_<stage>` and `residual_share_<stage>`.
+  On the 375 ADR-0012 fits, `residual_share` separated collapsed from healthy fits with AUROC 0.82,
+  so it is a flag for trials to check, not a filter. Install with `pip install "mrtotalvi[autotune]"`.
+  Defaults are unchanged.
 - Opt-in ambient- and isotype-aware protein noise models (ADR-0011). Defaults are unchanged.
   `mrtotalvi.preprocessing.estimate_adt_ambient` builds a pooled ambient ADT profile from
   unfiltered droplets, selecting them over RNA and ADT as scAR does. `MrTotalVI` takes
