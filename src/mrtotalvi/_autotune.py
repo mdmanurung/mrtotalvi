@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from typing import Any, Literal
 
     from anndata import AnnData
-    from scvi.autotune import AutotuneExperiment
 
 GUARD_METRICS = ("residual_active_units", "residual_share")
 
@@ -22,7 +21,7 @@ def run_autotune(
     search_space: dict[str, dict[str, Any]],
     num_samples: int,
     **kwargs,
-) -> AutotuneExperiment:
+) -> Any:  # scvi.autotune.AutotuneExperiment; not imported for typing, it needs ray
     """Run a hyperparameter sweep of :class:`~mrtotalvi.MrTotalVI`.
 
     A thin wrapper of :func:`scvi.autotune.run_autotune` with ``model_cls=MrTotalVI``.
