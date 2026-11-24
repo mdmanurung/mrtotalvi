@@ -1483,6 +1483,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         ``foreground_probability``, each ``(cells, proteins)``, averaged over
         ``n_samples`` posterior draws. ``efficiency`` multiplies every component (C7).
         """
+        # generative() and the z_base background head read batch tensors straight from
+        # ``tensors``; only inference() moves its inputs, so move them all here.
+        tensors = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
         inf_in = self._get_inference_input(tensors)
         inf_out = self.inference(**inf_in, n_samples=n_samples)
         gen_in = self._get_generative_input(tensors, inf_out)
