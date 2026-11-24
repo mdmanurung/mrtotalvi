@@ -29,6 +29,25 @@ from ._components import (
     kl_u as _kl_u,
 )
 
+# Active-unit cut-off of Burda et al. (2016, ICLR): a latent dimension is active when the
+# variance of its posterior mean across cells exceeds 0.01.
+RESIDUAL_ACTIVE_THRESHOLD = 0.01
+
+
+def residual_collapse_metrics(eps: torch.Tensor, z: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Minibatch collapse diagnostics of the donor residual ``eps`` (ADR-0013).
+
+    ``residual_active_units`` counts the ``eps`` dimensions whose variance across the
+    cells of the minibatch exceeds :data:`RESIDUAL_ACTIVE_THRESHOLD` (Burda et al. 2016).
+    ``residual_share`` is ``mean ||eps||^2 / mean ||z||^2``. Both fall to 0 when the
+    residual collapses and ``z`` carries no donor effect; the ELBO does not show this.
+    Lightning averages them over the minibatches of an epoch.
+    """
+    with torch.no_grad():
+        active = (eps.var(dim=0, unbiased=False) > RESIDUAL_ACTIVE_THRESHOLD).sum().to(eps.dtype)
+        share = eps.pow(2).sum(-1).mean() / z.pow(2).sum(-1).mean().clamp_min(1e-12)
+    return {"residual_active_units": active, "residual_share": share}
+
 
 class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     r"""TotalVI VAE with an MrVI-style u→z hierarchical latent space.
@@ -1080,6 +1099,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             u_pen = self.u_invariance_penalty(tensors, inference_outputs)
             loss = loss + self.u_invariance_weight * u_pen
             loss_out.extra_metrics["u_invariance"] = u_pen.detach()
+
+        # Collapse guard for autotune (ADR-0013): logged as residual_*_<train|validation>.
+        # With several Monte Carlo draws, the first draw stands for the cell.
+        eps, z = inference_outputs["eps"], inference_outputs[MODULE_KEYS.Z_KEY]
+        if eps.ndim == 3:
+            eps, z = eps[0], z[0]
+        loss_out.extra_metrics.update(residual_collapse_metrics(eps, z))
 
         penalty = self.sample_embedding_penalty()
         # With donor weighting, elbo_validation stays cell-weighted (it is the early-stopping

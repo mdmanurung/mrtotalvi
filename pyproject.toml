@@ -30,6 +30,7 @@ dependencies = [
   "xarray",
   "zarr",
 ]
+optional-dependencies.autotune = [ "scvi-tools[autotune]>=1.5.2" ]
 optional-dependencies.lamin = [ "lamindb" ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://mrtotalvi.readthedocs.io/"
