@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Documentation
+
+- User guide: "Reading protein values" (under ambient protein noise). Read denoised protein from `native` of
+  `get_protein_noise_decomposition`, check for dead proteins, check signal size next to rank metrics, and use
+  `log1p` for display. Evidence is one macaque CITE-seq data set (137 ADTs, three seeds); no default changes.
+
 ### Added
 
 - Opt-in ambient- and isotype-aware protein noise models (ADR-0011). Defaults are unchanged.
