@@ -1118,6 +1118,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         loss_out.extra_metrics.update(residual_collapse_metrics(eps, z))
 
         penalty = self.sample_embedding_penalty()
+        droplet = self.ambient_droplet_penalty()
+        if droplet is not None:
+            penalty = droplet if penalty is None else penalty + droplet
         # With donor weighting, elbo_validation stays cell-weighted (it is the early-stopping
         # monitor). Log the loss the module trains on as a second, donor-balanced metric;
         # scvi logs it as donor_balanced_loss_<train|validation>.
@@ -1238,6 +1241,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         n_nuisance: int = 1,
         native_form: str = "scale",
         background_mixing_reg: float = 1e-3,
+        learn_ambient_profile: bool = False,
+        ambient_droplet_counts: np.ndarray | None = None,
     ) -> None:
         """Switch on an opt-in protein noise model (ADR-0011).
 
@@ -1248,7 +1253,14 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         "z_base"`` decodes the background from ``z_base(u)`` so a sample switch does
         not move it. ``protein_encoder_input="ambient_zscore"`` feeds ``qu`` the DSB
         step-I standardized protein counts.
+
+        ``learn_ambient_profile=True`` makes the composition ``a`` a parameter,
+        ``softmax(logits)`` per profile row, started at the given profile, and adds the
+        cell-free droplets' multinomial likelihood of their summed counts as a global
+        term (see :meth:`ambient_droplet_penalty`).
         """
+        if learn_ambient_profile and protein_noise_model == "totalvi":
+            raise ValueError("learn_ambient_profile needs protein_noise_model 'ambient' or 'ambient_isotype'.")
         if protein_noise_model not in {"totalvi", "ambient", "ambient_isotype"}:
             raise ValueError("protein_noise_model must be 'totalvi', 'ambient' or 'ambient_isotype'.")
         if protein_background_source not in {"z", "z_base"}:
@@ -1290,6 +1302,22 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 )
             profile = profile / profile.sum(axis=1, keepdims=True)
             self.register_buffer("ambient_profile", torch.as_tensor(profile))
+            self.learn_ambient_profile = bool(learn_ambient_profile)
+            if self.learn_ambient_profile:
+                if ambient_droplet_counts is None:
+                    raise ValueError(
+                        "learn_ambient_profile needs the profile's droplet_counts (summed cell-free ADT counts)."
+                    )
+                counts = np.atleast_2d(np.asarray(ambient_droplet_counts, dtype=np.float64))
+                if counts.shape != profile.shape or not np.all(np.isfinite(counts)) or counts.min() < 0:
+                    raise ValueError("droplet_counts must be finite, non-negative and match the profile shape.")
+                p_hat = counts / counts.sum(axis=1, keepdims=True)
+                # sum_p N_p log p_hat_p, so the penalty is N * KL(p_hat || a) and 0 at the MLE.
+                entropy_term = np.where(counts > 0, counts * np.log(np.where(p_hat > 0, p_hat, 1.0)), 0.0).sum()
+                # float64: N is ~1e7-1e8 per capture, so the two sums cancel to a few units
+                self.register_buffer("ambient_droplet_counts", torch.as_tensor(counts, dtype=torch.float64))
+                self.register_buffer("ambient_droplet_entropy", torch.tensor(float(entropy_term), dtype=torch.float64))
+                self.ambient_logits = nn.Parameter(torch.log(torch.as_tensor(profile).clamp(min=1e-8)))
             loc, scale = ambient_burden_prior
             if not (np.isfinite(loc) and np.isfinite(scale) and scale > 0):
                 raise ValueError("ambient_burden_prior must be a finite (loc, scale) with scale > 0.")
@@ -1335,6 +1363,27 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if table.shape[0] == 1 or batch_index is None:
             return table[0]
         return table[batch_index.reshape(-1).to(torch.long)]
+
+    def ambient_composition(self) -> torch.Tensor:
+        """Ambient composition table ``(rows, proteins)``: learnt softmax or the fixed profile."""
+        if getattr(self, "learn_ambient_profile", False):
+            return torch.softmax(self.ambient_logits, dim=-1)
+        return self.ambient_profile
+
+    def ambient_droplet_penalty(self) -> torch.Tensor | None:
+        r"""Negative droplet log-likelihood of the learnt composition, or ``None`` if off.
+
+        .. math::
+            \sum_b \sum_p N_{bp} (\log \hat p_{bp} - \log a_{bp}) = \sum_b N_b\, KL(\hat p_b \| a_b)
+
+        ``N`` are the summed cell-free counts per profile row. It is a full-data term,
+        added once to the objective like the sample-embedding prior.
+        """
+        if not getattr(self, "learn_ambient_profile", False):
+            return None
+        log_a = torch.log_softmax(self.ambient_logits.double(), dim=-1)
+        nll = self.ambient_droplet_entropy - (self.ambient_droplet_counts * log_a).sum()
+        return nll.to(self.ambient_logits.dtype)
 
     def _qu_protein_input(self, y: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
         if getattr(self, "protein_encoder_input", "raw") != "ambient_zscore":
@@ -1452,7 +1501,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         else:
             if log_c is None:
                 raise NotImplementedError(f"protein_noise_model={mode!r} needs the ambient burden from inference.")
-            ambient = torch.exp(log_c) * self._context_rows(self.ambient_profile, b_idx)
+            ambient = torch.exp(log_c) * self._context_rows(self.ambient_composition(), b_idx)
             if mode == "ambient":
                 py_["rate_back"] = ambient + py_["rate_back"]
                 py_["rate_fore"] = ambient + (py_["rate_back"] - ambient) * fore_scale
@@ -1483,6 +1532,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         ``foreground_probability``, each ``(cells, proteins)``, averaged over
         ``n_samples`` posterior draws. ``efficiency`` multiplies every component (C7).
         """
+        # generative() and the z_base background head read batch tensors straight from
+        # ``tensors``; only inference() moves its inputs, so move them all here.
+        tensors = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
         inf_in = self._get_inference_input(tensors)
         inf_out = self.inference(**inf_in, n_samples=n_samples)
         gen_in = self._get_generative_input(tensors, inf_out)

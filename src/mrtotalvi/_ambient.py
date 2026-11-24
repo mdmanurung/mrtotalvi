@@ -50,6 +50,10 @@ class AmbientProfile:
         Number of droplets called cell-free in the last iteration.
     settings
         Algorithm settings, for provenance.
+    droplet_counts
+        Summed ADT counts over the cell-free droplets, shape ``(n_features,)``; the
+        sufficient statistic of their multinomial composition. Needed by
+        ``learn_ambient_profile``; ``None`` for profiles built before it existed.
     """
 
     feature_names: list
@@ -60,6 +64,7 @@ class AmbientProfile:
     dsb_log_sd: np.ndarray
     n_cell_free: int
     settings: dict = field(default_factory=dict)
+    droplet_counts: np.ndarray | None = None
 
     @property
     def digest(self) -> str:
@@ -84,6 +89,7 @@ class AmbientProfile:
             dsb_log_sd=self.dsb_log_sd[order],
             n_cell_free=self.n_cell_free,
             settings=dict(self.settings),
+            droplet_counts=None if self.droplet_counts is None else np.asarray(self.droplet_counts)[order],
         )
 
 
@@ -217,4 +223,5 @@ def estimate_adt_ambient(
             "n_selection_features": int(counts.shape[1]),
             "n_candidates": int(candidates.shape[0]),
         },
+        droplet_counts=adt_sum,
     )
