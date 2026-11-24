@@ -333,6 +333,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         n_nuisance: int = 1,
         native_form: Literal["scale", "excess"] = "scale",
         background_mixing_reg: float = 1e-3,
+        learn_ambient_profile: bool = False,
         **model_kwargs,
     ) -> None:
         # MrVI-matching encoder defaults. New models save the resolved True/False, so
@@ -510,6 +511,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_nuisance=n_nuisance,
             native_form=native_form,
             background_mixing_reg=background_mixing_reg,
+            learn_ambient_profile=learn_ambient_profile,
         )
 
         registered_sample_key = self.adata_manager.registry.get("setup_args", {}).get("sample_key")
@@ -1162,6 +1164,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         n_nuisance,
         native_form="scale",
         background_mixing_reg=1e-3,
+        learn_ambient_profile=False,
     ) -> None:
         names = [str(n) for n in self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names]
         needs_profile = (
@@ -1203,6 +1206,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 dsb_log_sd=np.stack([p.dsb_log_sd for p in parts]),
                 n_cell_free=sum(p.n_cell_free for p in parts),
                 settings={"per_batch": batches},
+                droplet_counts=(
+                    None
+                    if any(p.droplet_counts is None for p in parts)
+                    else np.stack([p.droplet_counts for p in parts])
+                ),
             )
             profile = stacked
         else:
@@ -1229,6 +1237,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_nuisance=n_nuisance,
             native_form=native_form,
             background_mixing_reg=background_mixing_reg,
+            learn_ambient_profile=learn_ambient_profile,
+            ambient_droplet_counts=None if profile is None else getattr(profile, "droplet_counts", None),
         )
         self.isotype_names = (
             None if isotype_mask is None else [n for n, m in zip(names, isotype_mask, strict=True) if m]
