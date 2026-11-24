@@ -37,6 +37,8 @@ RESIDUAL_ACTIVE_THRESHOLD = 0.01
 def residual_collapse_metrics(eps: torch.Tensor, z: torch.Tensor) -> dict[str, torch.Tensor]:
     """Minibatch collapse diagnostics of the donor residual ``eps`` (ADR-0013).
 
+    Pass posterior means: the loss passes the mean of ``q(eps)`` when ``use_map=False``.
+
     ``residual_active_units`` counts the ``eps`` dimensions whose variance across the
     cells of the minibatch exceeds :data:`RESIDUAL_ACTIVE_THRESHOLD` (Burda et al. 2016).
     ``residual_share`` is ``mean ||eps||^2 / mean ||z||^2``. Both fall to 0 when the
@@ -1101,8 +1103,16 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             loss_out.extra_metrics["u_invariance"] = u_pen.detach()
 
         # Collapse guard for autotune (ADR-0013): logged as residual_*_<train|validation>.
-        # With several Monte Carlo draws, the first draw stands for the cell.
-        eps, z = inference_outputs["eps"], inference_outputs[MODULE_KEYS.Z_KEY]
+        # Active units are defined on posterior means (Burda et al. 2016). With use_map=False
+        # eps is a draw, so read the mean of q(eps) and the matching z = z_base + mean;
+        # otherwise a collapsed q(eps) = N(0, s) would read as active noise.
+        eps_dist = inference_outputs.get("eps_dist")
+        if eps_dist is not None:
+            eps = eps_dist.loc
+            z = inference_outputs["z_base"] + eps
+        else:
+            eps, z = inference_outputs["eps"], inference_outputs[MODULE_KEYS.Z_KEY]
+        # With several Monte Carlo draws of u, the first draw stands for the cell.
         if eps.ndim == 3:
             eps, z = eps[0], z[0]
         loss_out.extra_metrics.update(residual_collapse_metrics(eps, z))

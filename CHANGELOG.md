@@ -32,6 +32,9 @@
 
 ### Fixed
 
+- The autotune collapse metrics (`residual_active_units`, `residual_share`) read the mean of the residual
+  posterior when `use_map=False`, not a draw from it, so a collapsed residual no longer reads as active noise.
+  Fits with the default `use_map=True` are unaffected, including the ADR-0013 evidence (Codex review, PR #8).
 - Review fixes (docs/reviews/2026-11-23). Two change fitted results, by user decision
   (2026-11-23). The u-invariance penalty now decodes deterministically from the qz mean, so it
   is exactly 0 for identical donors; this changes fits with `use_map=False`. With

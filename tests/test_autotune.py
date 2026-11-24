@@ -41,6 +41,21 @@ def test_collapsed_residual_reads_zero():
     assert got["residual_share"].item() == 0
 
 
+def test_collapse_metrics_use_the_residual_posterior_mean(adata):
+    # With use_map=False, eps is a draw from q(eps); the diagnostics must read q(eps)'s mean
+    # (Burda et al. define active units on posterior means), so a collapsed q(eps) = N(0, s)
+    # reads as inactive instead of as noise. Codex review, PR #8.
+    model = MrTotalVI(adata, sample_key="donor", n_latent=4, use_map=False)
+    tensors = next(iter(model._make_data_loader(adata=adata, batch_size=64)))
+    inference, _, loss = model.module(tensors)
+    mean = inference["eps_dist"].loc
+    expected = residual_collapse_metrics(mean, inference["z_base"] + mean)
+    for key, value in expected.items():
+        assert loss.extra_metrics[key].item() == pytest.approx(value.item(), rel=1e-6)
+    drawn = residual_collapse_metrics(inference["eps"], inference["z"])
+    assert drawn["residual_share"].item() != pytest.approx(expected["residual_share"].item(), rel=1e-3)
+
+
 def test_training_logs_the_collapse_metrics(adata):
     model = MrTotalVI(adata, sample_key="donor", n_latent=4)
     model.train(max_epochs=2, check_val_every_n_epoch=1, batch_size=64)
