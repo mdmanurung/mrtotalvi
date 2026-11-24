@@ -46,6 +46,25 @@ u = model.get_latent_representation(give_z=False)  # cell state; donor informati
 z = model.get_latent_representation(give_z=True)  # cell state with the sample residual
 ```
 
+With empty droplets, fit the ambient protein noise model with one pooled profile. Use `protein_noise_model="ambient_isotype"` when the panel has isotype controls, and `"ambient"` when it does not:
+
+```python
+from mrtotalvi.preprocessing import estimate_adt_ambient
+
+profile = estimate_adt_ambient(raw_counts, raw_barcodes, cell_barcodes, feature_names, adt_features=protein_names)
+model = MrTotalVI(
+    adata,
+    sample_key="donor_timepoint",
+    protein_noise_model="ambient_isotype",
+    ambient_profile=profile,
+    isotype_names=isotype_names,
+)
+model.train()
+native = model.get_protein_noise_decomposition()["native"]  # denoised protein counts
+```
+
+The user guide section "Ambient protein noise: recommended setup with empty droplets" gives the evidence, the dead-protein check and the options to leave off.
+
 The [user guide][] covers priors, counterfactual samples and the statistical APIs.
 The [API reference][] lists every method.
 Users of the `mdmanurung/scvi-tools` fork should read the [migration notes][].

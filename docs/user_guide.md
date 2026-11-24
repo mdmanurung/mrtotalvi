@@ -296,11 +296,64 @@ Write `r` for the vector of within-donor log density ratios at one query cell.
 The grouped log enrichment equals `logsumexp(r / 2) - logsumexp(-r / 2)`.
 Its sign can differ from `mean(r)`. Both summaries describe fitted local densities.
 
+## Ambient protein noise: recommended setup with empty droplets
+
+When the unfiltered droplet matrix is available, fit the ambient protein noise model with one pooled profile. Use `"ambient_isotype"` when the panel has isotype controls and `"ambient"` when it does not, and keep every other argument at its default.
+
+```python
+import numpy as np
+
+from mrtotalvi import MrTotalVI
+from mrtotalvi.preprocessing import estimate_adt_ambient
+
+# One pooled ambient profile. raw_counts holds every unfiltered droplet with all features
+# (RNA and ADT): droplets are selected on the whole matrix, as scAR does.
+profile = estimate_adt_ambient(
+    raw_counts,  # droplets x features
+    raw_barcodes,  # barcodes of the rows
+    cell_barcodes,  # every barcode called as a cell; never used as an empty droplet
+    feature_names,  # names of the columns
+    adt_features=protein_names,  # the ADT columns; the names on adata.obsm["protein"]
+)
+
+MrTotalVI.setup_anndata(
+    adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch"
+)
+model = MrTotalVI(
+    adata,
+    sample_key="donor",
+    protein_noise_model="ambient_isotype",  # "ambient" without isotype controls
+    ambient_profile=profile,
+    isotype_names=isotype_names,  # every isotype control on the panel
+)
+model.train()
+
+comp = model.get_protein_noise_decomposition(n_samples=25)
+dead = comp["native"].max() < 1e-3  # proteins the fit switched off; leave them out
+native = np.log1p(comp["native"])  # denoised protein, see "Reading protein values"
+```
+
+The evidence for each choice:
+
+- **The ambient model.** On the ADR-0012 simulation, native log1p RMSE fell from 0.77 with stock totalVI to 0.29 with `"ambient"` and a pooled profile. A shuffled or uniform profile still reached 0.38 to 0.39, so most of the gain comes from modelling ambient at all.
+- **Isotype controls.** On one macaque PBMC CITE-seq data set (137 ADTs, three training seeds), `"ambient_isotype"` switched off no protein, against 7 to 14 per seed for `"ambient"`. It recovered the published rhesus staining pattern of 18 of 30 antibodies at AUROC >= 0.8, against 7 to 9 for the totalVI protein output.
+- **One pooled profile.** Per-well profiles added nothing on the ADR-0012 stress seeds, and per-capture profiles changed no marker in the macaque data.
+
+Leave these off. `seed_background_prior_from_ambient` and `protein_encoder_input="ambient_zscore"` made results worse on the ADR-0011 simulations. `learn_ambient_profile` gave no clear gain (see below). `native_form="excess"` did no better than the default in the macaque data.
+
+One choice is untested on real data. The ADR-0011 simulations used `anneal_protein_likelihood=False`, while the macaque fits kept the default `True`; the two were not compared on real data, so the default stays.
+
+These are results from simulations and one real data set, not validated defaults: `protein_noise_model` still defaults to `"totalvi"`.
+
 ## Ambient protein noise: isotype outputs
 
 With `protein_noise_model="ambient_isotype"`, the loss is the same for any mixing logit of an isotype control. Its foreground probability is not identified. `get_protein_foreground_probability` and the protein part of `get_normalized_expression` return `NaN` for isotype columns. `get_protein_noise_decomposition` drops them. Other modes are unchanged.
 
 In `get_protein_noise_decomposition`, `observed` is the fitted expected total count (the mixture mean), not the measured count. `foreground_probability` is the decoder mixture weight `1 - pi`, not the probability of foreground given the observed counts.
+
+### Learnable ambient profile (experimental)
+
+`learn_ambient_profile=True` learns the ambient composition instead of fixing it at `ambient_profile`. It starts at the profile and keeps the cell-free droplets in the loss through the multinomial likelihood of their summed counts, so the profile needs `droplet_counts` (profiles from `estimate_adt_ambient` carry them). With many droplets this term holds the composition close to the droplet estimate. On the ADR-0012 simulation it gave no clear gain (native log1p RMSE 0.267 learned vs 0.282 fixed with per-batch profiles, 0.342 vs 0.341 pooled; 5 seeds), so the default stays off.
 
 ### Reading protein values
 
