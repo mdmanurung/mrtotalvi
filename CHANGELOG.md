@@ -4,12 +4,23 @@
 
 ### Documentation
 
+- API reference: the `MrTotalVI` docstring documents the ambient protein parameters (`protein_noise_model`,
+  `ambient_profile`, `isotype_names`, `learn_ambient_profile` and the rest), and a Preprocessing section lists
+  `AmbientProfile` and `estimate_adt_ambient`. User guide: "Learnable ambient profile (experimental)". Installation: an optional-extras table (`autotune`,
+  `lamin`) and a Ray CPU-cap note.
+- User guide and README: recommended setup with empty droplets (`protein_noise_model="ambient_isotype"`, or
+  `"ambient"` without isotype controls, one pooled profile, other arguments at their defaults), with the
+  simulation and macaque evidence and the options that did not help. No default changes.
 - User guide: "Reading protein values" (under ambient protein noise). Read denoised protein from `native` of
   `get_protein_noise_decomposition`, check for dead proteins, check signal size next to rank metrics, and use
   `log1p` for display. Evidence is one macaque CITE-seq data set (137 ADTs, three seeds); no default changes.
 
 ### Added
 
+- Opt-in `learn_ambient_profile` (EXPERIMENTAL): the ambient composition becomes `softmax(logits)`, started at
+  the profile, with the cell-free droplets' multinomial likelihood as a global penalty. `AmbientProfile` keeps
+  `droplet_counts`. On the ADR-0012 simulation it gave no clear gain (native log1p RMSE 0.267 vs 0.282 per-batch,
+  0.342 vs 0.341 pooled; 5 seeds). Default off.
 - `mrtotalvi.run_autotune` wraps `scvi.autotune.run_autotune` for MrTotalVI (ADR-0013). It fills
   `sample_key` from the setup registry and reports two residual-collapse metrics to Ray next to an
   ELBO-type target. Training now logs `residual_active_units_<stage>` and `residual_share_<stage>`.
@@ -32,6 +43,8 @@
 
 ### Fixed
 
+- `get_protein_noise_decomposition` on a GPU with `protein_background_source="z_base"` failed with "Expected all
+  tensors to be on the same device"; `protein_components` now moves every batch tensor to the module device.
 - The autotune collapse metrics (`residual_active_units`, `residual_share`) read the mean of the residual
   posterior when `use_map=False`, not a draw from it, so a collapsed residual no longer reads as active noise.
   Fits with the default `use_map=True` are unaffected, including the ADR-0013 evidence (Codex review, PR #8).

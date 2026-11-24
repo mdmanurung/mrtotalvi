@@ -36,7 +36,7 @@ def feature_digest(names) -> str:
 class AmbientProfile:
     """Pooled ambient ADT calibration with provenance.
 
-    Attributes
+    Parameters
     ----------
     feature_names
         Ordered protein names the statistics refer to.

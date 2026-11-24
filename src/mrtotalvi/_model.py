@@ -259,6 +259,50 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     batch_embedding_kwargs
         Keyword arguments passed to :class:`~scvi.nn.Embedding` when
         ``batch_representation="embedding"``, e.g. ``{"embedding_dim": 5}``.
+    protein_noise_model
+        Protein likelihood (ADR-0011). ``"totalvi"`` (default) keeps the stock totalVI
+        mixture. ``"ambient"`` adds a free-ambient term ``A = c * a`` (``a`` the ambient
+        composition, ``c`` a per-cell burden) to both mixture means. ``"ambient_isotype"``
+        replaces the decoded background with ``A`` plus a nonspecific term driven by the
+        isotype controls, fits the isotype controls with background only, and drops the
+        totalVI background prior. Both opt-in modes need ``ambient_profile``;
+        ``"ambient_isotype"`` also needs ``isotype_names``.
+    protein_background_source
+        ``"z"`` (default) decodes the protein background from ``z``. ``"z_base"`` decodes
+        it from ``z_base(u)``, so a sample counterfactual does not move it.
+    protein_encoder_input
+        ``"raw"`` (default) or ``"ambient_zscore"``, which feeds the ``u`` encoder the
+        DSB step-I standardized protein counts (needs ``ambient_profile``). It made
+        results worse on the ADR-0011 simulations.
+    ambient_profile
+        An :class:`~mrtotalvi.preprocessing.AmbientProfile` from
+        :func:`~mrtotalvi.preprocessing.estimate_adt_ambient`, or a dict of one profile per
+        registered batch. Required by every opt-in protein setting.
+    isotype_names
+        Names of the isotype-control features on the protein axis. Required by
+        ``protein_noise_model="ambient_isotype"``; their outputs are ``NaN`` or dropped
+        (see the user guide).
+    seed_background_prior_from_ambient
+        Seed the learnable totalVI background prior per protein from the empty-droplet
+        ``log1p`` mean and SD; training may still move it. Needs one pooled profile. It
+        made results worse on the ADR-0011 simulations.
+    ambient_burden_prior
+        ``(loc, scale)`` of the normal prior on the log free-ambient burden ``log c``.
+    n_nuisance
+        Dimension of the per-cell nonspecific-binding latent in
+        ``protein_noise_model="ambient_isotype"``.
+    native_form
+        Native signal in ``"ambient_isotype"``: ``"scale"`` (default) ``S = exp(alpha) f``,
+        or ``"excess"`` ``S = exp(alpha) (f - 1)``.
+    background_mixing_reg
+        Weight of totalVI's background-mixing pull in the opt-in modes.
+    learn_ambient_profile
+        ``EXPERIMENTAL``. Learn the ambient composition as ``softmax(logits)``, started
+        at ``ambient_profile``, with the cell-free droplets' multinomial likelihood of
+        their summed counts as a global penalty. Needs an opt-in protein noise model and
+        a profile with ``droplet_counts``. On the ADR-0012 simulation it gave no clear
+        gain (native log1p RMSE 0.267 vs 0.282 with per-batch profiles, 0.342 vs 0.341
+        pooled; 5 seeds).
     **model_kwargs
         Additional keyword arguments forwarded to :class:`~._module.MrTotalVAE`
         (and transitively to :class:`~scvi.module._totalvae.TOTALVAE`).
