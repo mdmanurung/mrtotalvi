@@ -94,7 +94,7 @@ def _validate_quantiles(quantiles) -> np.ndarray:
 
 
 def _validate_inference(inference_mode: str, n_draws: int, quantiles) -> np.ndarray:
-    if isinstance(n_draws, bool) or not isinstance(n_draws, int) or n_draws < 1:
+    if isinstance(n_draws, bool) or not isinstance(n_draws, (int, np.integer)) or n_draws < 1:
         raise ValueError("n_draws must be a positive integer.")
     if inference_mode == "latent_mean":
         if n_draws != 1:
@@ -108,7 +108,7 @@ def _validate_inference(inference_mode: str, n_draws: int, quantiles) -> np.ndar
 
 
 def _validate_chunk_size(value, *, name: str) -> None:
-    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1):
         raise ValueError(f"{name} must be a positive integer or None.")
 
 
@@ -119,6 +119,8 @@ def _validate_targets(model, target_samples) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError("Registered sample labels are not unique after string conversion.")
     if target_samples is None:
         return np.arange(registered.size, dtype=np.int64), registered_strings
+    if isinstance(target_samples, str):
+        raise TypeError(f"target_samples must be a list of sample names, not a string; pass [{target_samples!r}].")
     requested = np.asarray([str(value) for value in target_samples])
     if requested.size == 0:
         raise ValueError("target_samples must contain at least one target.")
@@ -137,6 +139,8 @@ def _validate_features(registered, requested, *, feature_type: str):
         raise ValueError(f"Registered {feature_type} names are not unique.")
     if requested is None:
         return np.arange(registered.size, dtype=np.int64), registered
+    if isinstance(requested, str):
+        raise TypeError(f"{feature_type}_list must be a list of names, not a string; pass [{requested!r}].")
     requested = np.asarray([str(value) for value in requested])
     if requested.size == 0:
         raise ValueError(f"{feature_type}_list must contain at least one feature.")
@@ -341,6 +345,14 @@ def _validate_context_request(
     ):
         if value not in allowed:
             raise ValueError(f"{name} must be one of {sorted(allowed)}.")
+
+    for policy_name, policy, value_name, value in (
+        ("batch_policy", batch_policy, "specified_batch", specified_batch),
+        ("panel_policy", panel_policy, "specified_panel", specified_panel),
+        ("library_policy", library_policy, "specified_library_size", specified_library_size),
+    ):
+        if value is not None and policy != "specified":
+            raise ValueError(f"{value_name} is only used with {policy_name}='specified'; got {policy_name}={policy!r}.")
 
     batch_marginal = batch_policy == "sample_balanced_marginal"
     panel_marginal = panel_policy == "sample_balanced_marginal"
@@ -1053,10 +1065,11 @@ def get_counterfactual_latent(
         reference_indices,
         name="reference_indices",
     )
-    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer.")
     _validate_chunk_size(target_chunk_size, name="target_chunk_size")
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    n_draws, batch_size = int(n_draws), int(batch_size)  # accept numpy integers
     _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
 
@@ -1330,12 +1343,13 @@ def get_counterfactual_expression(
             marginal_reference_indices,
             name="marginal_reference_indices",
         )
-    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer.")
     _validate_chunk_size(target_chunk_size, name="target_chunk_size")
     _validate_chunk_size(feature_chunk_size, name="feature_chunk_size")
 
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    n_draws, batch_size = int(n_draws), int(batch_size)  # accept numpy integers
     _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
     gene_indices, gene_labels = _validate_features(
@@ -1768,6 +1782,11 @@ def get_counterfactual_expression(
     return dataset
 
 
+# The reference subsample is part of the deterministic estimand, so its hash is keyed on this
+# constant and not on the user's ``random_state`` (which only seeds posterior draws).
+_REFERENCE_SUBSAMPLE_KEY = 0
+
+
 def _hash_subsample_positions(
     names: np.ndarray,
     *,
@@ -1862,20 +1881,25 @@ def local_sample_enrichment(
         reference_indices,
         name="reference_indices",
     )
-    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer.")
     if reference_chunk_size is None:
         reference_chunk_size = batch_size
-    if isinstance(reference_chunk_size, bool) or not isinstance(reference_chunk_size, int) or reference_chunk_size < 1:
+    if (
+        isinstance(reference_chunk_size, bool)
+        or not isinstance(reference_chunk_size, (int, np.integer))
+        or reference_chunk_size < 1
+    ):
         raise ValueError("reference_chunk_size must be a positive integer or None.")
     if max_reference_cells_per_sample is not None and (
         isinstance(max_reference_cells_per_sample, bool)
-        or not isinstance(max_reference_cells_per_sample, int)
+        or not isinstance(max_reference_cells_per_sample, (int, np.integer))
         or max_reference_cells_per_sample < 1
     ):
         raise ValueError("max_reference_cells_per_sample must be a positive integer or None.")
 
     quantile_values = _validate_inference(inference_mode, n_draws, quantiles)
+    n_draws, batch_size = int(n_draws), int(batch_size)  # accept numpy integers
     _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
     cell_names = np.asarray(adata.obs_names[query_indices], dtype=str)
@@ -1923,7 +1947,7 @@ def local_sample_enrichment(
             reference_names[positions],
             sample_label=str(target_label),
             limit=max_reference_cells_per_sample,
-            random_state=int(random_state),
+            random_state=_REFERENCE_SUBSAMPLE_KEY,
         )
         positions = positions[keep]
         selected_reference[int(target_index)] = (

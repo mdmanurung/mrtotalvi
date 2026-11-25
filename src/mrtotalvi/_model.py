@@ -1237,6 +1237,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             by_name = {batch_name(k): v for k, v in ambient_profile.items()}
             if len(by_name) != len(ambient_profile):
                 raise ValueError("ambient_profile has keys that collide as strings (for example 1 and '1').")
+            not_profiles = sorted(k for k, v in by_name.items() if not isinstance(v, AmbientProfile))
+            if not_profiles:
+                raise TypeError(f"ambient_profile values must be AmbientProfile objects; check batches {not_profiles}.")
+            unknown = sorted(set(by_name) - set(batches))
+            if unknown:
+                raise ValueError(f"ambient_profile has keys that match no registered batch: {unknown}.")
             missing = sorted(set(batches) - set(by_name))
             if missing:
                 raise ValueError(f"No ambient profile for batches {missing}.")
@@ -1265,6 +1271,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                     raise ValueError(f"ambient_profile.{stat} must be finite.")
         isotype_mask = None
         if isotype_names is not None:
+            if isinstance(isotype_names, str):
+                raise TypeError(
+                    f"isotype_names must be a list of protein names, not a string; pass [{isotype_names!r}]."
+                )
             unknown = sorted(set(map(str, isotype_names)) - set(names))
             if unknown:
                 raise ValueError(f"Isotype names not on the protein axis: {unknown}.")
@@ -1318,6 +1328,34 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             values[:, is_iso] = np.nan
         return values
 
+    def _protein_available(self, adata, indices) -> np.ndarray | None:
+        """Measured proteins per requested cell, ``(cells, proteins)`` bool in request order.
+
+        ``None`` when every protein is measured in every batch or panel. The mask table
+        is keyed by the codes of the panel field (``module.panel_key``), which is the
+        batch field when no ``panel_key`` was registered.
+        """
+        table = self.module.protein_batch_mask
+        if table is None:
+            return None
+        manager = self.get_anndata_manager(adata)
+        codes = np.asarray(manager.get_from_registry(self.module.panel_key)).reshape(-1).astype(int)
+        return np.stack([table[str(code)] for code in codes[_as_indices(adata, indices)]]).astype(bool)
+
+    def _unavailable_nan(self, values, adata, indices, protein_list=None):
+        """Set proteins not measured in a cell's panel to NaN (``values`` in request order)."""
+        available = self._protein_available(adata, indices)
+        if available is None or values is None:
+            return values
+        if protein_list is not None:
+            names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+            available = available[:, np.isin(names, list(protein_list))]
+        if hasattr(values, "iloc"):
+            return values.astype(float).where(available)
+        values = np.asarray(values, dtype=float)
+        # Sample stacks are (cells, proteins, samples); the protein axis is 1.
+        return np.where(available[..., None] if values.ndim == 3 else available, values, np.nan)
+
     @torch.inference_mode()
     def get_protein_noise_decomposition(
         self,
@@ -1340,6 +1378,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self._check_if_trained(warn=False)
         if isinstance(n_samples, bool) or not isinstance(n_samples, (int, np.integer)) or n_samples < 1:
             raise ValueError(f"n_samples must be an integer >= 1; got {n_samples!r}.")
+        return self._protein_decomposition(adata, indices, n_samples, batch_size)
+
+    @torch.inference_mode()
+    def _protein_decomposition(
+        self, adata, indices, n_samples, batch_size, drop_isotypes=True
+    ) -> dict[str, pd.DataFrame]:
+        """Body of :meth:`get_protein_noise_decomposition`, without the trained-model check."""
         adata = self._validate_anndata(adata)
         indices = _as_indices(adata, indices)
         # Backed AnnData loads each cell once in ascending order; ``inverse`` maps the
@@ -1347,27 +1392,18 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         loader_indices, inverse = _loader_order(adata, indices)
         names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
         keep = np.ones(names.size, dtype=bool)
-        if getattr(self, "isotype_names", None):
+        if drop_isotypes and getattr(self, "isotype_names", None):
             # self.isotype_names holds str names; registry names keep their dtype.
             keep = ~np.isin(names.astype(str), self.isotype_names)
         loader = self._make_data_loader(adata=adata, indices=loader_indices, batch_size=batch_size)
         chunks: dict[str, list] = {}
-        masks = []
-        mask_table = self.module.protein_batch_mask
         with _eval_mode(self.module):
             for tensors in loader:
                 out = self.module.protein_components(tensors, n_samples=n_samples)
                 for key, value in out.items():
                     chunks.setdefault(key, []).append(value.cpu().numpy())
-                if mask_table is not None:
-                    panel = tensors[self.module.panel_key].reshape(-1).cpu().numpy().astype(int)
-                    masks.append(np.stack([mask_table[str(p)] for p in panel]).astype(bool))
-        if indices.dtype == np.bool_:
-            indices = np.flatnonzero(indices)
         index = adata.obs_names[indices]
-        available = np.concatenate(masks) if masks else None
-        if available is not None and inverse is not None:
-            available = available[inverse]
+        available = self._protein_available(adata, indices)
         result = {}
         for key, parts in chunks.items():
             values = np.concatenate(parts)
@@ -1689,6 +1725,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         density. A ``NaN`` sample carries no weight in ``group_log_density``
         or in the donor mean and median; only a group or cell with no usable
         sample is ``NaN``.
+
+        With ``max_reference_cells_per_sample`` the retained reference cells are fixed by
+        a hash of the cell names; they do not follow ``random_state``.
         """
         return _local_sample_enrichment(
             self,
@@ -1879,7 +1918,17 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``library_size=1``, where that loop is exact, and scales the RNA output once.
         Protein output and ``library_size`` of ``1`` or ``"latent"`` are unchanged, except
         that with ``protein_noise_model="ambient_isotype"`` isotype control columns of the
-        protein output are ``NaN`` (their foreground probability is not identified).
+        protein output are ``NaN`` (their foreground probability is not identified), and
+        that proteins not measured in a cell's batch or panel are ``NaN`` (as in
+        :meth:`get_protein_noise_decomposition`).
+
+        With ``protein_noise_model`` ``"ambient"`` or ``"ambient_isotype"`` the protein
+        output is the ``native`` component of :meth:`get_protein_noise_decomposition` (raw
+        count scale, mean over ``n_samples`` draws) unless ``include_protein_background=True``,
+        which returns the full fitted mean as before. The native path does not support
+        ``transform_batch``, ``scale_protein``, ``sample_protein_mixing`` or
+        ``return_mean=False`` and raises ``NotImplementedError`` for them; pass
+        ``include_protein_background=True`` to use them. ``"totalvi"`` mode is unchanged.
         For backed AnnData, rows come back in the requested order (upstream returns them
         sorted but labels them in request order). See
         :meth:`scvi.model.TOTALVI.get_normalized_expression`.
@@ -1888,6 +1937,29 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         if n_samples_overall is not None:
             # Same draw as upstream (with replacement); done here so backed data loads the drawn rows.
             indices = np.random.choice(_as_indices(resolved, indices), n_samples_overall)
+        native = self.module.protein_noise_model != "totalvi" and not kwargs.get("include_protein_background", False)
+        native_protein = None
+        if native:
+            unsupported = [
+                name
+                for name, used in (
+                    ("transform_batch", transform_batch is not None),
+                    ("scale_protein", bool(kwargs.get("scale_protein", False))),
+                    ("sample_protein_mixing", bool(kwargs.get("sample_protein_mixing", False))),
+                    ("return_mean=False", kwargs.get("return_mean", True) is False),
+                )
+                if used
+            ]
+            if unsupported:
+                raise NotImplementedError(
+                    f"With protein_noise_model={self.module.protein_noise_model!r} the protein output is the "
+                    f"native component, which does not support {unsupported}. Pass "
+                    "include_protein_background=True for the full fitted mean."
+                )
+            # Drawn first, so the draws match a get_protein_noise_decomposition call under the same seed.
+            native_protein = self._native_protein(
+                resolved, indices, protein_list, kwargs.get("n_samples", 1), kwargs.get("batch_size") or 256
+            )
         loader_indices, inverse = _loader_order(resolved, indices)
         request = dict(
             adata=adata,
@@ -1903,7 +1975,6 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # protein subset is requested as arrays and labelled here.
             frame_subset = (
                 protein_list is not None
-                and n_samples_overall is None
                 and not kwargs.get("return_numpy")
                 and not (kwargs.get("n_samples", 1) > 1 and kwargs.get("return_mean", True) is False)
             )
@@ -1930,11 +2001,23 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 and library_size != 1
             ):
                 rna = rna * library_size
+        if inverse is not None:
+            names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
+            rna = _restore_request_order(rna, inverse, names)
+            protein = _restore_request_order(protein, inverse, names)
+        if native_protein is not None:
+            protein = native_protein.to_numpy() if kwargs.get("return_numpy") else native_protein
         protein = self._isotype_nan(protein, protein_list)
-        if inverse is None:
-            return rna, protein
-        names = np.asarray(resolved.obs_names)[_as_indices(resolved, indices)]
-        return _restore_request_order(rna, inverse, names), _restore_request_order(protein, inverse, names)
+        return rna, self._unavailable_nan(protein, resolved, indices, protein_list)
+
+    def _native_protein(self, adata, indices, protein_list, n_samples, batch_size):
+        """Native protein component as a frame with the registry columns, request order."""
+        # Isotype columns stay; `_isotype_nan` blanks them in "ambient_isotype" mode only.
+        native = self._protein_decomposition(adata, indices, n_samples, batch_size, drop_isotypes=False)["native"]
+        names = np.asarray(self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
+        if protein_list is not None:
+            names = names[np.isin(names, list(protein_list))]
+        return native.reindex(columns=names)
 
     def _in_request_order(self, method, adata, indices, **kwargs):
         """Run an inherited ``method`` loading each backed cell once, then restore request order."""
@@ -1952,12 +2035,27 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Rows come back in the requested order on backed AnnData. With
         ``protein_noise_model="ambient_isotype"`` the loss is the same for any mixing logit of
         an isotype control, so its foreground probability is not identified. Those columns are
-        ``NaN``, as in :meth:`get_protein_noise_decomposition`. Other modes are unchanged. Pass
+        ``NaN``, as in :meth:`get_protein_noise_decomposition`. Proteins not measured in a
+        cell's batch or panel are ``NaN`` in every mode. Pass
         arguments after ``indices`` by keyword. See
         :meth:`scvi.model.TOTALVI.get_protein_foreground_probability`.
         """
-        out = self._in_request_order(super().get_protein_foreground_probability, adata, indices, **kwargs)
-        return self._isotype_nan(out, kwargs.get("protein_list"))
+        resolved = self.adata if adata is None else adata
+        protein_list = kwargs.get("protein_list")
+        wants_frame = not kwargs.get("return_numpy")
+        # Upstream indexes a tuple with a list when it builds a DataFrame for a protein subset,
+        # so ask for arrays and label them here.
+        out = self._in_request_order(
+            super().get_protein_foreground_probability, adata, indices, **{**kwargs, "return_numpy": True}
+        )
+        if wants_frame and out.ndim == 2:
+            names = np.asarray(self.protein_state_registry.column_names)
+            if protein_list is not None:
+                names = names[np.isin(names, list(protein_list))]
+            rows = resolved.obs_names[_as_indices(resolved, indices)]
+            out = pd.DataFrame(out, index=rows, columns=names)
+        out = self._isotype_nan(out, protein_list)
+        return self._unavailable_nan(out, resolved, indices, protein_list)
 
     def get_latent_library_size(self, adata=None, indices=None, **kwargs):
         """TOTALVI ``get_latent_library_size`` with rows in the requested order on backed data."""

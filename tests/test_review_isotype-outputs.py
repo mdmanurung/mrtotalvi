@@ -67,7 +67,8 @@ def test_isotype_nan_on_sample_stacks(sim):
     names = list(model.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names)
     is_iso = np.isin(names, ISOTYPES)
     fg = model.get_protein_foreground_probability(n_samples=2, return_mean=False)
-    _, protein = model.get_normalized_expression(n_samples=2, return_mean=False)
+    # The native path (default in ambient modes) has no sample stacks; the full fitted mean has.
+    _, protein = model.get_normalized_expression(n_samples=2, return_mean=False, include_protein_background=True)
     for values in (fg, protein):
         assert values.ndim == 3 and values.shape[1] == len(names)
         assert np.isnan(values[:, is_iso]).all()
