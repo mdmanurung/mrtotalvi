@@ -41,12 +41,12 @@ def test_profile_recovers_planted_composition(sim):
 
 
 def test_adt_only_selection_fails_closed(sim):
-    _, _, empties, _ = sim
+    adata, _, empties, _ = sim
     raw = empties["raw_counts"].tocsc()
     adt_cols = [empties["feature_names"].index(n) for n in empties["adt_features"]]
     # scAR's cutoff scales with feature count, so a 22-feature matrix selects nothing.
     with pytest.raises(ValueError, match="whole transcriptome"):
-        estimate_adt_ambient(raw[:, adt_cols], empties["raw_barcodes"], [], empties["adt_features"])
+        estimate_adt_ambient(raw[:, adt_cols], empties["raw_barcodes"], adata.obs_names, empties["adt_features"])
 
 
 def test_profile_rejects_mismatched_feature_names(sim):
@@ -154,7 +154,7 @@ def test_per_batch_profiles_stack_in_registry_order():
         b: estimate_adt_ambient(
             empties["raw_counts"][by == b],
             np.asarray(empties["raw_barcodes"])[by == b],
-            adata.obs_names,
+            adata.obs_names[(adata.obs["batch"] == b).to_numpy()],  # only the cells of this droplet set
             empties["feature_names"],
             adt_features=empties["adt_features"],
         )
@@ -201,7 +201,7 @@ def test_per_batch_profiles_accept_numeric_batch_keys():
         int(b[-1]): estimate_adt_ambient(
             empties["raw_counts"][by == b],
             np.asarray(empties["raw_barcodes"])[by == b],
-            adata.obs_names,
+            adata.obs_names[(adata.obs["batch"] == b).to_numpy()],  # only the cells of this droplet set
             empties["feature_names"],
             adt_features=empties["adt_features"],
         )

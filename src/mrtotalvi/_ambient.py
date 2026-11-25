@@ -141,6 +141,8 @@ def estimate_adt_ambient(
     if len(set(feature_names)) != len(feature_names):
         raise ValueError("feature_names must be unique.")
     adt_features = feature_names if adt_features is None else [str(n) for n in adt_features]
+    if len(set(adt_features)) != len(adt_features):
+        raise ValueError("adt_features must be unique.")
     missing = sorted(set(adt_features) - set(feature_names))
     if missing:
         raise ValueError(f"adt_features not in feature_names: {missing}.")
@@ -155,7 +157,16 @@ def estimate_adt_ambient(
     if int(iterations) != iterations or iterations < 1:
         raise ValueError("iterations must be a positive integer.")
 
-    is_cell = np.isin(raw_barcodes, np.asarray(cell_barcodes).astype(str))
+    cell_barcodes = np.asarray(cell_barcodes).astype(str)
+    if cell_barcodes.size == 0:
+        raise ValueError("cell_barcodes is empty; pass the barcodes called as cells.")
+    is_cell = np.isin(raw_barcodes, cell_barcodes)
+    n_absent = len(set(cell_barcodes) - set(raw_barcodes))
+    if n_absent:
+        raise ValueError(
+            f"{n_absent} of {len(set(cell_barcodes))} cell_barcodes are not in raw_barcodes; "
+            "pass only the cells that are rows of raw_counts."
+        )
     totals_all = np.asarray(counts.sum(axis=1)).ravel()
     keep = totals_all >= min_raw_counts
     candidates = counts[keep & ~is_cell]

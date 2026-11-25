@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numbers
 import warnings
 from typing import TYPE_CHECKING
 
@@ -52,18 +53,35 @@ _SETTING_FOR_OUTPUT = {
 }
 
 
+# Raw latent-density variables: each seed's latent space has its own scale and orientation.
+_DENSITY_VARIABLES = ("log_density", "group_log_density")
+
+
 def combine_mrtotalvi_seed_results(
     results: Mapping[int, xr.Dataset],
 ) -> xr.Dataset:
-    """Combine seed-specific datasets without pooling uncertainty sources."""
+    """Combine seed-specific datasets without pooling uncertainty sources.
+
+    For each float variable with a ``draw`` dimension the result holds the within-seed
+    posterior mean and SD, and the between-seed mean and SD of the within-seed means
+    (``ddof=1``). ``<name>_between_seed_sd`` includes posterior-draw noise: with ``D`` draws
+    per seed, each within-seed mean carries a variance of about ``var_within / D`` that
+    is not training variation. ``<name>_between_seed_sd_draw_corrected`` removes it:
+    ``sqrt(max(var_between - mean_over_seeds(var_within) / D, 0))``.
+
+    Raw latent densities (``log_density``, ``group_log_density``) have no between-seed
+    summary: every seed has its own latent scale. Ratios and feature-space variables do.
+    A seed with NaN in some but not all draws of an entry raises ``ValueError``.
+    Keys of ``results`` may be Python or numpy integers.
+    """
     if not results:
         raise ValueError("results must be a non-empty mapping.")
-    if any(isinstance(seed, bool) or not isinstance(seed, int) for seed in results):
+    if any(isinstance(seed, bool) or not isinstance(seed, numbers.Integral) for seed in results):
         raise TypeError("Every results key must be an integer training seed.")
     if any(not isinstance(dataset, xr.Dataset) for dataset in results.values()):
         raise TypeError("Every results value must be an xarray.Dataset.")
 
-    seeds = sorted(results)
+    seeds = sorted(int(seed) for seed in results)
     datasets = [results[seed] for seed in seeds]
     template = datasets[0]
     if "draw" not in template.dims:
@@ -155,6 +173,7 @@ def combine_mrtotalvi_seed_results(
     )
     additions = {}
     skipped_latent: list[str] = []
+    skipped_density: list[str] = []
     partial_variables: list[str] = []
     for variable_name, variable in combined.data_vars.items():
         if "draw" not in variable.dims or not np.issubdtype(
@@ -166,14 +185,25 @@ def combine_mrtotalvi_seed_results(
         within_sd_name = f"{variable_name}_within_seed_posterior_sd"
         between_mean_name = f"{variable_name}_between_seed_mean"
         between_sd_name = f"{variable_name}_between_seed_sd"
+        corrected_sd_name = f"{variable_name}_between_seed_sd_draw_corrected"
         conflicts = {
             within_mean_name,
             within_sd_name,
             between_mean_name,
             between_sd_name,
+            corrected_sd_name,
         } & set(combined.data_vars)
         if conflicts:
             raise ValueError(f"Seed summary variable name conflict(s): {sorted(conflicts)}.")
+        # An entry missing in every draw of a seed is a legitimate NaN; a partial NaN would
+        # silently change the number of draws behind that seed's mean.
+        n_nan = variable.isnull().sum("draw")
+        n_partial_draws = int(((n_nan > 0) & (n_nan < variable.sizes["draw"])).sum())
+        if n_partial_draws:
+            raise ValueError(
+                f"{variable_name} has NaN in some but not all draws for {n_partial_draws} seed-entry "
+                "combination(s); drop or fill them before combining seeds."
+            )
         within_mean = variable.mean("draw")
         additions[within_mean_name] = within_mean
         additions[within_sd_name] = variable.std("draw", ddof=1)
@@ -183,8 +213,16 @@ def combine_mrtotalvi_seed_results(
         if {"latent_dim", "latent_u_dim"} & set(variable.dims):
             skipped_latent.append(variable_name)
             continue
+        # Raw latent densities live on each seed's own latent scale, so they do not average.
+        if variable_name in _DENSITY_VARIABLES:
+            skipped_density.append(variable_name)
+            continue
         additions[between_mean_name] = within_mean.mean("training_seed")
         additions[between_sd_name] = within_mean.std("training_seed", ddof=1)
+        # Each within-seed mean carries draw noise of variance var_within / D; remove it.
+        var_between = within_mean.var("training_seed", ddof=1)
+        var_within = variable.var("draw", ddof=1).mean("training_seed")
+        additions[corrected_sd_name] = np.sqrt((var_between - var_within / variable.sizes["draw"]).clip(min=0))
         n_partial = int((within_mean.isnull().any("training_seed") & within_mean.notnull().any("training_seed")).sum())
         if n_partial:
             partial_variables.append(f"{variable_name} ({n_partial})")
@@ -207,4 +245,9 @@ def combine_mrtotalvi_seed_results(
         combined.attrs["context_table_sha256"] = ",".join(dict.fromkeys(h for h in hashes if h))
     combined.attrs["training_seed_order"] = ",".join(map(str, seeds))
     combined.attrs["between_seed_skipped_latent_variables"] = ",".join(skipped_latent)
+    combined.attrs["between_seed_skipped_density_variables"] = ",".join(skipped_density)
+    combined.attrs["between_seed_sd_note"] = (
+        "<name>_between_seed_sd includes posterior-draw noise; <name>_between_seed_sd_draw_corrected "
+        "subtracts mean_over_seeds(within-seed draw variance) / n_draws from the between-seed variance, floored at 0"
+    )
     return combined

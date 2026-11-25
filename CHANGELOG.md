@@ -41,7 +41,47 @@
   droplets and the z-score encoder input made results worse. These are simulation results only;
   no real-data check has run.
 
+### Changed
+
+- With `protein_noise_model` `"ambient"` or `"ambient_isotype"`, `get_normalized_expression` now returns the
+  `native` component of `get_protein_noise_decomposition` for its protein output (count scale, mean over
+  `n_samples` draws). Pass `include_protein_background=True` for the old full fitted mean. In these modes
+  `transform_batch`, `scale_protein`, `sample_protein_mixing` and `return_mean=False` raise
+  `NotImplementedError` unless `include_protein_background=True`. `"totalvi"` mode is unchanged.
+- Proteins not measured in a cell's batch or panel are now `NaN` in the protein output of
+  `get_normalized_expression` and in `get_protein_foreground_probability`, as they already were in
+  `get_protein_noise_decomposition`. The mask is keyed by the panel field codes (the batch codes when no
+  `panel_key` is set), so a separate `panel_key` was already handled correctly.
+- `combine_mrtotalvi_seed_results` no longer computes a between-seed mean or SD for the raw latent densities
+  `log_density` and `group_log_density` (each seed has its own latent scale); they are listed in
+  `attrs["between_seed_skipped_density_variables"]` and keep their per-seed summaries. The existing
+  `<name>_between_seed_sd` includes posterior-draw noise, and the new `<name>_between_seed_sd_draw_corrected`
+  removes it: `sqrt(max(var_between - mean_over_seeds(var_within) / D, 0))` with `D` draws. A seed with NaN in
+  some but not all draws of an entry now raises `ValueError`. numpy integer seed keys are accepted.
+
 ### Fixed
+
+- `local_sample_enrichment` with `max_reference_cells_per_sample` kept different reference cells for different
+  `random_state` values, so the deterministic `latent_mean` result depended on the seed. The subsample hash now
+  uses a fixed key in both inference modes. Results with a truncated reference and a non-default `random_state`
+  can change.
+- `protein_background_source="z_base"` with `batch_representation="embedding"` failed on the first forward pass
+  (shape error in the background head); the head now folds the batch embedding into its input.
+- `get_protein_foreground_probability(protein_list=...)` raised `TypeError` with the default DataFrame return,
+  and so did `get_normalized_expression(protein_list=..., n_samples_overall=N)`. Both now return labelled frames.
+- `estimate_adt_ambient` raises `ValueError` for `cell_barcodes` that are not in `raw_barcodes` (with the count),
+  for empty `cell_barcodes`, and for duplicate `adt_features`.
+- `get_counterfactual_expression` raises `ValueError` when `specified_batch`, `specified_panel` or
+  `specified_library_size` is given without the matching `"specified"` policy.
+- A bare string for `isotype_names`, `target_samples`, `gene_list` or `protein_list` raises `TypeError`
+  (it was read as a list of characters). numpy integers are accepted for `n_draws` and `batch_size`.
+- `differential_abundance(compute_log_enrichment=True)` without `sample_cov_keys` raises `ValueError`; it used to
+  return no enrichment silently.
+- The residual collapse metrics are not logged for a minibatch of one cell, where the variance is 0 and biased the
+  epoch mean.
+- A per-batch `ambient_profile` dict with a key that matches no registered batch raises `ValueError`, and a value
+  that is not an `AmbientProfile` raises `TypeError`.
+- `get_protein_noise_decomposition` and the new NaN masking share one panel-mask helper.
 
 - `get_protein_noise_decomposition` on a GPU with `protein_background_source="z_base"` failed with "Expected all
   tensors to be on the same device"; `protein_components` now moves every batch tensor to the module device.

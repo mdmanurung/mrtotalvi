@@ -438,6 +438,10 @@ def differential_abundance(
         if donor_key is not None:
             raise ValueError("donor_key is not supported with density_estimator='knn'.")
 
+    if compute_log_enrichment and not sample_cov_keys:
+        raise ValueError(
+            "compute_log_enrichment=True needs sample_cov_keys: enrichment is computed per covariate level."
+        )
     if sample_cov_keys:
         _validate_sample_level_covariates(adata.obs, sample_key, list(sample_cov_keys))
 

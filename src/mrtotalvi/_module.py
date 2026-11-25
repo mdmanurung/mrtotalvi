@@ -1115,7 +1115,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # With several Monte Carlo draws of u, the first draw stands for the cell.
         if eps.ndim == 3:
             eps, z = eps[0], z[0]
-        loss_out.extra_metrics.update(residual_collapse_metrics(eps, z))
+        # The variance across one cell is 0, which would bias the epoch mean low.
+        if eps.shape[0] >= 2:
+            loss_out.extra_metrics.update(residual_collapse_metrics(eps, z))
 
         penalty = self.sample_embedding_penalty()
         droplet = self.ambient_droplet_penalty()
@@ -1449,7 +1451,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if transform_batch is not None:
             batch_index = torch.ones_like(batch_index) * transform_batch
         dec = self.decoder
-        cat_list = (batch_index, *categorical_input)
+        # Under `batch_representation="embedding"` the batch enters through `decoder_input`
+        # (see `_deterministic_decoder_parameters`), not as a categorical argument.
+        if isinstance(dec, BatchEmbeddingDecoderAdapter):
+            decoder_input = dec.batch_input(decoder_input, batch_index)
+            cat_list = categorical_input
+        else:
+            cat_list = (batch_index, *categorical_input)
         back = dec.py_back_decoder(decoder_input, *cat_list)
         back_cat_z = torch.cat([back, decoder_input], dim=-1)
         alpha = dec.py_back_mean_log_alpha(back_cat_z, *cat_list)
