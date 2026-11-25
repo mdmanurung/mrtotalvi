@@ -316,9 +316,7 @@ profile = estimate_adt_ambient(
     adt_features=protein_names,  # the ADT columns; the names on adata.obsm["protein"]
 )
 
-MrTotalVI.setup_anndata(
-    adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch"
-)
+MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch")
 model = MrTotalVI(
     adata,
     sample_key="donor",
@@ -338,12 +336,13 @@ The evidence for each choice:
 - **The ambient model.** On the ADR-0012 simulation, native log1p RMSE fell from 0.77 with stock totalVI to 0.29 with `"ambient"` and a pooled profile. A shuffled or uniform profile still reached 0.38 to 0.39, so most of the gain comes from modelling ambient at all.
 - **Isotype controls.** On one macaque PBMC CITE-seq data set (137 ADTs, three training seeds), `"ambient_isotype"` switched off no protein, against 7 to 14 per seed for `"ambient"`. It recovered the published rhesus staining pattern of 18 of 30 antibodies at AUROC >= 0.8, against 7 to 9 for the totalVI protein output.
 - **One pooled profile.** Per-well profiles added nothing on the ADR-0012 stress seeds, and per-capture profiles changed no marker in the macaque data.
+- **Two public data sets.** On the PBMC data of Mulè et al. 2022 (53,201 cells, 83 antibodies and 4 isotype controls, three seeds, pooled and per-batch profiles), `"ambient_isotype"` switched off no protein, against 8 to 17 for `"ambient"`. On the 10x Genomics PBMC 5k and 10k data (13,112 cells, 14 shared antibodies and 3 isotype controls), no mode switched off a protein. There, `"ambient"` left less CD14 signal on lymphocytes than `"ambient_isotype"` (off-lineage to on-lineage ratio of mean `native` about 0.003 against 0.02). Lineage-marker AUROC against RNA-only labels was about 0.95 for CD4 and CD8 in every mode on both data sets. With a small panel and few isotype controls, compare both modes on a few known markers before choosing.
 
 Leave these off. `seed_background_prior_from_ambient` and `protein_encoder_input="ambient_zscore"` made results worse on the ADR-0011 simulations. `learn_ambient_profile` gave no clear gain (see below). `native_form="excess"` did no better than the default in the macaque data.
 
 One choice is untested on real data. The ADR-0011 simulations used `anneal_protein_likelihood=False`, while the macaque fits kept the default `True`; the two were not compared on real data, so the default stays.
 
-These are results from simulations and one real data set, not validated defaults: `protein_noise_model` still defaults to `"totalvi"`.
+These are results from simulations and three real data sets, not validated defaults: `protein_noise_model` still defaults to `"totalvi"`. The ambient protein noise models are experimental in 1.0.0, so their arguments and outputs can change in a later release.
 
 ## Ambient protein noise: isotype outputs
 
@@ -373,7 +372,9 @@ Three checks come from one real data set: macaque PBMC CITE-seq, 137 ADTs, three
 - **Rank metrics hide weak signals.** An AUROC on `native` can be high when the values are near 0 everywhere: there, the latent orders near-zero values by cell identity. Before calling a marker, also check its size, for example the fold change of mean `native` between groups or the native share `native / observed`.
 - **Display transform.** `log1p` and `arcsinh(x / 1)` give the same picture. The cytometry cofactors 5 (mass) and 150 (flow) fold weak markers toward 0, because `native` values are counts, mostly below 150.
 
-In the same data set, the protein output of `protein_noise_model="totalvi"` (and of stock totalVI) moved every protein with one per-cell factor: in biaxial plots, unrelated markers rose together along one diagonal.
+With `protein_noise_model="totalvi"`, `native` is the foreground excess over background, `background * (fore_scale - 1)` times the foreground probability. It is exactly 0 for a protein whose foreground scale the fit left at 1. Stock totalVI’s `get_normalized_expression(include_protein_background=False)` keeps the background rate inside the foreground component, so it is never 0. On the Mulè et al. data, `native` was 0 in every cell for 6 to 11 of 83 proteins per seed, all with low raw counts, and the set changed with the seed. A zero there means the fit learned no foreground for that protein.
+
+In the macaque data set, the protein output of `protein_noise_model="totalvi"` (and of stock totalVI) moved every protein with one per-cell factor: in biaxial plots, unrelated markers rose together along one diagonal.
 
 ## Statistical APIs
 
