@@ -417,6 +417,10 @@
 
 ### Documentation
 
+- User guide: schematics of the model architecture and of the `"ambient_isotype"` protein noise model
+  (`docs/_static/architecture.svg`, `docs/_static/architecture_ambient-isotype.svg`). Their captions, the README
+  and `CITATION.cff` cite the methods the model builds on: totalVI, MrVI, scAR and dsb.
+
 - User guide: results on two public data sets (Mulè et al. 2022; 10x Genomics PBMC 5k and 10k) next to the
   macaque evidence, a small-panel caveat for `"ambient_isotype"`, and what `native` means with
   `protein_noise_model="totalvi"`. The ambient protein noise models are labelled experimental. `CITATION.cff` added.

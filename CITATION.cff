@@ -40,3 +40,29 @@ references:
     end: 2274
     year: 2025
     doi: "10.1038/s41592-025-02808-x"
+  - type: article
+    title: "Probabilistic machine learning ensures accurate ambient denoising in droplet-based single-cell omics"
+    authors:
+      - family-names: Sheng
+        given-names: Caibin
+      - family-names: Lopes
+        given-names: Rui
+      - family-names: Li
+        given-names: Gang
+    journal: "bioRxiv"
+    year: 2022
+    doi: "10.1101/2022.01.14.476312"
+  - type: article
+    title: "Normalizing and denoising protein expression data from droplet-based single cell profiling"
+    authors:
+      - family-names: Mulè
+        given-names: Matthew P.
+      - family-names: Martins
+        given-names: Andrew J.
+      - family-names: Tsang
+        given-names: John S.
+    journal: "Nature Communications"
+    volume: 13
+    start: 2099
+    year: 2022
+    doi: "10.1038/s41467-022-29356-8"

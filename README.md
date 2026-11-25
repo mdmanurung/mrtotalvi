@@ -80,12 +80,19 @@ A mrtotalvi paper is not out yet. Please cite the two methods it combines:
 - Gayoso A, Steier Z, Lopez R, et al. Joint probabilistic modeling of single-cell multi-omic data with totalVI. *Nature Methods* 18, 272–282 (2021). [doi:10.1038/s41592-020-01050-x][totalvi]
 - Boyeau P, Hong J, Gayoso A, et al. Deep generative modeling of sample-level heterogeneity in single-cell genomics. *Nature Methods* 22, 2264–2274 (2025). [doi:10.1038/s41592-025-02808-x][mrvi]
 
+The opt-in ambient protein noise models build on two further methods. Cite them if you use those models:
+
+- Sheng C, Lopes R, Li G, et al. Probabilistic machine learning ensures accurate ambient denoising in droplet-based single-cell omics. *bioRxiv* (2022). [doi:10.1101/2022.01.14.476312][scar]
+- Mulè MP, Martins AJ, Tsang JS. Normalizing and denoising protein expression data from droplet-based single cell profiling. *Nature Communications* 13, 2099 (2022). [doi:10.1038/s41467-022-29356-8][dsb]
+
 ## License
 
 BSD 3-Clause. The code derives from the scvi-tools TOTALVI and MrVI implementations; see `LICENSE`.
 
 [totalvi]: https://doi.org/10.1038/s41592-020-01050-x
 [mrvi]: https://doi.org/10.1038/s41592-025-02808-x
+[scar]: https://doi.org/10.1101/2022.01.14.476312
+[dsb]: https://doi.org/10.1038/s41467-022-29356-8
 [scvi-tools]: https://scvi-tools.org/
 [issue tracker]: https://github.com/mdmanurung/mrtotalvi/issues
 [tests]: https://github.com/mdmanurung/mrtotalvi/actions/workflows/test.yaml
