@@ -7,6 +7,18 @@
 2. `z = z_base(u) + eps` is the sample-aware representation used for local
    counterfactual donor queries.
 
+```{figure} _static/architecture.svg
+:alt: Schematic of the MrTotalVI architecture, from counts and sample label through u and z to the RNA and protein likelihoods.
+:width: 100%
+
+MrTotalVI architecture. The encoder reads RNA counts, protein counts and the sample label and gives the cell state
+`u`. An attention block over `u` and a learned sample embedding gives the residual `eps`, and `z = z_base(u) + eps`.
+The totalVI decoder reads `z`, batch and library size. Batch also enters the encoder (not drawn). The dashed box
+applies only with `protein_noise_model="ambient"` or `"ambient_isotype"`. The decoder and the RNA and protein
+likelihoods are those of totalVI {cite:p}`Gayoso_2021`. The `u` to `z` hierarchy, with its attention block over a
+sample embedding, is that of MrVI {cite:p}`Boyeau_2025`.
+```
+
 The model keeps the stock TotalVI decoder unchanged. The hierarchy changes the encoder and
 latent prior, not the RNA/protein likelihood definitions.
 
@@ -345,6 +357,21 @@ One choice is untested on real data. The ADR-0011 simulations used `anneal_prote
 These are results from simulations and three real data sets, not validated defaults: `protein_noise_model` still defaults to `"totalvi"`. The ambient protein noise models are experimental in 1.0.0, so their arguments and outputs can change in a later release.
 
 ## Ambient protein noise: isotype outputs
+
+```{figure} _static/architecture_ambient-isotype.svg
+:alt: Schematic of the protein noise model with protein_noise_model="ambient_isotype": ambient, nonspecific and native parts of the protein mean.
+:width: 100%
+
+Protein noise model with `protein_noise_model="ambient_isotype"`. A burden encoder reads the protein counts and
+gives a per-cell ambient burden `c`; the ambient part is `c` times the profile from empty droplets. An isotype
+encoder reads only the isotype control counts and gives the factor `h`; the nonspecific part is
+`softplus(eta_b + h * Lambda)`, with a per-batch offset and a per-protein loading. The native part comes from the
+totalVI decoder and is 0 for isotype controls. The priors shown are the defaults (`ambient_burden_prior=(0.0, 2.0)`
+is a mean and a standard deviation on `log c`). `"ambient"` uses only the burden encoder and adds the ambient part
+to the totalVI background. Two ideas come from earlier methods. scAR {cite:p}`Sheng_2022` estimates the ambient
+profile from empty droplets and scales it per cell. dsb {cite:p}`Mule_2022` uses isotype controls to measure each
+cell’s nonspecific background. The mixture and the decoder are those of totalVI {cite:p}`Gayoso_2021`.
+```
 
 With `protein_noise_model="ambient_isotype"`, the loss is the same for any mixing logit of an isotype control. Its foreground probability is not identified. `get_protein_foreground_probability` and the protein part of `get_normalized_expression` return `NaN` for isotype columns. `get_protein_noise_decomposition` drops them. Other modes are unchanged.
 

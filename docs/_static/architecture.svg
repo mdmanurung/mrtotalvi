@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 60 1240 460" font-family="Helvetica, Arial, sans-serif" font-size="14" role="img" aria-labelledby="t d">
+  <title id="t">MrTotalVI model architecture</title>
+  <desc id="d">RNA counts, protein counts and the sample label enter an encoder that gives the cell state u. A projection of u plus a sample-specific residual from an attention block gives z. The totalVI decoder reads z, batch and library size and gives a negative binomial for RNA and a negative binomial mixture for protein.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#333"/>
+    </marker>
+  </defs>
+  <rect y="60" width="1240" height="460" fill="#fff"/>
+  <g fill="none" stroke="#333" stroke-width="1.5" marker-end="url(#a)">
+    <path d="M150 130H190"/>
+    <path d="M150 180H190"/>
+    <path d="M85 300V250H255V190"/>
+    <path d="M150 320H280"/>
+    <path d="M320 155H360"/>
+    <path d="M390 135V110H460"/>
+    <path d="M390 175V230H460"/>
+    <path d="M460 320H525V260"/>
+    <path d="M590 110H640V141"/>
+    <path d="M590 230H640V169"/>
+    <path d="M654 155H680"/>
+    <path d="M740 155H780"/>
+    <path d="M150 420H845V190"/>
+    <path d="M910 140L950 115"/>
+    <path d="M910 170L950 203"/>
+  </g>
+  <path d="M1070 236V270" fill="none" stroke="#333" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <g stroke="#333" stroke-width="1.5">
+    <g fill="#e8eef7">
+      <rect x="20" y="110" width="130" height="40" rx="6"/>
+      <rect x="20" y="160" width="130" height="40" rx="6"/>
+      <rect x="20" y="300" width="130" height="40" rx="6"/>
+      <rect x="20" y="400" width="130" height="40" rx="6"/>
+    </g>
+    <g fill="#fdf1dc">
+      <rect x="190" y="120" width="130" height="70" rx="6"/>
+      <rect x="280" y="300" width="180" height="40" rx="6"/>
+      <rect x="460" y="90" width="130" height="40" rx="6"/>
+      <rect x="460" y="200" width="130" height="60" rx="6"/>
+      <rect x="780" y="120" width="130" height="70" rx="6"/>
+    </g>
+    <g fill="#e3f3e6">
+      <rect x="360" y="135" width="60" height="40" rx="20"/>
+      <rect x="680" y="135" width="60" height="40" rx="20"/>
+      <circle cx="640" cy="155" r="14"/>
+    </g>
+    <g fill="#f3e8f5">
+      <rect x="950" y="90" width="260" height="50" rx="6"/>
+      <rect x="950" y="170" width="260" height="66" rx="6"/>
+    </g>
+    <rect x="950" y="270" width="260" height="92" rx="6" fill="#fff" stroke-dasharray="5 4"/>
+  </g>
+  <g fill="#111" text-anchor="middle">
+    <text x="85" y="135">RNA counts x</text>
+    <text x="85" y="185">Protein counts y</text>
+    <text x="85" y="325">Sample s</text>
+    <text x="85" y="425">Batch b</text>
+    <text x="255" y="150" font-weight="bold">Encoder</text>
+    <text x="255" y="172">q(u | x, y, s)</text>
+    <text x="370" y="325">Sample embedding e_s</text>
+    <text x="390" y="160" font-weight="bold">u</text>
+    <text x="390" y="198" font-size="12" fill="#555" dx="38">cell state</text>
+    <text x="525" y="115">z_base(u)</text>
+    <text x="525" y="226" font-weight="bold">Attention</text>
+    <text x="525" y="246">over u and e_s</text>
+    <text x="640" y="160" font-weight="bold">+</text>
+    <text x="650" y="252" font-size="12" fill="#555" text-anchor="start">residual ε</text>
+    <text x="710" y="160" font-weight="bold">z</text>
+    <text x="710" y="198" font-size="12" fill="#555">sample-aware state</text>
+    <text x="845" y="143" font-weight="bold">totalVI decoder</text>
+    <text x="845" y="163" font-size="12">reads z, batch,</text>
+    <text x="845" y="179" font-size="12">library size</text>
+    <text x="1080" y="111" font-weight="bold">RNA</text>
+    <text x="1080" y="130" font-size="12">negative binomial</text>
+    <text x="1080" y="194" font-weight="bold">Protein</text>
+    <text x="1080" y="212" font-size="12">negative binomial mixture:</text>
+    <text x="1080" y="228" font-size="12">background and foreground</text>
+    <text x="1080" y="292" font-weight="bold">Opt-in ambient modes</text>
+    <text x="1080" y="312" font-size="12">mean = native + ambient + nonspecific</text>
+    <text x="1080" y="330" font-size="12">ambient: profile from empty droplets</text>
+    <text x="1080" y="348" font-size="12">nonspecific: tied to isotype controls</text>
+    <text x="620" y="490" font-size="13">Loss = reconstruction + KL(q(u) || p(u)) − log p(ε);  p(u) is a mixture of Gaussians by default, p(ε) is a zero-mean normal</text>
+  </g>
+</svg>
