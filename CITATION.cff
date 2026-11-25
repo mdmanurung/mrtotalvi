@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "A mrtotalvi paper is not out yet. If you use this software, please cite it as below, together with the totalVI and MrVI papers listed under references."
+title: "mrtotalvi: TOTALVI with an MrVI-style sample-aware latent space for CITE-seq"
+type: software
+authors:
+  - family-names: Manurung
+    given-names: Mikhael D.
+repository-code: "https://github.com/mdmanurung/mrtotalvi"
+url: "https://mrtotalvi.readthedocs.io/"
+license: BSD-3-Clause
+version: 1.0.0
+references:
+  - type: article
+    title: "Joint probabilistic modeling of single-cell multi-omic data with totalVI"
+    authors:
+      - family-names: Gayoso
+        given-names: Adam
+      - family-names: Steier
+        given-names: Zoë
+      - family-names: Lopez
+        given-names: Romain
+    journal: "Nature Methods"
+    volume: 18
+    start: 272
+    end: 282
+    year: 2021
+    doi: "10.1038/s41592-020-01050-x"
+  - type: article
+    title: "Deep generative modeling of sample-level heterogeneity in single-cell genomics"
+    authors:
+      - family-names: Boyeau
+        given-names: Pierre
+      - family-names: Hong
+        given-names: Justin
+      - family-names: Gayoso
+        given-names: Adam
+    journal: "Nature Methods"
+    volume: 22
+    start: 2264
+    end: 2274
+    year: 2025
+    doi: "10.1038/s41592-025-02808-x"

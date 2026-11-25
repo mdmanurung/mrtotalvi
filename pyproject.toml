@@ -6,6 +6,7 @@ requires = [ "hatch-vcs", "hatchling" ]
 name = "mrtotalvi"
 description = "TOTALVI with an MrVI-style sample-aware hierarchical latent space for CITE-seq."
 readme = "README.md"
+keywords = [ "CITE-seq", "scvi-tools", "single-cell", "totalVI", "variational-autoencoder" ]
 license = { file = "LICENSE" }
 maintainers = [
   { name = "mdmanurung" },
@@ -15,23 +16,30 @@ authors = [
 ]
 requires-python = ">=3.12"
 classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Typing :: Typed",
 ]
 dynamic = [ "version" ]
 dependencies = [
   "dask",
   # Private scvi-tools API is imported (scvi.model._totalvi, scvi.module._totalvae and others), so
-  # a new scvi-tools release can break this package. Only 1.5.2 is tested locally; there is no upper pin.
-  "scvi-tools>=1.5.2",
+  # a new scvi-tools minor release can break this package. Only 1.5.2 is tested, so the next minor is excluded.
+  "scvi-tools>=1.5.2,<1.6",
   # for debug logging (referenced from the issue template)
   "session-info2",
   "xarray",
   "zarr",
 ]
-optional-dependencies.autotune = [ "scvi-tools[autotune]>=1.5.2" ]
+optional-dependencies.autotune = [ "scvi-tools[autotune]>=1.5.2,<1.6" ]
 optional-dependencies.lamin = [ "lamindb" ]
+urls.Changelog = "https://github.com/mdmanurung/mrtotalvi/blob/main/CHANGELOG.md"
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://mrtotalvi.readthedocs.io/"
 urls.Homepage = "https://github.com/mdmanurung/mrtotalvi"
@@ -64,7 +72,8 @@ typecheck = [
 [tool.hatch]
 version.source = "vcs"
 build.targets.wheel.packages = [ "src/mrtotalvi" ]
-build.targets.sdist.exclude = [ "/docs", "/tests" ]
+# An explicit list: untracked files in the checkout (review notes, tool folders) never reach the sdist.
+build.targets.sdist.only-include = [ "/CHANGELOG.md", "/CITATION.cff", "/LICENSE", "/README.md", "/src" ]
 envs.default.installer = "uv"
 # CPU-only torch wheels: the CUDA build adds several GB and no test or doc page needs a GPU.
 # The torch index also serves common packages at old versions, so pick the best match across both.

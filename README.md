@@ -63,7 +63,7 @@ model.train()
 native = model.get_protein_noise_decomposition()["native"]  # denoised protein counts
 ```
 
-The user guide section "Ambient protein noise: recommended setup with empty droplets" gives the evidence, the dead-protein check and the options to leave off.
+The user guide section “Ambient protein noise: recommended setup with empty droplets” gives the evidence, the dead-protein check and the options to leave off. The ambient protein noise models are experimental in 1.0.0.
 
 The [user guide][] covers priors, counterfactual samples and the statistical APIs.
 The [API reference][] lists every method.
