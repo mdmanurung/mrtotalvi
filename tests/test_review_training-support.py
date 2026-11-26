@@ -43,7 +43,11 @@ def test_counts_match_split_and_donor_is_flagged(fitted):
     assert model.n_train_cells_per_sample_.tolist() == expected.tolist()
     assert 0 in expected
     result = model.get_counterfactual_latent(
-        adata=adata, indices=np.asarray(model.train_indices_[:2]), target_samples=list(model.sample_order), n_draws=1
+        adata=adata,
+        indices=np.asarray(model.train_indices_[:2]),
+        target_samples=list(model.sample_order),
+        n_draws=1,
+        allow_untrained_samples=True,
     )
     flag = result["train_support"].to_numpy()
     assert flag.dtype == np.bool_
@@ -81,3 +85,34 @@ def test_no_warning_when_every_donor_has_training_cells():
         model.train(max_epochs=1, accelerator="cpu", batch_size=64, early_stopping=False)
     assert not [w for w in caught if "no training cells" in str(w.message)]
     assert (model.n_train_cells_per_sample_ > 0).all()
+
+
+def test_untrained_target_is_refused_unless_allowed(fitted):
+    model, adata = fitted
+    empty = str(np.asarray(model.sample_order)[model.n_train_cells_per_sample_ == 0][0])
+    trained = [str(s) for s, n in zip(model.sample_order, model.n_train_cells_per_sample_, strict=True) if n > 0]
+    cells = np.asarray(model.train_indices_[:2])
+    with pytest.raises(ValueError, match="had no training cells"):
+        model.get_counterfactual_latent(adata=adata, indices=cells, target_samples=[empty], n_draws=1)
+    with pytest.raises(ValueError, match="had no training cells"):
+        model.get_counterfactual_latent(adata=adata, indices=cells, n_draws=1)  # all targets
+    with pytest.raises(ValueError, match="had no training cells"):
+        model.get_counterfactual_expression(adata=adata, indices=cells, target_samples=[empty], n_draws=1)
+    # Trained targets alone still work, and the override computes the untrained one.
+    ok = model.get_counterfactual_latent(adata=adata, indices=cells, target_samples=trained, n_draws=1)
+    assert list(ok["target_sample"].values) == trained
+    forced = model.get_counterfactual_latent(
+        adata=adata, indices=cells, target_samples=[empty], n_draws=1, allow_untrained_samples=True
+    )
+    assert not forced["train_support"].to_numpy().any()
+
+
+def test_local_sample_methods_refuse_untrained_donor(fitted):
+    model, adata = fitted
+    cells = np.asarray(model.train_indices_[:2])
+    with pytest.raises(ValueError, match="had no training cells"):
+        model.get_local_sample_representation(adata=adata, indices=cells)
+    with pytest.raises(ValueError, match="had no training cells"):
+        model.get_local_sample_distances(adata=adata, indices=cells)
+    rep = model.get_local_sample_representation(adata=adata, indices=cells, allow_untrained_samples=True)
+    assert rep.shape[1] == len(model.sample_order)

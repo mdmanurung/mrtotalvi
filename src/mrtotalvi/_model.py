@@ -33,6 +33,7 @@ from ._contracts import (
     validate_anndata_counts,
     validate_sample_metadata,
 )
+from ._counterfactual import _refuse_untrained_targets
 from ._counterfactual import (
     get_counterfactual_expression as _get_counterfactual_expression,
 )
@@ -1606,8 +1607,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         random_state=0,
         zarr_path=None,
         zarr_chunks=None,
+        allow_untrained_samples: bool = False,
     ) -> xr.Dataset:
         """Return centered latent transformations for registered samples.
+
+        A target donor with no training cells raises a ``ValueError`` unless
+        ``allow_untrained_samples=True``; its outputs are not backed by training data.
 
         The returned dataset contains raw posterior draws for ``u``, ``z_base``,
         ``eps_raw``, ``eps_centered``, and ``z``, plus separate support and
@@ -1645,6 +1650,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             random_state=random_state,
             zarr_path=None,
             zarr_chunks=None,
+            allow_untrained_samples=allow_untrained_samples,
         )
 
     def get_counterfactual_expression(
@@ -1671,8 +1677,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         random_state=0,
         zarr_path=None,
         zarr_chunks=None,
+        allow_untrained_samples: bool = False,
     ) -> xr.Dataset:
         """Return deterministic RNA and protein expectations by registered sample.
+
+        A target donor with no training cells raises a ``ValueError`` unless
+        ``allow_untrained_samples=True``; its outputs are not backed by training data.
 
         ``batch_policy``, ``panel_policy``, and ``library_policy`` make the
         decoder context explicit. ``observed`` holds the factual context fixed;
@@ -1721,6 +1731,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             random_state=random_state,
             zarr_path=None,
             zarr_chunks=None,
+            allow_untrained_samples=allow_untrained_samples,
         )
 
     def local_sample_enrichment(
@@ -1741,8 +1752,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size=256,
         reference_chunk_size=None,
         random_state=0,
+        allow_untrained_samples: bool = False,
     ) -> xr.Dataset:
         """Return descriptive local densities over registered samples.
+
+        A target donor with no training cells raises a ``ValueError`` unless
+        ``allow_untrained_samples=True``; its outputs are not backed by training data.
 
         Each target density is an equal-component mixture of reference
         posteriors over ``u``. A query cell is removed only from its factual
@@ -1776,6 +1791,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             batch_size=batch_size,
             reference_chunk_size=reference_chunk_size,
             random_state=random_state,
+            allow_untrained_samples=allow_untrained_samples,
         )
 
     def differential_expression(
@@ -2487,6 +2503,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         max_gb: float | None = 4.0,
         *,
         admissibility: xr.DataArray | None = None,
+        allow_untrained_samples: bool = False,
     ) -> xr.DataArray:
         """Compute the local per-donor latent representation.
 
@@ -2514,11 +2531,16 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             representation for a sample it has no support in is set to NaN. ``None``
             (default) masks nothing, as upstream MrVI.
 
+        allow_untrained_samples
+            Donors with no training cells raise a ``ValueError`` by default, because their
+            representations are not backed by training data. ``True`` computes them anyway.
+
         Returns
         -------
         :class:`~xarray.DataArray` of shape ``(n_cell, n_sample, n_latent)``.
         """
         self._check_if_trained(warn=False)
+        _refuse_untrained_targets(self, np.arange(len(self.sample_order)), allow_untrained_samples)
         adata = self._validate_anndata(adata)
         self._check_output_size(
             4 * self._n_selected_cells(adata, indices) * self.summary_stats.n_sample * self.module.n_latent,
@@ -2553,6 +2575,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         max_gb: float | None = 4.0,
         *,
         admissibility: xr.DataArray | None = None,
+        allow_untrained_samples: bool = False,
     ) -> xr.DataArray | xr.Dataset:
         """Compute cell-specific pairwise donor distance matrices.
 
@@ -2595,6 +2618,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             ``<column>_n_cells`` variable holds those counts. ``None`` (default) masks
             nothing, as upstream MrVI.
 
+        allow_untrained_samples
+            Donors with no training cells raise a ``ValueError`` by default, because their
+            representations are not backed by training data. ``True`` computes them anyway.
+
         Returns
         -------
         :class:`~xarray.DataArray` of shape ``(n_cell, n_sample, n_sample)`` without
@@ -2602,6 +2629,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``keep_cell``) and one ``<column>_distances`` variable of shape ``(<column>, sample_x, sample_y)`` per column.
         """
         self._check_if_trained(warn=False)
+        _refuse_untrained_targets(self, np.arange(len(self.sample_order)), allow_untrained_samples)
         adata = self._validate_anndata(adata)
         if norm not in ("l2", "l1"):
             raise ValueError(f"Unsupported norm '{norm}'. Choose 'l2' or 'l1'.")

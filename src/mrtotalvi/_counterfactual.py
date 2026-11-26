@@ -133,6 +133,22 @@ def _validate_targets(model, target_samples) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray([lookup[value] for value in requested], dtype=np.int64), requested
 
 
+def _refuse_untrained_targets(model, target_indices: np.ndarray, allow_untrained_samples: bool) -> None:
+    """Raise when a requested target donor had no training cells, unless explicitly allowed."""
+    n_train = getattr(model, "n_train_cells_per_sample_", None)
+    if allow_untrained_samples or n_train is None:
+        return
+    untrained = np.asarray([str(v) for v in model.sample_order])[target_indices][
+        np.asarray(n_train)[target_indices] == 0
+    ]
+    if untrained.size:
+        raise ValueError(
+            f"Target sample(s) {untrained.tolist()} had no training cells, so their counterfactual "
+            "outputs are not backed by training data. Drop them from target_samples, or pass "
+            "allow_untrained_samples=True to compute them anyway."
+        )
+
+
 def _validate_features(registered, requested, *, feature_type: str):
     registered = np.asarray([str(value) for value in registered])
     if np.unique(registered).size != registered.size:
@@ -1035,6 +1051,7 @@ def get_counterfactual_latent(
     random_state=0,
     zarr_path=None,
     zarr_chunks=None,
+    allow_untrained_samples=False,
 ) -> xr.Dataset:
     """Build the registered-sample centered latent dataset.
 
@@ -1072,6 +1089,7 @@ def get_counterfactual_latent(
     n_draws, batch_size = int(n_draws), int(batch_size)  # accept numpy integers
     _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
+    _refuse_untrained_targets(model, target_indices, allow_untrained_samples)
 
     cell_names = np.asarray(adata.obs_names[query_indices], dtype=str)
     if np.unique(cell_names).size != cell_names.size:
@@ -1129,6 +1147,7 @@ def get_counterfactual_latent(
                 adata=adata,
                 indices=piece_indices,
                 target_samples=target_labels,
+                allow_untrained_samples=allow_untrained_samples,
                 inference_mode=inference_mode,
                 n_draws=n_draws,
                 quantiles=quantile_values,
@@ -1323,6 +1342,7 @@ def get_counterfactual_expression(
     random_state=0,
     zarr_path=None,
     zarr_chunks=None,
+    allow_untrained_samples=False,
 ) -> xr.Dataset:
     """Decode deterministic RNA/protein expectations for registered samples."""
     _preflight_zarr_path(zarr_path)
@@ -1352,6 +1372,7 @@ def get_counterfactual_expression(
     n_draws, batch_size = int(n_draws), int(batch_size)  # accept numpy integers
     _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
+    _refuse_untrained_targets(model, target_indices, allow_untrained_samples)
     gene_indices, gene_labels = _validate_features(
         adata.var_names,
         gene_list,
@@ -1465,6 +1486,7 @@ def get_counterfactual_expression(
                 adata=adata,
                 indices=piece_indices,
                 target_samples=target_labels,
+                allow_untrained_samples=allow_untrained_samples,
                 gene_list=gene_labels,
                 protein_list=protein_labels,
                 inference_mode=inference_mode,
@@ -1868,6 +1890,7 @@ def local_sample_enrichment(
     batch_size=256,
     reference_chunk_size=None,
     random_state=0,
+    allow_untrained_samples=False,
 ) -> xr.Dataset:
     """Compute descriptive local densities under registered-sample posteriors."""
     if model.hierarchy_mode != "centered_v2":
@@ -1902,6 +1925,7 @@ def local_sample_enrichment(
     n_draws, batch_size = int(n_draws), int(batch_size)  # accept numpy integers
     _validate_random_state(random_state)
     target_indices, target_labels = _validate_targets(model, target_samples)
+    _refuse_untrained_targets(model, target_indices, allow_untrained_samples)
     cell_names = np.asarray(adata.obs_names[query_indices], dtype=str)
     if np.unique(cell_names).size != cell_names.size:
         raise ValueError("Query cell IDs must be unique for deterministic posterior draws.")
