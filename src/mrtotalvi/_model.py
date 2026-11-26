@@ -33,6 +33,7 @@ from ._contracts import (
     validate_anndata_counts,
     validate_sample_metadata,
 )
+from ._counterfactual import _refuse_untrained_targets
 from ._counterfactual import (
     get_counterfactual_expression as _get_counterfactual_expression,
 )
@@ -266,7 +267,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         replaces the decoded background with ``A`` plus a nonspecific term driven by the
         isotype controls, fits the isotype controls with background only, and drops the
         totalVI background prior. Both opt-in modes need ``ambient_profile``;
-        ``"ambient_isotype"`` also needs ``isotype_names``.
+        ``"ambient_isotype"`` also needs ``isotype_names``. Both are EXPERIMENTAL: they
+        were tested on panels of 14-137 antibodies with 2-4 isotype controls, and a
+        held-out isotype control was cleaned in only 0-22% of cells in four 10x sets.
     protein_background_source
         ``"z"`` (default) decodes the protein background from ``z``. ``"z_base"`` decodes
         it from ``z_base(u)``, so a sample counterfactual does not move it.
@@ -1520,6 +1523,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         scale_floor
             Minimum kernel scale for ``"scale_floor"`` (about 0.4 calibrated a
             planted-effect test); ``None`` for the other estimators.
+
+        Notes
+        -----
+        The scores are descriptive: they are not a test and carry no p-value. Under an
+        equal-population null, ``"posterior"`` put about 60% of cells beyond a twofold
+        density ratio, while ``"knn"`` and ``"scale_floor"`` put almost none there
+        (``docs/reviews/2026-11-23/abundance_null.png``). For inference, use a
+        donor-level test such as donor pseudobulk with edgeR or miloR.
         """
         adata = self._validate_anndata(adata)
         selected_samples, _ = validate_sample_metadata(
@@ -1564,6 +1575,97 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         )
         return result
 
+    def differential_abundance_test(
+        self,
+        sample_cov_key: str,
+        groupby: str,
+        adata: AnnData | None = None,
+        *,
+        density_estimator: Literal["knn", "scale_floor"],
+        knn_k: int = 50,
+        scale_floor: float | None = None,
+        sample_subset: list[str] | None = None,
+        batch_size: int = 128,
+        min_samples_per_group: int = 8,
+        max_exact: int = 10000,
+        n_permutations: int = 9999,
+        random_state: int | None = None,
+    ) -> pd.DataFrame:
+        """Donor-level permutation test of differential abundance per cell group.
+
+        The per-cell score is the log-enrichment of one level of the two-level sample
+        covariate ``sample_cov_key`` against the other, as in :meth:`differential_abundance`.
+        The statistic of each cell group in ``groupby`` (for example cell-type labels) is the
+        mean score over its cells. Sample labels are permuted, never cells: every split when
+        there are at most ``max_exact`` (an exact test), else ``n_permutations`` random splits
+        with ``p = (1 + b) / (1 + n)``. The test is two-sided, and ``padj`` is
+        Benjamini-Hochberg over the cell groups.
+
+        Parameters
+        ----------
+        sample_cov_key
+            Sample-level ``adata.obs`` column with exactly two levels.
+        groupby
+            Cell-level ``adata.obs`` column defining the cell groups tested.
+        adata
+            AnnData object. Defaults to the object used to initialise the model.
+        density_estimator
+            ``"knn"`` or ``"scale_floor"``. ``"posterior"`` is refused: under an
+            equal-population null it puts most cells beyond a twofold density ratio.
+        knn_k, scale_floor
+            As in :meth:`differential_abundance`.
+        sample_subset
+            Restrict to these samples.
+        batch_size
+            Dataloader batch size.
+        min_samples_per_group
+            Smallest number of samples allowed per level (default 8).
+        max_exact
+            Enumerate every split when there are at most this many.
+        n_permutations
+            Random splits otherwise.
+        random_state
+            Seed of the random splits. ``None`` uses :attr:`scvi.settings.seed`.
+
+        Returns
+        -------
+        :class:`~pandas.DataFrame` indexed by cell group, with ``statistic``, ``n_cells``,
+        ``pvalue``, ``padj`` and the design (levels, samples per level, number of splits,
+        ``exact``).
+        """
+        from ._stats import differential_abundance_test as _da_test
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        if groupby not in adata.obs:
+            raise KeyError(f"groupby column {groupby!r} is not in adata.obs.")
+        selected_samples, _ = validate_sample_metadata(
+            adata.obs,
+            sample_key=self.sample_key,
+            covariate_keys=[sample_cov_key],
+            donor_key=None,
+            sample_subset=sample_subset,
+            authoritative_order=self.sample_order,
+        )
+        result = _da_test(
+            self,
+            adata=adata,
+            sample_key=self.sample_key,
+            sample_cov_key=sample_cov_key,
+            groupby=groupby,
+            validated_sample_order=selected_samples,
+            density_estimator=density_estimator,
+            knn_k=knn_k,
+            scale_floor=scale_floor,
+            batch_size=batch_size,
+            min_samples_per_group=min_samples_per_group,
+            max_exact=max_exact,
+            n_permutations=n_permutations,
+            random_state=random_state,
+        )
+        result.attrs["density_estimator"] = density_estimator
+        return result
+
     def get_outlier_cell_sample_pairs(
         self,
         adata: AnnData | None = None,
@@ -1606,8 +1708,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         random_state=0,
         zarr_path=None,
         zarr_chunks=None,
+        allow_untrained_samples: bool = False,
     ) -> xr.Dataset:
         """Return centered latent transformations for registered samples.
+
+        A target donor with no training cells raises a ``ValueError`` unless
+        ``allow_untrained_samples=True``; its outputs are not backed by training data.
 
         The returned dataset contains raw posterior draws for ``u``, ``z_base``,
         ``eps_raw``, ``eps_centered``, and ``z``, plus separate support and
@@ -1645,6 +1751,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             random_state=random_state,
             zarr_path=None,
             zarr_chunks=None,
+            allow_untrained_samples=allow_untrained_samples,
         )
 
     def get_counterfactual_expression(
@@ -1671,8 +1778,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         random_state=0,
         zarr_path=None,
         zarr_chunks=None,
+        allow_untrained_samples: bool = False,
     ) -> xr.Dataset:
         """Return deterministic RNA and protein expectations by registered sample.
+
+        A target donor with no training cells raises a ``ValueError`` unless
+        ``allow_untrained_samples=True``; its outputs are not backed by training data.
 
         ``batch_policy``, ``panel_policy``, and ``library_policy`` make the
         decoder context explicit. ``observed`` holds the factual context fixed;
@@ -1721,6 +1832,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             random_state=random_state,
             zarr_path=None,
             zarr_chunks=None,
+            allow_untrained_samples=allow_untrained_samples,
         )
 
     def local_sample_enrichment(
@@ -1741,8 +1853,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size=256,
         reference_chunk_size=None,
         random_state=0,
+        allow_untrained_samples: bool = False,
     ) -> xr.Dataset:
         """Return descriptive local densities over registered samples.
+
+        A target donor with no training cells raises a ``ValueError`` unless
+        ``allow_untrained_samples=True``; its outputs are not backed by training data.
 
         Each target density is an equal-component mixture of reference
         posteriors over ``u``. A query cell is removed only from its factual
@@ -1776,6 +1892,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             batch_size=batch_size,
             reference_chunk_size=reference_chunk_size,
             random_state=random_state,
+            allow_untrained_samples=allow_untrained_samples,
         )
 
     def differential_expression(
@@ -2487,6 +2604,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         max_gb: float | None = 4.0,
         *,
         admissibility: xr.DataArray | None = None,
+        allow_untrained_samples: bool = False,
     ) -> xr.DataArray:
         """Compute the local per-donor latent representation.
 
@@ -2514,11 +2632,16 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             representation for a sample it has no support in is set to NaN. ``None``
             (default) masks nothing, as upstream MrVI.
 
+        allow_untrained_samples
+            Donors with no training cells raise a ``ValueError`` by default, because their
+            representations are not backed by training data. ``True`` computes them anyway.
+
         Returns
         -------
         :class:`~xarray.DataArray` of shape ``(n_cell, n_sample, n_latent)``.
         """
         self._check_if_trained(warn=False)
+        _refuse_untrained_targets(self, np.arange(len(self.sample_order)), allow_untrained_samples)
         adata = self._validate_anndata(adata)
         self._check_output_size(
             4 * self._n_selected_cells(adata, indices) * self.summary_stats.n_sample * self.module.n_latent,
@@ -2553,6 +2676,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         max_gb: float | None = 4.0,
         *,
         admissibility: xr.DataArray | None = None,
+        allow_untrained_samples: bool = False,
     ) -> xr.DataArray | xr.Dataset:
         """Compute cell-specific pairwise donor distance matrices.
 
@@ -2595,6 +2719,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             ``<column>_n_cells`` variable holds those counts. ``None`` (default) masks
             nothing, as upstream MrVI.
 
+        allow_untrained_samples
+            Donors with no training cells raise a ``ValueError`` by default, because their
+            representations are not backed by training data. ``True`` computes them anyway.
+
         Returns
         -------
         :class:`~xarray.DataArray` of shape ``(n_cell, n_sample, n_sample)`` without
@@ -2602,6 +2730,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``keep_cell``) and one ``<column>_distances`` variable of shape ``(<column>, sample_x, sample_y)`` per column.
         """
         self._check_if_trained(warn=False)
+        _refuse_untrained_targets(self, np.arange(len(self.sample_order)), allow_untrained_samples)
         adata = self._validate_anndata(adata)
         if norm not in ("l2", "l1"):
             raise ValueError(f"Unsupported norm '{norm}'. Choose 'l2' or 'l1'.")
