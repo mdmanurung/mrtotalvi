@@ -18,10 +18,13 @@ from scvi.nn import DecoderTOTALVI
 from torch.distributions import Normal, kl_divergence
 
 from ._components import (
+    PROTEIN_RESIDUAL_HEADS,
     AmbientNuisanceEncoder,
     BatchEmbeddingDecoderAdapter,
+    DecoderTOTALVIResidual,
     EncoderUZ,
     EncoderXU_TotalVI,
+    ProteinResidualEncoder,
     init_u_prior,
 )
 from ._components import (
@@ -51,6 +54,11 @@ def residual_collapse_metrics(eps: torch.Tensor, z: torch.Tensor) -> dict[str, t
         active = (eps.var(dim=0, unbiased=False) > RESIDUAL_ACTIVE_THRESHOLD).sum().to(eps.dtype)
         share = eps.pow(2).sum(-1).mean() / z.pow(2).sum(-1).mean().clamp_min(1e-12)
     return {"residual_active_units": active, "residual_share": share}
+
+
+def _with_w(decoder, head: str, z: torch.Tensor) -> torch.Tensor:
+    """Decoder input of a protein head: ``[z, 0]`` if the head reads ``w``, else ``z``."""
+    return decoder.with_w(head, z) if hasattr(decoder, "with_w") else z
 
 
 POSTERIOR_SPLITS = ("excess", "whole")
@@ -152,6 +160,12 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     batch_embedding_kwargs
         Keyword arguments passed to :class:`~scvi.nn.Embedding` when
         ``batch_representation="embedding"``, e.g. ``{"embedding_dim": 5}``.
+    n_latent_protein_residual
+        **EXPERIMENTAL.** ``0`` (default) is off and leaves every output unchanged. ``n > 0`` adds an
+        ``n``-dimensional protein residual latent ``w``. See :class:`~mrtotalvi.MrTotalVI`.
+    protein_residual_heads
+        Which protein heads read ``[z, w]``: ``"fore_mixing"`` or ``"all"``. See
+        :class:`~mrtotalvi.MrTotalVI`.
     **kwargs
         All remaining keyword arguments forwarded verbatim to
         :class:`~scvi.module._totalvae.TOTALVAE`.
@@ -190,6 +204,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         residual_prior_mode: str = "raw_mean",
         anneal_protein_likelihood: bool = True,
         protein_likelihood_weight: float = 1.0,
+        n_latent_protein_residual: int = 0,
+        protein_residual_heads: str = "fore_mixing",
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
@@ -204,6 +220,16 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 "additive residual hierarchy is invalid."
             )
         kwargs["latent_distribution"] = "normal"
+        if (
+            isinstance(n_latent_protein_residual, bool)
+            or int(n_latent_protein_residual) != n_latent_protein_residual
+            or n_latent_protein_residual < 0
+        ):
+            raise ValueError(
+                f"n_latent_protein_residual must be a whole number >= 0; got {n_latent_protein_residual!r}."
+            )
+        if protein_residual_heads not in PROTEIN_RESIDUAL_HEADS:
+            raise ValueError(f"protein_residual_heads must be one of {sorted(PROTEIN_RESIDUAL_HEADS)}.")
         if u_prior not in {"standard", "mog", "vamp"}:
             raise ValueError("u_prior must be exactly one of {'standard', 'mog', 'vamp'}.")
         if bool(u_prior_mixture) != (u_prior != "standard"):
@@ -231,6 +257,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.protein_noise_model = "totalvi"
         self.protein_background_source = "z"
         self.protein_encoder_input = "raw"
+        # Protein residual latent w (EXPERIMENTAL); read by ``_build_decoder`` below.
+        self.n_latent_protein_residual = int(n_latent_protein_residual)
+        self.protein_residual_heads = protein_residual_heads
 
         # Store hyperparams so _setup_hierarchy can use them if called deferred
         self._n_sample = n_sample
@@ -310,6 +339,17 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         elif batch_representation != "one-hot":
             raise ValueError("`batch_representation` must be one of 'one-hot', 'embedding'.")
 
+        # Opt-in protein residual latent w (EXPERIMENTAL). Off builds nothing, so the default
+        # module has the same parameters and random draws as before.
+        if self.n_latent_protein_residual > 0:
+            if batch_representation != "embedding":
+                self.decoder = self._build_decoder(None, kwargs)
+            self.qw = ProteinResidualEncoder(
+                n_input_proteins,
+                self.n_latent_protein_residual,
+                n_hidden=self._decoder_arg("n_hidden", kwargs),
+            )
+
         if n_sample > 0:
             self._setup_hierarchy(
                 n_sample,
@@ -340,33 +380,52 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         Defaults are read from :meth:`~scvi.module.TOTALVAE.__init__`'s own signature
         rather than restated here, so this stays correct if the parent's defaults change.
         """
-        signature = inspect.signature(TOTALVAE.__init__)
+        decoder = self._build_decoder(batch_dim, kwargs)
+        self.decoder = BatchEmbeddingDecoderAdapter(
+            decoder,
+            lambda batch_index: self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index),
+        )
 
-        def _arg(name: str):
-            if name in kwargs:
-                return kwargs[name]
-            return signature.parameters[name].default
+    @staticmethod
+    def _decoder_arg(name: str, kwargs: dict):
+        """A TOTALVAE constructor argument: the caller's value, else the parent's own default."""
+        if name in kwargs:
+            return kwargs[name]
+        return inspect.signature(TOTALVAE.__init__).parameters[name].default
 
+    def _build_decoder(self, batch_dim: int | None, kwargs: dict) -> DecoderTOTALVI:
+        """Build the decoder as :class:`~scvi.module.TOTALVAE` does, for one-hot or embedded batch.
+
+        ``batch_dim=None`` keeps the batch as a one-hot category of every layer. An integer widens
+        the input by the embedding size and drops the batch category. With
+        ``n_latent_protein_residual > 0`` the result is a :class:`~._components.DecoderTOTALVIResidual`.
+        """
+        _arg = lambda name: self._decoder_arg(name, kwargs)
         n_cats_per_cov = _arg("n_cats_per_cov")
         use_batch_norm = _arg("use_batch_norm")
         use_layer_norm = _arg("use_layer_norm")
-
-        decoder = DecoderTOTALVI(
-            _arg("n_latent") + _arg("n_continuous_cov") + batch_dim,
+        cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)
+        if batch_dim is None:
+            cat_list = [self.n_batch, *cat_list]
+        extra = {}
+        if self.n_latent_protein_residual > 0:
+            decoder_class = DecoderTOTALVIResidual
+            extra = {"n_residual": self.n_latent_protein_residual, "heads": self.protein_residual_heads}
+        else:
+            decoder_class = DecoderTOTALVI
+        return decoder_class(
+            _arg("n_latent") + _arg("n_continuous_cov") + (batch_dim or 0),
             self.n_input_genes,
             self.n_input_proteins,
             n_layers=_arg("n_layers_decoder"),
-            n_cat_list=list([] if n_cats_per_cov is None else n_cats_per_cov),
+            n_cat_list=cat_list,
             n_hidden=_arg("n_hidden"),
             dropout_rate=_arg("dropout_rate_decoder"),
             use_batch_norm=use_batch_norm in ("decoder", "both"),
             use_layer_norm=use_layer_norm in ("decoder", "both"),
             scale_activation="softplus" if _arg("use_size_factor_key") else "softmax",
+            **extra,
             **(_arg("extra_decoder_kwargs") or {}),
-        )
-        self.decoder = BatchEmbeddingDecoderAdapter(
-            decoder,
-            lambda batch_index: self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index),
         )
 
     def _batch_representation_for(self, batch_index: torch.Tensor | None) -> torch.Tensor | None:
@@ -749,6 +808,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             cat_covs=cat_covs,
         )
 
+        if self.n_latent_protein_residual > 0:
+            # q(w | y): protein counts only, no donor or batch input (sample-blind). One draw per
+            # Monte-Carlo draw of z, so the loss averages over w as it does over u.
+            qw = self.qw(y)
+            out["qw"] = qw
+            out["w"] = qw.rsample((n_samples,)) if n_samples > 1 else qw.rsample()
+
         if not hasattr(self, "qz"):
             # Hierarchy not yet built (n_sample=0 placeholder). Return TotalVI outputs.
             return out
@@ -1073,6 +1139,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                     protein_weight * pro_recons_weight * loss_out.reconstruction_loss["reconst_loss_protein"].mean()
                     + kl_weight * loss_out.kl_local["kl_div_back_pro"].mean()
                 )
+            kl_w = self._kl_w(inference_outputs)
+            if kl_w is not None:
+                # p(w) = N(0, I), weight 1, annealed with kl_weight like kl_z (G82).
+                return LossOutput(
+                    loss=loss_out.loss + kl_weight * kl_w.mean(),
+                    reconstruction_loss=loss_out.reconstruction_loss,
+                    kl_local={**loss_out.kl_local, "kl_div_w": kl_w},
+                    extra_metrics={**loss_out.extra_metrics, **self._residual_metrics(inference_outputs, kl_w)},
+                )
             return loss_out
 
         label_index = tensors[REGISTRY_KEYS.LABELS_KEY]
@@ -1112,6 +1187,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # Update kl_local: kl_div_z now = kl_u_weight*kl_u + kl_z_weight*kl_z
         kl_local = dict(loss_out.kl_local)
         kl_local["kl_div_z"] = self.kl_u_weight * kl_u + self.kl_z_weight * kl_z
+        # Protein residual latent: p(w) = N(0, I), weight 1, annealed with kl_weight like kl_z (G82).
+        kl_w = self._kl_w(inference_outputs)
+        if kl_w is not None:
+            kl_local["kl_div_w"] = kl_w
+        kl_w_term = 0.0 if kl_w is None else kl_weight * kl_w
 
         if self._scale_observations and self.n_obs_per_sample is not None:
             # Weight each cell's ELBO by 1/n_cells_in_that_sample so high-cell-count
@@ -1123,6 +1203,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 loss_out.reconstruction_loss["reconst_loss_gene"]
                 + protein_weight * pro_recons_weight * w_pro * loss_out.reconstruction_loss["reconst_loss_protein"]
                 + kl_weight * kl_local["kl_div_z"]
+                + kl_w_term
                 + kl_local["kl_div_l_gene"]
                 + kl_weight * w_pro * kl_local["kl_div_back_pro"]
             )
@@ -1146,9 +1227,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 loss_out.reconstruction_loss["reconst_loss_gene"]
                 + protein_weight * pro_recons_weight * w_pro * loss_out.reconstruction_loss["reconst_loss_protein"]
                 + kl_weight * kl_local["kl_div_z"]
+                + kl_w_term
                 + kl_local["kl_div_l_gene"]
                 + kl_weight * w_pro * kl_local["kl_div_back_pro"]
             ).mean()
+
+        if kl_w is not None:
+            loss_out.extra_metrics.update(self._residual_metrics(inference_outputs, kl_w))
 
         if self.u_invariance_weight > 0 and self.training:
             u_pen = self.u_invariance_penalty(tensors, inference_outputs)
@@ -1326,6 +1411,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         non_default = (
             protein_noise_model != "totalvi" or protein_background_source != "z" or protein_encoder_input != "raw"
         )
+        if non_default and self.n_latent_protein_residual > 0:
+            raise NotImplementedError(
+                "n_latent_protein_residual > 0 is only implemented for protein_noise_model='totalvi' with "
+                "protein_background_source='z' and protein_encoder_input='raw'; got "
+                f"protein_noise_model={protein_noise_model!r}, protein_background_source="
+                f"{protein_background_source!r}, protein_encoder_input={protein_encoder_input!r}."
+            )
         if non_default and self.u_invariance_weight > 0:
             raise ValueError("u_invariance_weight > 0 is only supported with the default protein model.")
         if protein_encoder_input == "ambient_zscore" and self.u_prior_type == "vamp":
@@ -1459,6 +1551,28 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         sd = self._context_rows(self.dsb_log_sd, batch_index)
         return (torch.log(y + 10.0) - mean) / sd
 
+    def _kl_w(self, inference_outputs) -> torch.Tensor | None:
+        """``KL(q(w | y) || N(0, I))`` per cell, shape ``(batch,)``; ``None`` when ``w`` is off."""
+        qw = inference_outputs.get("qw")
+        if qw is None:
+            return None
+        return kl_divergence(qw, Normal(torch.zeros_like(qw.loc), torch.ones_like(qw.scale))).sum(dim=-1)
+
+    def _residual_metrics(self, inference_outputs, kl_w: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Logged each epoch (G96): mean ``kl_w`` and the active units of ``w``.
+
+        A unit is active when the variance of its posterior mean across the minibatch exceeds
+        :data:`RESIDUAL_ACTIVE_THRESHOLD` (Burda et al. 2016). ``w`` collapsing gives 0 active units
+        and a ``kl_w`` near 0; ``w`` absorbing the protein signal gives a large ``kl_w``.
+        """
+        metrics = {"kl_w": kl_w.detach().mean()}
+        loc = inference_outputs["qw"].loc.detach()
+        # The variance across one cell is 0, which would bias the epoch mean low.
+        if loc.shape[0] >= 2:
+            active = (loc.var(dim=0, unbiased=False) > RESIDUAL_ACTIVE_THRESHOLD).sum().to(loc.dtype)
+            metrics["protein_residual_active_units"] = active
+        return metrics
+
     def _nuisance_kl(self, inference_outputs) -> torch.Tensor | float:
         if getattr(self, "protein_noise_model", "totalvi") == "totalvi":
             return 0.0
@@ -1490,7 +1604,18 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             base["z_base"] = inference_outputs.get("z_base")
             base["log_c"] = inference_outputs.get("log_c")
             base["h"] = inference_outputs.get("h")
+        if self.n_latent_protein_residual > 0:
+            # The cell's own draw of q(w): factual decodes read it. Counterfactual and DE decodes
+            # never pass it, so they read w = 0.
+            base["w"] = inference_outputs.get("w")
         return base
+
+    def _residual_decoder(self) -> DecoderTOTALVIResidual | None:
+        """The decoder that reads ``w``, or ``None`` when the residual latent is off."""
+        if self.n_latent_protein_residual == 0:
+            return None
+        decoder = self.decoder
+        return decoder.decoder if isinstance(decoder, BatchEmbeddingDecoderAdapter) else decoder
 
     def _snapshot_background_bn(self):
         """Copy the BatchNorm buffers of the protein background decoder."""
@@ -1543,14 +1668,28 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         z_base=None,
         log_c=None,
         h=None,
+        w=None,
     ):
-        """TOTALVAE generative step, extended by the opt-in ADR-0011 protein model."""
+        """TOTALVAE generative step, extended by the opt-in ADR-0011 protein model.
+
+        ``w`` is the protein residual latent (only with ``n_latent_protein_residual > 0``). ``None``
+        decodes at ``w = 0``, which is what counterfactual and DE decodes use.
+        """
         mode = getattr(self, "protein_noise_model", "totalvi")
         source = getattr(self, "protein_background_source", "z")
         # With source "z_base" the z pass's background BatchNorm update is dropped, so that head
         # advances once, on z_base (see ``_background_head``).
         bn_state = self._snapshot_background_bn() if source == "z_base" and self.training else None
-        out = super().generative(z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch)
+        core = self._residual_decoder()
+        if core is not None:
+            core.set_residual(w)
+        try:
+            out = super().generative(
+                z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch
+            )
+        finally:
+            if core is not None:
+                core.set_residual(None)
         if bn_state is not None:
             for bn, saved in bn_state:
                 for name, value in saved.items():
@@ -1646,7 +1785,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
 
         Only for ``protein_noise_model="totalvi"``. See
         :meth:`MrTotalVI.get_protein_noise_decomposition` for the options. Returns
-        ``(cells, proteins)``, the plain mean over the ``n_samples`` draws.
+        ``(cells, proteins)``, the plain mean over the ``n_samples`` draws. With
+        ``n_latent_protein_residual > 0`` each draw decodes the cell's own draw of ``q(w)``.
         """
         _check_posterior_options(split, background)
         if self.protein_noise_model != "totalvi":
@@ -1703,11 +1843,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             )
         )
 
+        # Counterfactual and DE decodes read w = 0 (G90): a head that reads w gets zeros appended.
+        back_input = _with_w(decoder, "back", decoder_input)
         py_back = decoder.py_back_decoder(
-            decoder_input,
+            back_input,
             *conditioning,
         )
-        py_back_cat_z = torch.cat([py_back, decoder_input], dim=-1)
+        py_back_cat_z = torch.cat([py_back, back_input], dim=-1)
         back_alpha = decoder.py_back_mean_log_alpha(
             py_back_cat_z,
             *conditioning,
@@ -1722,11 +1864,12 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             + 1e-8
         )
 
+        fore_input = _with_w(decoder, "fore", decoder_input)
         py_fore = decoder.py_fore_decoder(
-            decoder_input,
+            fore_input,
             *conditioning,
         )
-        py_fore_cat_z = torch.cat([py_fore, decoder_input], dim=-1)
+        py_fore_cat_z = torch.cat([py_fore, fore_input], dim=-1)
         fore_scale = (
             decoder.py_fore_scale_decoder(
                 py_fore_cat_z,
@@ -1736,11 +1879,12 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             + 1e-8
         )
 
+        mixing_input = _with_w(decoder, "mixing", decoder_input)
         mixing_hidden = decoder.sigmoid_decoder(
-            decoder_input,
+            mixing_input,
             *conditioning,
         )
-        mixing_cat_z = torch.cat([mixing_hidden, decoder_input], dim=-1)
+        mixing_cat_z = torch.cat([mixing_hidden, mixing_input], dim=-1)
         mixing = decoder.py_background_decoder(
             mixing_cat_z,
             *conditioning,
@@ -1763,7 +1907,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         rna_extra = {}
         if self.gene_likelihood == "zinb":
             # rna_rate stays the NB component mean; the expected count also needs the zero probability.
-            zero_probability = torch.sigmoid(decoder.px_dropout_decoder_gene(mixing_cat_z, *conditioning))
+            dropout_cat_z = torch.cat([mixing_hidden, decoder_input], dim=-1)
+            zero_probability = torch.sigmoid(decoder.px_dropout_decoder_gene(dropout_cat_z, *conditioning))
             rna_extra = {
                 "rna_zero_probability": zero_probability,
                 "rna_expected_count": (1.0 - zero_probability) * rna_rate,
