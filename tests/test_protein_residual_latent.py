@@ -308,3 +308,31 @@ def test_kl_w_and_active_units_are_logged_each_epoch():
 def test_off_model_logs_no_residual_metrics():
     model = _fit(max_epochs=1, n_w=0)
     assert not any(key.startswith(("kl_w", "protein_residual")) for key in model.history)
+
+
+# -- other decoder layouts and unsupported settings ----------------------------------------
+
+
+@pytest.mark.parametrize("heads", ["fore_mixing", "all"])
+@torch.no_grad()
+def test_embedded_batch_layout_matches_between_factual_and_counterfactual_decodes(heads):
+    model = _model(
+        protein_residual_heads=heads,
+        batch_representation="embedding",
+        batch_embedding_kwargs={"embedding_dim": 2},
+    )
+    module, tensors, inference, _ = _outputs(model)
+    gen = _generate(module, tensors, inference, torch.zeros_like(inference["w"]))
+    det = module._deterministic_decoder_parameters(
+        inference["z"], inference["library_gene"], tensors[REGISTRY_KEYS.BATCH_KEY]
+    )
+    expected = 1 - torch.sigmoid(gen["py_"]["mixing"])
+    torch.testing.assert_close(det["protein_foreground_probability"], expected, rtol=1e-5, atol=1e-6)
+    a, b = _perturbed(model)
+    assert torch.equal(a["px_"]["scale"], b["px_"]["scale"])
+    assert not torch.equal(a["py_"]["mixing"], b["py_"]["mixing"])
+
+
+def test_z_base_background_source_raises_at_model_construction():
+    with pytest.raises(NotImplementedError, match="n_latent_protein_residual"):
+        _model(protein_background_source="z_base")
