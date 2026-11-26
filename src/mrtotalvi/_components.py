@@ -1235,26 +1235,51 @@ class AmbientNuisanceEncoder(nn.Module):
     ADR-0011: ``q(log c | y) = Normal`` from ``log1p`` protein counts and the log total;
     ``q(h | y_iso) = Normal`` from the isotype block only, so ``h`` is identified by the
     controls rather than by target proteins.
+
+    ``h_input="isotypes_total"`` (default) adds the log total over all proteins to the
+    isotype block; ``"isotypes_batch"`` adds a one-hot batch instead, so target counts
+    cannot reach ``h``.
     """
 
-    def __init__(self, n_proteins: int, n_isotypes: int = 0, n_nuisance: int = 1, n_hidden: int = 64):
+    def __init__(
+        self,
+        n_proteins: int,
+        n_isotypes: int = 0,
+        n_nuisance: int = 1,
+        n_hidden: int = 64,
+        h_input: str = "isotypes_total",
+        n_batch: int = 1,
+    ):
         super().__init__()
+        self.h_input = h_input
+        self.n_batch = max(int(n_batch), 1)
         self.c_net = nn.Sequential(nn.Linear(n_proteins + 1, n_hidden), nn.GELU(), nn.Linear(n_hidden, 2))
         self.n_isotypes = int(n_isotypes)
         self.n_nuisance = int(n_nuisance)
         if self.n_isotypes > 0:
             self.h_net = nn.Sequential(
-                nn.Linear(self.n_isotypes + 1, n_hidden), nn.GELU(), nn.Linear(n_hidden, 2 * self.n_nuisance)
+                nn.Linear(self.n_isotypes + (self.n_batch if h_input == "isotypes_batch" else 1), n_hidden),
+                nn.GELU(),
+                nn.Linear(n_hidden, 2 * self.n_nuisance),
             )
 
-    def forward(self, y: torch.Tensor, isotype_index: torch.Tensor | None = None):
+    def forward(
+        self, y: torch.Tensor, isotype_index: torch.Tensor | None = None, batch_index: torch.Tensor | None = None
+    ):
         log_total = torch.log1p(y.sum(dim=-1, keepdim=True))
         c_out = self.c_net(torch.cat([torch.log1p(y), log_total], dim=-1))
         qc = Normal(c_out[..., :1], F.softplus(c_out[..., 1:]) + 1e-4)
         qh = None
         if self.n_isotypes > 0:
             y_iso = y[..., isotype_index]
-            h_out = self.h_net(torch.cat([torch.log1p(y_iso), log_total], dim=-1))
+            if self.h_input == "isotypes_batch":
+                if batch_index is None:
+                    raise ValueError("h_input='isotypes_batch' needs batch_index.")
+                extra = F.one_hot(batch_index.reshape(-1).long(), self.n_batch).to(y.dtype)
+                extra = extra.expand(*y_iso.shape[:-1], self.n_batch)
+            else:
+                extra = log_total
+            h_out = self.h_net(torch.cat([torch.log1p(y_iso), extra], dim=-1))
             k = self.n_nuisance
             qh = Normal(h_out[..., :k], F.softplus(h_out[..., k:]) + 1e-4)
         return qc, qh

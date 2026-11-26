@@ -291,6 +291,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     n_nuisance
         Dimension of the per-cell nonspecific-binding latent in
         ``protein_noise_model="ambient_isotype"``.
+    nuisance_h_input
+        ``EXPERIMENTAL``. Inputs of the encoder for ``h`` in ``"ambient_isotype"``, besides the
+        isotype counts: ``"isotypes_total"`` (default) the log total over all proteins,
+        ``"isotypes_batch"`` a one-hot batch, so target counts cannot reach ``h``. In a public
+        CITE-seq benchmark (five data sets, IgG1 control hidden, 3 seeds each), ``"isotypes_batch"``
+        did not clean the hidden control better in four 10x sets and did worse on Mule 2022, so
+        keep the default.
     native_form
         Native signal in ``"ambient_isotype"``: ``"scale"`` (default) ``S = exp(alpha) f``,
         or ``"excess"`` ``S = exp(alpha) (f - 1)``.
@@ -375,6 +382,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         seed_background_prior_from_ambient: bool = False,
         ambient_burden_prior: tuple[float, float] = (0.0, 2.0),
         n_nuisance: int = 1,
+        nuisance_h_input: Literal["isotypes_total", "isotypes_batch"] = "isotypes_total",
         native_form: Literal["scale", "excess"] = "scale",
         background_mixing_reg: float = 1e-3,
         learn_ambient_profile: bool = False,
@@ -553,6 +561,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             seed_background_prior_from_ambient=seed_background_prior_from_ambient,
             ambient_burden_prior=ambient_burden_prior,
             n_nuisance=n_nuisance,
+            nuisance_h_input=nuisance_h_input,
             native_form=native_form,
             background_mixing_reg=background_mixing_reg,
             learn_ambient_profile=learn_ambient_profile,
@@ -1206,6 +1215,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         seed_background_prior_from_ambient,
         ambient_burden_prior,
         n_nuisance,
+        nuisance_h_input="isotypes_total",
         native_form="scale",
         background_mixing_reg=1e-3,
         learn_ambient_profile=False,
@@ -1289,6 +1299,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             isotype_mask=isotype_mask,
             ambient_burden_prior=tuple(ambient_burden_prior),
             n_nuisance=n_nuisance,
+            nuisance_h_input=nuisance_h_input,
             native_form=native_form,
             background_mixing_reg=background_mixing_reg,
             learn_ambient_profile=learn_ambient_profile,
