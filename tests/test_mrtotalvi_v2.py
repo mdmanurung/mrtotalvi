@@ -943,9 +943,27 @@ def test_counterfactual_latent_schema_order_and_v2_only_contract():
     assert singleton_support["target_support"].sel(target_sample="sample_1").item()
 
 
-def test_counterfactual_latent_posterior_is_batch_target_and_subset_invariant():
+def _promote_to_float64(model):
+    """Run the module in float64: cast parameters and every float input of a parameterized layer."""
+    model.module.double()
+
+    def _to64(_module, args):
+        return tuple(a.double() if torch.is_tensor(a) and a.is_floating_point() else a for a in args)
+
+    for layer in model.module.modules():
+        if next(layer.parameters(recurse=False), None) is not None:
+            layer.register_forward_pre_hook(_to64)
+
+
+# float64 checks the invariance itself: full and subset runs agree exactly before the final
+# float32 cast. float32 is a smoke test: batch and chunk sizes change the kernel's summation
+# order, and CI saw gaps up to 3.45e-5, so its cross-batch tolerance is 1e-4.
+@pytest.mark.parametrize(("precision", "cross_tol"), [("float64", 1e-6), ("float32", 1e-4)])
+def test_counterfactual_latent_posterior_is_batch_target_and_subset_invariant(precision, cross_tol):
     """Counter-keyed posterior draws and full-universe centering are partition invariant."""
     model, adata = _make_v2_model()
+    if precision == "float64":
+        _promote_to_float64(model)
     indices = np.asarray([5, 0, 7, 2])
     full = model.get_counterfactual_latent(
         adata=adata,
@@ -967,19 +985,18 @@ def test_counterfactual_latent_posterior_is_batch_target_and_subset_invariant():
         target_chunk_size=1,
         random_state=42,
     )
-    # batch_size 4 vs 1 changes float32 summation order; CI saw 2e-6 absolute differences.
     torch.testing.assert_close(
         torch.as_tensor(full["u"].to_numpy()),
         torch.as_tensor(subset["u"].to_numpy()),
-        rtol=1e-5,
-        atol=1e-5,
+        rtol=cross_tol,
+        atol=cross_tol,
     )
     for variable in ("eps_raw", "eps_centered", "z"):
         np.testing.assert_allclose(
             full[variable].sel(target_sample=["sample_2", "sample_0"]).to_numpy(),
             subset[variable].to_numpy(),
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=cross_tol,
+            atol=cross_tol,
         )
 
     np.testing.assert_allclose(
@@ -1016,8 +1033,8 @@ def test_counterfactual_latent_posterior_is_batch_target_and_subset_invariant():
     np.testing.assert_allclose(
         full["u"].sel(cell_name=reordered.cell_name).to_numpy(),
         reordered["u"].to_numpy(),
-        rtol=1e-6,
-        atol=1e-6,
+        rtol=cross_tol,
+        atol=cross_tol,
     )
 
     with pytest.raises(ValueError, match="strictly increasing"):
