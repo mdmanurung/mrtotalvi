@@ -101,3 +101,14 @@ def test_invalid_size_factor_raises(fitted):
     model, adata = fitted
     with pytest.raises(ValueError, match="size_factor"):
         _decompose(model, adata, size_factor="median")
+
+
+def test_zero_median_total_raises(fitted):
+    model, adata = fitted
+    adata = adata.copy()
+    protein = adata.obsm["protein"].copy()
+    # More than half the cells are empty, so the median is 0; the requested cell is not.
+    protein.iloc[10:] = 0
+    adata.obsm["protein"] = protein
+    with pytest.raises(ValueError, match="positive median total ADT count"):
+        _decompose(model, adata, indices=np.array([0, 1]), size_factor="total_adt")

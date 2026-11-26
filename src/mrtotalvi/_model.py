@@ -1482,7 +1482,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             counts = np.where(available, counts, 0.0)
         total = counts.sum(axis=1)
         # Zero totals stay in the median; only requested cells with a zero total raise.
-        return total / np.median(total)
+        median = np.median(total)
+        if median <= 0:
+            raise ValueError('size_factor="total_adt" needs a positive median total ADT count; the median is 0.')
+        return total / median
 
     def get_aggregated_posterior(
         self,
