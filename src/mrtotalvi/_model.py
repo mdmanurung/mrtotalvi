@@ -294,7 +294,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     nuisance_h_input
         ``EXPERIMENTAL``. Inputs of the encoder for ``h`` in ``"ambient_isotype"``, besides the
         isotype counts: ``"isotypes_total"`` (default) the log total over all proteins,
-        ``"isotypes_batch"`` a one-hot batch, so target counts cannot reach ``h``.
+        ``"isotypes_batch"`` a one-hot batch, so target counts cannot reach ``h``. In a public
+        CITE-seq benchmark (five data sets, IgG1 control hidden, 3 seeds each), ``"isotypes_batch"``
+        did not clean the hidden control better in four 10x sets and did worse on Mule 2022, so
+        keep the default.
     native_form
         Native signal in ``"ambient_isotype"``: ``"scale"`` (default) ``S = exp(alpha) f``,
         or ``"excess"`` ``S = exp(alpha) (f - 1)``.

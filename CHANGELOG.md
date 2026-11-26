@@ -10,6 +10,10 @@
   Defaults follow GloScope 2.1.2, except full-covariance mixtures (scikit-learn has no `VVE`) and
   Monte Carlo draws made once per sample rather than once per pair.
 
+- `nuisance_h_input` (EXPERIMENTAL, default `"isotypes_total"`): `"isotypes_batch"` feeds the `h` encoder the
+  isotype counts and a one-hot batch instead of the all-protein log total. In a public CITE-seq benchmark with the
+  IgG1 control hidden, it did not improve cleaning of the hidden control and did worse on Mulè 2022; keep the default.
+
 - Opt-in `learn_ambient_profile` (EXPERIMENTAL): the ambient composition becomes `softmax(logits)`, started at
   the profile, with the cell-free droplets' multinomial likelihood as a global penalty. `AmbientProfile` keeps
   `droplet_counts`. On the ADR-0012 simulation it gave no clear gain (native log1p RMSE 0.267 vs 0.282 per-batch,
