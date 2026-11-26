@@ -4,6 +4,13 @@
 
 ### Added
 
+- `protein_likelihood_weight` (EXPERIMENTAL, default `1.0`, which leaves training unchanged): a saved
+  constructor argument that multiplies the protein reconstruction term and the protein background terms
+  (background KL, efficiency prior, mixing regulariser) by `w`. scvi-tools scales the reconstruction only. Both
+  terms stay annealed with `kl_weight` in warm-up. With `w != 1` the objective is no longer an ELBO;
+  `elbo_validation` stays unweighted and remains the early-stopping monitor. `w` must be finite and above 0.
+  A `pro_recons_weight` in `plan_kwargs` that differs from a non-default `w` raises `ValueError`.
+
 - `get_protein_noise_decomposition(readout="posterior")`: EXPERIMENTAL, opt-in readout of the posterior expected
   native count given the observed counts, `E[native | y, z]`, for `protein_noise_model="totalvi"`. Per draw it is
   `r * y * share`, with `r` the foreground responsibility under the NB mixture. Two keyword-only settings,

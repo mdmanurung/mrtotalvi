@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 
 import numpy as np
 import torch
@@ -188,6 +189,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         kl_z_weight: float = 1.0,
         residual_prior_mode: str = "raw_mean",
         anneal_protein_likelihood: bool = True,
+        protein_likelihood_weight: float = 1.0,
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
@@ -263,6 +265,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # True (upstream TOTALVI) scales the protein likelihood by kl_weight during
         # warm-up; False anneals only the KL terms, as the TOTALVI paper describes.
         self.anneal_protein_likelihood = bool(anneal_protein_likelihood)
+        # Scales the protein reconstruction and the protein background terms (EXPERIMENTAL).
+        self.protein_likelihood_weight = float(protein_likelihood_weight)
+        if not (math.isfinite(self.protein_likelihood_weight) and self.protein_likelihood_weight > 0):
+            raise ValueError(f"protein_likelihood_weight must be finite and > 0; got {protein_likelihood_weight!r}.")
         # Counterfactual u-invariance penalty (see u_invariance_penalty); 0 disables it.
         self.u_invariance_weight = float(u_invariance_weight)
         if self.u_invariance_weight < 0:
@@ -913,12 +919,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # loss() rebuilds the training loss from the per-cell terms below, so this
         # scalar only keeps the LossOutput complete for direct callers.
         protein_weight = kl_weight if self.anneal_protein_likelihood else 1.0
+        w_pro = self.protein_likelihood_weight
         loss = torch.mean(
             reconst_loss_gene
-            + protein_weight * pro_recons_weight * reconst_loss_protein
+            + protein_weight * pro_recons_weight * w_pro * reconst_loss_protein
             + kl_weight * kl_div_z
             + kl_div_l_gene
-            + kl_weight * kl_div_back_pro
+            + kl_weight * w_pro * kl_div_back_pro
         )
         # Average the Monte-Carlo dimension so every per-cell term is (batch,).
         # Otherwise LossOutput reads n_samples as n_obs_minibatch, and compute_elbo
@@ -1051,12 +1058,20 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             )
 
         protein_weight = kl_weight if self.anneal_protein_likelihood else 1.0
+        w_pro = self.protein_likelihood_weight
         if "eps" not in inference_outputs:
             # Hierarchy not built (n_sample=0 placeholder). The parent loss annealed the
             # protein term with kl_weight; add the rest back when it should not.
             if not self.anneal_protein_likelihood:
                 loss_out.loss = loss_out.loss + (1 - kl_weight) * pro_recons_weight * (
                     loss_out.reconstruction_loss["reconst_loss_protein"].mean()
+                )
+            if w_pro != 1.0:
+                # The parent loss (scvi) weights only the reconstruction; the weighted protein
+                # terms stay annealed with kl_weight as in the hierarchy path.
+                loss_out.loss = loss_out.loss + (w_pro - 1.0) * (
+                    protein_weight * pro_recons_weight * loss_out.reconstruction_loss["reconst_loss_protein"].mean()
+                    + kl_weight * loss_out.kl_local["kl_div_back_pro"].mean()
                 )
             return loss_out
 
@@ -1106,10 +1121,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             prefactors = self.n_obs_per_sample[sample_index]  # (batch,)
             per_cell = (
                 loss_out.reconstruction_loss["reconst_loss_gene"]
-                + protein_weight * pro_recons_weight * loss_out.reconstruction_loss["reconst_loss_protein"]
+                + protein_weight * pro_recons_weight * w_pro * loss_out.reconstruction_loss["reconst_loss_protein"]
                 + kl_weight * kl_local["kl_div_z"]
                 + kl_local["kl_div_l_gene"]
-                + kl_weight * kl_local["kl_div_back_pro"]
+                + kl_weight * w_pro * kl_local["kl_div_back_pro"]
             )
             if self.hierarchy_mode == "centered_v2":
                 weights = self.n_obs_per_sample.sum() / (self._n_sample * prefactors)
@@ -1129,10 +1144,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 )
             loss = (
                 loss_out.reconstruction_loss["reconst_loss_gene"]
-                + protein_weight * pro_recons_weight * loss_out.reconstruction_loss["reconst_loss_protein"]
+                + protein_weight * pro_recons_weight * w_pro * loss_out.reconstruction_loss["reconst_loss_protein"]
                 + kl_weight * kl_local["kl_div_z"]
                 + kl_local["kl_div_l_gene"]
-                + kl_weight * kl_local["kl_div_back_pro"]
+                + kl_weight * w_pro * kl_local["kl_div_back_pro"]
             ).mean()
 
         if self.u_invariance_weight > 0 and self.training:
