@@ -967,18 +967,19 @@ def test_counterfactual_latent_posterior_is_batch_target_and_subset_invariant():
         target_chunk_size=1,
         random_state=42,
     )
+    # batch_size 4 vs 1 changes float32 summation order; CI saw 2e-6 absolute differences.
     torch.testing.assert_close(
         torch.as_tensor(full["u"].to_numpy()),
         torch.as_tensor(subset["u"].to_numpy()),
-        rtol=1e-6,
-        atol=1e-6,
+        rtol=1e-5,
+        atol=1e-5,
     )
     for variable in ("eps_raw", "eps_centered", "z"):
         np.testing.assert_allclose(
             full[variable].sel(target_sample=["sample_2", "sample_0"]).to_numpy(),
             subset[variable].to_numpy(),
-            rtol=1e-6,
-            atol=1e-6,
+            rtol=1e-5,
+            atol=1e-5,
         )
 
     np.testing.assert_allclose(
