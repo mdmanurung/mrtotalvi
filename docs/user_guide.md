@@ -582,8 +582,9 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   `kl_div_back_pro`; under `"totalvi"` those terms are 0. Whether to scale them is an open choice.
 - **`n_latent_protein_residual` and `protein_residual_heads` (EXPERIMENTAL).** Saved constructor arguments.
   The default `n_latent_protein_residual=0` is off and changes nothing. A value `n > 0` adds a protein
-  residual latent `w` of `n` dimensions. Its encoder `q(w | y)` sees the protein counts only (no donor, batch
-  or covariate), the prior is `N(0, I)` with weight 1, annealed with `kl_weight` like `kl_z`, and `w` is
+  residual latent `w` of `n` dimensions. Its encoder `q(w | y)` sees the protein counts only (no batch or covariate;
+  no donor unless `protein_residual_encoder_input="protein_sample"`, which adds the real donor by the
+  u-encoder's sample-conditioned mechanism), the prior is `N(0, I)` with weight 1, annealed with `kl_weight` like `kl_z`, and `w` is
   sampled in training. `protein_residual_heads="fore_mixing"` lets the foreground and mixing heads read
   `[z, w]`; `"all"` adds the background head. There is no package default for the heads: `"fore_mixing"` only
   makes the signature valid. The RNA scale never reads `w`. Counterfactual and DE decodes set `w = 0`;

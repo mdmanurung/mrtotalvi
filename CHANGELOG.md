@@ -6,12 +6,14 @@
 
 - `n_latent_protein_residual` and `protein_residual_heads` (EXPERIMENTAL, default `0`, which is off and leaves every
   output byte-identical): a saved protein residual latent `w` next to `z`. `q(w | y)` reads the protein counts only
-  (`log1p`, no donor, batch or covariate input), `p(w) = N(0, I)` with KL weight 1 annealed with `kl_weight` like
+  (`log1p`, no batch or covariate input; sample-blind by default), `p(w) = N(0, I)` with KL weight 1 annealed with `kl_weight` like
   `kl_z`, and `w` is drawn during training. The protein heads chosen by `protein_residual_heads` (`"fore_mixing"`
   or `"all"`, no package default) read `[z, w]`; the RNA heads read `z` only. The loss gains `kl_div_w`, and each
   epoch logs `kl_w` and `protein_residual_active_units`. Counterfactual and DE decodes use `w = 0`; the protein
   noise decomposition and the posterior readout decode each cell's own draws of `q(w)`. Only
-  `protein_noise_model="totalvi"` is supported (other modes raise `NotImplementedError`). Under
+  `protein_noise_model="totalvi"` is supported (other modes raise `NotImplementedError`). A third saved
+  argument, `protein_residual_encoder_input` (`"protein"` default, or `"protein_sample"`), also feeds the real donor
+  to `q(w | y)` by the u-encoder's sample-conditioned mechanism; no package default, P2.5 tests both. Under
   `gene_likelihood="zinb"` `w` reaches the RNA dropout through the shared mixing trunk; the RNA scale is unchanged.
 
 - `protein_likelihood_weight` (EXPERIMENTAL, default `1.0`, which leaves training unchanged): a saved

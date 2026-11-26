@@ -166,6 +166,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     protein_residual_heads
         Which protein heads read ``[z, w]``: ``"fore_mixing"`` or ``"all"``. See
         :class:`~mrtotalvi.MrTotalVI`.
+    protein_residual_encoder_input
+        ``"protein"`` (default) or ``"protein_sample"``. See :class:`~mrtotalvi.MrTotalVI`.
     **kwargs
         All remaining keyword arguments forwarded verbatim to
         :class:`~scvi.module._totalvae.TOTALVAE`.
@@ -206,6 +208,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         protein_likelihood_weight: float = 1.0,
         n_latent_protein_residual: int = 0,
         protein_residual_heads: str = "fore_mixing",
+        protein_residual_encoder_input: str = "protein",
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
@@ -228,6 +231,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             raise ValueError(
                 f"n_latent_protein_residual must be a whole number >= 0; got {n_latent_protein_residual!r}."
             )
+        if protein_residual_encoder_input not in {"protein", "protein_sample"}:
+            raise ValueError("protein_residual_encoder_input must be one of {'protein', 'protein_sample'}.")
         if protein_residual_heads not in PROTEIN_RESIDUAL_HEADS:
             raise ValueError(f"protein_residual_heads must be one of {sorted(PROTEIN_RESIDUAL_HEADS)}.")
         if u_prior not in {"standard", "mog", "vamp"}:
@@ -260,6 +265,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # Protein residual latent w (EXPERIMENTAL); read by ``_build_decoder`` below.
         self.n_latent_protein_residual = int(n_latent_protein_residual)
         self.protein_residual_heads = protein_residual_heads
+        self.protein_residual_encoder_input = protein_residual_encoder_input
 
         # Store hyperparams so _setup_hierarchy can use them if called deferred
         self._n_sample = n_sample
@@ -532,6 +538,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         )
 
         # Isomorphic dims (n_latent_u=None) → z_base = u, decoder unchanged
+        if self.n_latent_protein_residual > 0 and self.protein_residual_encoder_input == "protein_sample":
+            # The donor table needs n_sample, which is known only here; replace the sample-blind encoder.
+            self.qw = ProteinResidualEncoder(
+                self.n_input_proteins,
+                self.n_latent_protein_residual,
+                n_hidden=self.qw.fc1.out_features,
+                n_sample=n_sample,
+            )
+
         self.qz = EncoderUZ(
             n_latent=self.n_latent,
             n_sample=n_sample,
@@ -809,9 +824,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         )
 
         if self.n_latent_protein_residual > 0:
-            # q(w | y): protein counts only, no donor or batch input (sample-blind). One draw per
+            # q(w | y): protein counts only, plus the real donor when protein_residual_encoder_input is
+            # 'protein_sample' (never the counterfactual donor). One draw per
             # Monte-Carlo draw of z, so the loss averages over w as it does over u.
-            qw = self.qw(y)
+            qw = self.qw(y, sample_index)
             out["qw"] = qw
             out["w"] = qw.rsample((n_samples,)) if n_samples > 1 else qw.rsample()
 

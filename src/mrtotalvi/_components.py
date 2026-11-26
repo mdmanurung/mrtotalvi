@@ -1231,24 +1231,47 @@ class EncoderUZ(nn.Module):
 
 
 class ProteinResidualEncoder(nn.Module):
-    """Sample-blind encoder ``q(w | y)`` of the protein residual latent ``w`` (EXPERIMENTAL).
+    """Encoder ``q(w | y)`` of the protein residual latent ``w`` (EXPERIMENTAL).
 
     The input is the protein counts only, passed through ``log1p`` as the u-encoder does for its
-    protein block. No RNA, no batch, no covariate and no donor index reaches it. Two
+    protein block. No RNA, no batch and no covariate reaches it.
+
+    With ``n_sample=0`` (``protein_residual_encoder_input="protein"``) the encoder is sample-blind: two
     ``Linear -> LayerNorm -> GELU`` layers feed :class:`NormalDistOutputNN`.
+
+    With ``n_sample > 0`` (``"protein_sample"``) the donor enters by the mechanism of
+    :class:`EncoderXU_TotalVI` in ``u_encoder_mode="sample_conditioned"``: each hidden layer is
+    followed by a :class:`ConditionalNormalization` conditioned on the donor, and a donor embedding is
+    added to the last hidden layer before the output network.
     """
 
-    def __init__(self, n_proteins: int, n_latent: int, n_hidden: int = 128, n_layers: int = 1):
+    def __init__(self, n_proteins: int, n_latent: int, n_hidden: int = 128, n_layers: int = 1, n_sample: int = 0):
         super().__init__()
+        self.n_sample = int(n_sample)
+        # Layers are registered in the order fc1, norm1, fc2, norm2 so the sample-blind default keeps its
+        # parameter order (and so its state-dict hash) from before the donor option existed.
         self.fc1 = nn.Linear(n_proteins, n_hidden)
-        self.norm1 = nn.LayerNorm(n_hidden)
+        if self.n_sample > 0:
+            self.cond_norm1 = ConditionalNormalization(n_hidden, self.n_sample)
+        else:
+            self.norm1 = nn.LayerNorm(n_hidden)
         self.fc2 = nn.Linear(n_hidden, n_hidden)
-        self.norm2 = nn.LayerNorm(n_hidden)
+        if self.n_sample > 0:
+            self.cond_norm2 = ConditionalNormalization(n_hidden, self.n_sample)
+            self.sample_embed = nn.Embedding(self.n_sample, n_hidden)
+            init.normal_(self.sample_embed.weight, std=0.1)
+        else:
+            self.norm2 = nn.LayerNorm(n_hidden)
         self.output_nn = NormalDistOutputNN(n_hidden, n_latent, n_hidden, n_layers)
 
     @auto_move_data
-    def forward(self, y: torch.Tensor) -> Normal:
-        x = _gelu(self.norm1(self.fc1(torch.log1p(y))))
+    def forward(self, y: torch.Tensor, sample_index: torch.Tensor | None = None) -> Normal:
+        x = self.fc1(torch.log1p(y))
+        if self.n_sample > 0:
+            x = _gelu(self.cond_norm1(x, sample_index))
+            x = _gelu(self.cond_norm2(self.fc2(x), sample_index))
+            return self.output_nn(x + self.sample_embed(sample_index.squeeze(-1).to(torch.int64)))
+        x = _gelu(self.norm1(x))
         x = _gelu(self.norm2(self.fc2(x)))
         return self.output_nn(x)
 

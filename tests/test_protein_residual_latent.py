@@ -93,7 +93,7 @@ class _FixedQw(torch.nn.Module):
         super().__init__()
         self.loc, self.n_w = loc, n_w
 
-    def forward(self, y):
+    def forward(self, y, sample_index=None):
         shape = (y.shape[0], self.n_w)
         return Normal(torch.full(shape, self.loc), torch.ones(shape))
 
@@ -336,3 +336,54 @@ def test_embedded_batch_layout_matches_between_factual_and_counterfactual_decode
 def test_z_base_background_source_raises_at_model_construction():
     with pytest.raises(NotImplementedError, match="n_latent_protein_residual"):
         _model(protein_background_source="z_base")
+
+
+# -- encoder input: protein only, or protein plus donor (G121) -------------------------------
+
+
+def _qw_mean(module, tensors, sample):
+    inputs = module._get_inference_input(tensors)
+    inputs["sample_index"] = torch.full_like(inputs["sample_index"], sample)
+    with torch.no_grad():
+        return module.inference(**inputs)["qw"].loc
+
+
+def test_default_encoder_input_is_protein_and_ignores_the_sample():
+    model = _model()
+    assert model.init_params_["non_kwargs"]["protein_residual_encoder_input"] == "protein"
+    module, tensors, _, _ = _outputs(model)
+    assert torch.equal(_qw_mean(module, tensors, 0), _qw_mean(module, tensors, 1))
+
+
+@pytest.mark.parametrize("path", ["legacy", "centered_v2"])
+def test_protein_sample_encoder_input_depends_on_the_sample(path):
+    model = _model(path, protein_residual_encoder_input="protein_sample")
+    module, tensors, _, _ = _outputs(model)
+    assert not torch.equal(_qw_mean(module, tensors, 0), _qw_mean(module, tensors, 1))
+
+
+def test_protein_sample_round_trips_and_counterfactual_ignores_w(tmp_path):
+    model = _model("centered_v2", protein_residual_encoder_input="protein_sample")
+    assert model.init_params_["non_kwargs"]["protein_residual_encoder_input"] == "protein_sample"
+    model.is_trained_ = True
+    model.save(tmp_path / "m", overwrite=True)
+    loaded = MrTotalVI.load(tmp_path / "m", adata=model.adata)
+    assert loaded.module.protein_residual_encoder_input == "protein_sample"
+    for (k1, v1), (k2, v2) in zip(model.module.state_dict().items(), loaded.module.state_dict().items(), strict=True):
+        assert k1 == k2
+        assert torch.equal(v1.cpu(), v2.cpu())
+    first = model.get_counterfactual_expression(model.adata)
+    model.module.qw = _FixedQw(8.0)
+    second = model.get_counterfactual_expression(model.adata)
+    for key in first.data_vars:
+        np.testing.assert_array_equal(first[key].to_numpy(), second[key].to_numpy())
+
+
+def test_protein_sample_trains_and_logs():
+    model = _fit(max_epochs=2, protein_residual_encoder_input="protein_sample")
+    assert "kl_w_train" in model.history
+
+
+def test_invalid_encoder_input_raises():
+    with pytest.raises(ValueError, match="protein_residual_encoder_input"):
+        _model(protein_residual_encoder_input="protein_rna")
