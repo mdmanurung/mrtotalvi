@@ -241,6 +241,37 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Whether to scale them is an open choice. The weight is saved in ``init_params_``. Do not also pass
         a different ``pro_recons_weight`` in ``plan_kwargs``: that raises ``ValueError``. Checkpoints without
         it load with ``1.0``.
+    n_latent_protein_residual
+        **EXPERIMENTAL.** ``0`` (default) is off: no module is built and every output stays byte-identical.
+        ``n > 0`` adds an ``n``-dimensional protein residual latent ``w`` (the P2.5 comparison uses 10) next to
+        ``z``. The encoder ``q(w | y)`` reads the protein counts only, through the same ``log1p`` as the
+        u-encoder, and has no batch or covariate input; the donor enters only with
+        ``protein_residual_encoder_input="protein_sample"``. The prior is ``p(w) = N(0, I)``
+        with KL weight 1, annealed with ``kl_weight`` like ``kl_z``. ``w`` is drawn at training time, as ``u``
+        is. The decoder heads set by ``protein_residual_heads`` read ``[z, w]``; the RNA heads read ``z`` only.
+        The loss gains ``kl_div_w`` (in ``kl_local``). Each epoch logs ``kl_w_<train|validation>`` and
+        ``protein_residual_active_units_<train|validation>``. Counterfactual and DE decodes read ``w = 0``
+        (``get_counterfactual_expression``, ``differential_expression``), so they decode from ``z`` only.
+        ``get_protein_noise_decomposition``, ``get_normalized_expression`` and the posterior readout decode
+        each cell's own draws of ``q(w)``. Only ``protein_noise_model="totalvi"`` with the default background
+        source and encoder input is supported; other settings raise ``NotImplementedError``. Under
+        ``gene_likelihood="zinb"`` ``w`` reaches the RNA dropout through ``sigmoid_decoder``, which the
+        protein mixing head shares with that dropout head. The RNA scale never depends on ``w``, and ``"nb"``
+        ignores the dropout. The leak is documented, not blocked. ``w`` can collapse (``kl_w`` near 0, no active
+        units) or can absorb the protein signal (large ``kl_w``), so check both logged metrics. Saved in
+        ``init_params_``; checkpoints without it load with ``0``.
+    protein_residual_heads
+        **EXPERIMENTAL.** Used only with ``n_latent_protein_residual > 0``. ``"fore_mixing"``: the foreground
+        and mixing heads read ``[z, w]``. ``"all"``: the background head reads ``[z, w]`` too. No package
+        default exists for this choice: ``"fore_mixing"`` only makes the signature valid, and the P2.5
+        comparison tests both values. Saved in ``init_params_``.
+    protein_residual_encoder_input
+        **EXPERIMENTAL.** Used only with ``n_latent_protein_residual > 0``. ``"protein"`` (default): ``q(w | y)``
+        is sample-blind. ``"protein_sample"``: the real donor also enters ``q(w | y)``, by the mechanism of
+        the u-encoder in ``u_encoder_mode="sample_conditioned"`` (donor-conditioned normalisation after each
+        hidden layer plus a donor embedding on the last one). The counterfactual donor never reaches it.
+        Counterfactual and DE decodes still use ``w = 0``. The P2.5 comparison tests both values. Saved in
+        ``init_params_``; checkpoints without it load with ``"protein"``.
     init_prior_from_data
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
@@ -385,6 +416,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         residual_prior_mode: Literal["raw_mean", "factual"] = "raw_mean",
         anneal_protein_likelihood: bool = True,
         protein_likelihood_weight: float = 1.0,
+        n_latent_protein_residual: int = 0,
+        protein_residual_heads: Literal["fore_mixing", "all"] = "fore_mixing",
+        protein_residual_encoder_input: Literal["protein", "protein_sample"] = "protein",
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -446,6 +480,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             raise ValueError("freeze_prior_after_init=True requires data-initialized u_prior='vamp'.")
         if hierarchy_mode not in {"legacy", "centered_v2"}:
             raise ValueError("hierarchy_mode must be one of {'legacy', 'centered_v2'}.")
+        if n_latent_protein_residual and protein_noise_model != "totalvi":
+            raise NotImplementedError(
+                "n_latent_protein_residual > 0 is only implemented for protein_noise_model='totalvi'; "
+                f"got {protein_noise_model!r}."
+            )
         if learn_z_u_prior_scale and use_map:
             warnings.warn(
                 "learn_z_u_prior_scale=True with use_map=True shrinks pz_scale and eps "
@@ -523,6 +562,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             residual_prior_mode=residual_prior_mode,
             anneal_protein_likelihood=anneal_protein_likelihood,
             protein_likelihood_weight=protein_likelihood_weight,
+            n_latent_protein_residual=n_latent_protein_residual,
+            protein_residual_heads=protein_residual_heads,
+            protein_residual_encoder_input=protein_residual_encoder_input,
             use_batch_norm=use_batch_norm,
             use_layer_norm=use_layer_norm,
             batch_representation=batch_representation,
@@ -1434,7 +1476,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         draws of ``z`` from its posterior. ``observed`` is the fitted expected total count
         (the sum of the three components, the mixture mean), not the measured count.
         ``foreground_probability`` is the decoder mixture weight ``1 - pi``, not the
-        posterior probability of foreground given the observed counts ``y``. Isotype
+        posterior probability of foreground given the observed counts ``y``. With
+        ``n_latent_protein_residual > 0`` these factual readouts (``decoder`` and
+        ``posterior``) decode each cell's own draws of ``q(w)``, one per draw of ``z``;
+        they do not set ``w = 0``. Isotype
         controls are dropped from the protein columns. Proteins not measured in a
         cell's panel are ``NaN``.
 

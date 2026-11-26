@@ -580,6 +580,20 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   `plan_kwargs["pro_recons_weight"]`, which raises if it differs. Under `protein_noise_model="ambient"` or
   `"ambient_isotype"` the weight also scales the nuisance KL terms (`qc`, `qh`), because they sit in
   `kl_div_back_pro`; under `"totalvi"` those terms are 0. Whether to scale them is an open choice.
+- **`n_latent_protein_residual` and `protein_residual_heads` (EXPERIMENTAL).** Saved constructor arguments.
+  The default `n_latent_protein_residual=0` is off and changes nothing. A value `n > 0` adds a protein
+  residual latent `w` of `n` dimensions. Its encoder `q(w | y)` sees the protein counts only (no batch or covariate;
+  no donor unless `protein_residual_encoder_input="protein_sample"`, which adds the real donor by the
+  u-encoder's sample-conditioned mechanism), the prior is `N(0, I)` with weight 1, annealed with `kl_weight` like `kl_z`, and `w` is
+  sampled in training. `protein_residual_heads="fore_mixing"` lets the foreground and mixing heads read
+  `[z, w]`; `"all"` adds the background head. There is no package default for the heads: `"fore_mixing"` only
+  makes the signature valid. The RNA scale never reads `w`. Counterfactual and DE decodes set `w = 0`;
+  `get_protein_noise_decomposition` (both readouts) and `get_normalized_expression` use each cell's own
+  draws. Each epoch logs `kl_w` and `protein_residual_active_units` (`<name>_train` and `<name>_validation`):
+  a `kl_w` near 0 with no active units means `w` collapsed, a large `kl_w` means it absorbs the protein
+  signal. Only `protein_noise_model="totalvi"` is supported. With `gene_likelihood="zinb"` the RNA dropout
+  head shares `sigmoid_decoder` with the protein mixing head, so `w` reaches the dropout; this is documented,
+  not blocked, and `"nb"` is unaffected.
 
 Protein scale in inherited methods. The loss fits protein counts with means
 `per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that

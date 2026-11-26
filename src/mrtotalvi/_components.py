@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 import torch
 import torch.nn.functional as F
 from scvi.module.base import auto_move_data
+from scvi.nn import DecoderTOTALVI
 from torch import nn
 from torch.distributions import Categorical, Independent, MixtureSameFamily, Normal, kl_divergence
 from torch.nn import init
@@ -1227,6 +1228,148 @@ class EncoderUZ(nn.Module):
         else:
             # Isomorphic: z_base = u (preserves decoder input unchanged)
             return u, residual, eps_dist
+
+
+class ProteinResidualEncoder(nn.Module):
+    """Encoder ``q(w | y)`` of the protein residual latent ``w`` (EXPERIMENTAL).
+
+    The input is the protein counts only, passed through ``log1p`` as the u-encoder does for its
+    protein block. No RNA, no batch and no covariate reaches it.
+
+    With ``n_sample=0`` (``protein_residual_encoder_input="protein"``) the encoder is sample-blind: two
+    ``Linear -> LayerNorm -> GELU`` layers feed :class:`NormalDistOutputNN`.
+
+    With ``n_sample > 0`` (``"protein_sample"``) the donor enters by the mechanism of
+    :class:`EncoderXU_TotalVI` in ``u_encoder_mode="sample_conditioned"``: each hidden layer is
+    followed by a :class:`ConditionalNormalization` conditioned on the donor, and a donor embedding is
+    added to the last hidden layer before the output network.
+    """
+
+    def __init__(self, n_proteins: int, n_latent: int, n_hidden: int = 128, n_layers: int = 1, n_sample: int = 0):
+        super().__init__()
+        self.n_sample = int(n_sample)
+        # Layers are registered in the order fc1, norm1, fc2, norm2 so the sample-blind default keeps its
+        # parameter order (and so its state-dict hash) from before the donor option existed.
+        self.fc1 = nn.Linear(n_proteins, n_hidden)
+        if self.n_sample > 0:
+            self.cond_norm1 = ConditionalNormalization(n_hidden, self.n_sample)
+        else:
+            self.norm1 = nn.LayerNorm(n_hidden)
+        self.fc2 = nn.Linear(n_hidden, n_hidden)
+        if self.n_sample > 0:
+            self.cond_norm2 = ConditionalNormalization(n_hidden, self.n_sample)
+            self.sample_embed = nn.Embedding(self.n_sample, n_hidden)
+            init.normal_(self.sample_embed.weight, std=0.1)
+        else:
+            self.norm2 = nn.LayerNorm(n_hidden)
+        self.output_nn = NormalDistOutputNN(n_hidden, n_latent, n_hidden, n_layers)
+
+    @auto_move_data
+    def forward(self, y: torch.Tensor, sample_index: torch.Tensor | None = None) -> Normal:
+        x = self.fc1(torch.log1p(y))
+        if self.n_sample > 0:
+            x = _gelu(self.cond_norm1(x, sample_index))
+            x = _gelu(self.cond_norm2(self.fc2(x), sample_index))
+            return self.output_nn(x + self.sample_embed(sample_index.squeeze(-1).to(torch.int64)))
+        x = _gelu(self.norm1(x))
+        x = _gelu(self.norm2(self.fc2(x)))
+        return self.output_nn(x)
+
+
+# Layers of DecoderTOTALVI grouped by the protein head they belong to.
+PROTEIN_HEAD_LAYERS = {
+    "back": ("py_back_decoder", "py_back_mean_log_alpha", "py_back_mean_log_beta"),
+    "fore": ("py_fore_decoder", "py_fore_scale_decoder"),
+    "mixing": ("sigmoid_decoder", "py_background_decoder"),
+}
+PROTEIN_RESIDUAL_HEADS = {"fore_mixing": ("fore", "mixing"), "all": ("back", "fore", "mixing")}
+
+
+class DecoderTOTALVIResidual(DecoderTOTALVI):
+    """:class:`~scvi.nn.DecoderTOTALVI` whose selected protein heads read ``[z, w]`` (EXPERIMENTAL).
+
+    ``heads="fore_mixing"``: the foreground and mixing heads read ``[z, w]``; ``"all"`` adds the
+    background head. The RNA heads (``px_decoder``, ``px_scale_decoder``) always read ``z`` only,
+    so the RNA scale does not depend on ``w``.
+
+    ``sigmoid_decoder`` is shared by the protein mixing head and, under ``gene_likelihood="zinb"``,
+    by ``px_dropout_decoder_gene``. Under ``"zinb"`` the RNA dropout therefore depends on ``w``
+    through that shared trunk. The decoder does not block this. ``"nb"`` ignores the dropout, so
+    the RNA likelihood does not depend on ``w``.
+
+    ``w`` is not a forward argument, because the call site in scvi's ``TOTALVAE.generative`` is
+    fixed. The owning module sets ``w`` with :meth:`set_residual` around that call. With no ``w``
+    set the decoder reads ``w = 0``.
+    """
+
+    def __init__(
+        self,
+        n_input: int,
+        n_output_genes: int,
+        n_output_proteins: int,
+        n_residual: int,
+        heads: str = "fore_mixing",
+        **kwargs,
+    ):
+        super().__init__(n_input, n_output_genes, n_output_proteins, **kwargs)
+        if heads not in PROTEIN_RESIDUAL_HEADS:
+            raise ValueError(f"heads must be one of {sorted(PROTEIN_RESIDUAL_HEADS)}.")
+        self.n_residual = int(n_residual)
+        self.w_heads = PROTEIN_RESIDUAL_HEADS[heads]
+        self._w: torch.Tensor | None = None
+        # A second decoder with the wider input donates the layers that read w, so the layer
+        # arguments are not restated here.
+        wide = DecoderTOTALVI(n_input + self.n_residual, n_output_genes, n_output_proteins, **kwargs)
+        for head in self.w_heads:
+            for name in PROTEIN_HEAD_LAYERS[head]:
+                setattr(self, name, getattr(wide, name))
+
+    def set_residual(self, w: torch.Tensor | None) -> None:
+        self._w = w
+
+    def with_w(self, head: str, z: torch.Tensor) -> torch.Tensor:
+        """``z`` for a head that ignores ``w``; ``[z, w]`` for a head that reads it (``w = 0`` if unset)."""
+        if head not in self.w_heads:
+            return z
+        w = self._w
+        if w is None:
+            w = z.new_zeros(*z.shape[:-1], self.n_residual)
+        while w.dim() < z.dim():
+            w = w.unsqueeze(0).expand(z.shape[0], *w.shape)
+        return torch.cat([z, w], dim=-1)
+
+    def forward(self, z: torch.Tensor, library_gene: torch.Tensor, *cat_list: int):
+        px_ = {}
+        py_ = {}
+
+        px = self.px_decoder(z, *cat_list)
+        px_cat_z = torch.cat([px, z], dim=-1)
+        px_["scale"] = self.px_scale_activation(self.px_scale_decoder(px_cat_z, *cat_list))
+        px_["rate"] = library_gene * px_["scale"]
+
+        z_back = self.with_w("back", z)
+        py_back = self.py_back_decoder(z_back, *cat_list)
+        py_back_cat_z = torch.cat([py_back, z_back], dim=-1)
+        py_["back_alpha"] = self.py_back_mean_log_alpha(py_back_cat_z, *cat_list)
+        py_["back_beta"] = self.activation_function_bg(self.py_back_mean_log_beta(py_back_cat_z, *cat_list)) + 1e-8
+        log_pro_back_mean = Normal(py_["back_alpha"], py_["back_beta"]).rsample()
+        py_["rate_back"] = torch.exp(log_pro_back_mean)
+
+        z_fore = self.with_w("fore", z)
+        py_fore = self.py_fore_decoder(z_fore, *cat_list)
+        py_fore_cat_z = torch.cat([py_fore, z_fore], dim=-1)
+        py_["fore_scale"] = self.py_fore_scale_decoder(py_fore_cat_z, *cat_list) + 1 + 1e-8
+        py_["rate_fore"] = py_["rate_back"] * py_["fore_scale"]
+
+        z_mixing = self.with_w("mixing", z)
+        p_mixing = self.sigmoid_decoder(z_mixing, *cat_list)
+        px_["dropout"] = self.px_dropout_decoder_gene(torch.cat([p_mixing, z], dim=-1), *cat_list)
+        py_["mixing"] = self.py_background_decoder(torch.cat([p_mixing, z_mixing], dim=-1), *cat_list)
+
+        protein_mixing = 1 / (1 + torch.exp(-py_["mixing"]))
+        py_["scale"] = F.normalize((1 - protein_mixing) * py_["rate_fore"], p=1, dim=-1)
+
+        return (px_, py_, log_pro_back_mean)
 
 
 class AmbientNuisanceEncoder(nn.Module):
