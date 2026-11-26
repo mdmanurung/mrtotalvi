@@ -267,7 +267,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         replaces the decoded background with ``A`` plus a nonspecific term driven by the
         isotype controls, fits the isotype controls with background only, and drops the
         totalVI background prior. Both opt-in modes need ``ambient_profile``;
-        ``"ambient_isotype"`` also needs ``isotype_names``.
+        ``"ambient_isotype"`` also needs ``isotype_names``. Both are EXPERIMENTAL: they
+        were tested on panels of 14-137 antibodies with 2-4 isotype controls, and a
+        held-out isotype control was cleaned in only 0-22% of cells in four 10x sets.
     protein_background_source
         ``"z"`` (default) decodes the protein background from ``z``. ``"z_base"`` decodes
         it from ``z_base(u)``, so a sample counterfactual does not move it.
@@ -1521,6 +1523,14 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         scale_floor
             Minimum kernel scale for ``"scale_floor"`` (about 0.4 calibrated a
             planted-effect test); ``None`` for the other estimators.
+
+        Notes
+        -----
+        The scores are descriptive: they are not a test and carry no p-value. Under an
+        equal-population null, ``"posterior"`` put about 60% of cells beyond a twofold
+        density ratio, while ``"knn"`` and ``"scale_floor"`` put almost none there
+        (``docs/reviews/2026-11-23/abundance_null.png``). For inference, use a
+        donor-level test such as donor pseudobulk with edgeR or miloR.
         """
         adata = self._validate_anndata(adata)
         selected_samples, _ = validate_sample_metadata(
