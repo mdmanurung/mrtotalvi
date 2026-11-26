@@ -412,6 +412,8 @@ native = np.log1p(comp["native"])  # cells x proteins; isotype controls dropped
 dead = comp["native"].max() < 1e-3  # proteins the fit switched off
 ```
 
+For a depth-normalised readout, pass `size_factor="total_adt"`. Each cell’s raw protein total (all registered proteins, isotype controls included, measured proteins only) is divided by the median total over all cells in `adata`, and `native`, `ambient`, `nonspecific` and `observed` are divided by that factor. `foreground_probability` is unchanged, and a cell with a total of 0 raises `ValueError`. The factor comes from noisy raw totals, so it re-adds per-cell depth noise and does not remove composition-driven differences. In PBMC 5’ it cut a 3.45x run gap on CD3 to 1.54x. The default is `None`.
+
 Three checks come from one real data set: macaque PBMC CITE-seq, 137 ADTs, three training seeds. They are not validated defaults.
 
 - **Dead proteins.** A protein whose `native` is about 0 in every cell carries no signal in that fit. In that data set, `protein_noise_model="ambient"` switched off 7 to 14 of 137 proteins per seed (CD8 among them), and `"ambient_isotype"` none.

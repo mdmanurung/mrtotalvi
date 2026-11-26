@@ -4,6 +4,11 @@
 
 ### Added
 
+- `get_protein_noise_decomposition(size_factor="total_adt")`: opt-in depth normalisation. It divides `native`,
+  `ambient`, `nonspecific` and `observed` by each cell's raw protein total over the median total of all cells in
+  `adata`. The default (`None`) output is unchanged. The factor comes from noisy raw totals and does not remove
+  composition-driven differences (PBMC 5': a 3.45x run gap on CD3 became 1.54x).
+
 - `differential_abundance_test`: a donor-level permutation test of differential abundance per cell group
   (for example cell type). Sample labels are permuted, never cells: exact when there are at most 10,000 splits,
   else 9,999 random splits. BH over cell groups; at least 8 samples per level by default. It refuses the
