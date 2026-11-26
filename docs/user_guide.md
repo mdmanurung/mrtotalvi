@@ -563,6 +563,14 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   `anneal_protein_likelihood=False` stops scaling the protein likelihood by
   `kl_weight` during warm-up; by default (upstream TOTALVI) it gets no gradient at
   `kl_weight=0`. Both change training; compare matched-seed fits before relying on either.
+- **`protein_likelihood_weight` (EXPERIMENTAL).** A saved constructor argument, default `1.0` (training
+  unchanged). A value `w` scales the protein reconstruction and the protein background terms (background KL,
+  efficiency prior, mixing regulariser) by `w`; both stay annealed with `kl_weight`. scvi-tools scales the
+  reconstruction only. For `w != 1` the objective is a tempered likelihood and no longer an ELBO, and
+  early stopping still monitors the unweighted `elbo_validation`. Set the weight on the model, not through
+  `plan_kwargs["pro_recons_weight"]`, which raises if it differs. Under `protein_noise_model="ambient"` or
+  `"ambient_isotype"` the weight also scales the nuisance KL terms (`qc`, `qh`), because they sit in
+  `kl_div_back_pro`; under `"totalvi"` those terms are 0. Whether to scale them is an open choice.
 
 Protein scale in inherited methods. The loss fits protein counts with means
 `per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that

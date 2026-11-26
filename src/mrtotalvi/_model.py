@@ -227,6 +227,20 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``kl_weight`` during warm-up, so it gives no gradient at ``kl_weight=0``.
         ``False`` anneals only the KL terms, as the TOTALVI paper describes. It changes
         training; it is opt-in. Checkpoints without it load with ``True``.
+    protein_likelihood_weight
+        **EXPERIMENTAL.** ``1.0`` (default) leaves training unchanged. A value ``w > 0`` multiplies the
+        protein reconstruction term and the protein background terms (the background KL, the efficiency
+        prior and the mixing regulariser in ``kl_div_back_pro``) by ``w``. Both stay annealed with
+        ``kl_weight`` during warm-up, as ``anneal_protein_likelihood`` sets. This departs from scvi-tools,
+        which scales the reconstruction only (``pro_recons_weight``). With ``w != 1`` the training
+        objective is a tempered likelihood and no longer an ELBO. The reported ``elbo_validation``,
+        ``get_elbo`` and the reconstruction and KL components stay unweighted, and early stopping
+        keeps monitoring ``elbo_validation``, so it does not track the weighted objective. Under
+        ``protein_noise_model="ambient"`` or ``"ambient_isotype"`` the weight also scales the nuisance KL
+        terms (``qc``, ``qh``), because they sit in ``kl_div_back_pro``; under ``"totalvi"`` those terms are 0.
+        Whether to scale them is an open choice. The weight is saved in ``init_params_``. Do not also pass
+        a different ``pro_recons_weight`` in ``plan_kwargs``: that raises ``ValueError``. Checkpoints without
+        it load with ``1.0``.
     init_prior_from_data
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
@@ -370,6 +384,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         kl_z_weight: float = 1.0,
         residual_prior_mode: Literal["raw_mean", "factual"] = "raw_mean",
         anneal_protein_likelihood: bool = True,
+        protein_likelihood_weight: float = 1.0,
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -507,6 +522,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             kl_z_weight=kl_z_weight,
             residual_prior_mode=residual_prior_mode,
             anneal_protein_likelihood=anneal_protein_likelihood,
+            protein_likelihood_weight=protein_likelihood_weight,
             use_batch_norm=use_batch_norm,
             use_layer_norm=use_layer_norm,
             batch_representation=batch_representation,
@@ -997,6 +1013,15 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             )
 
         plan_kwargs = {**DEFAULT_PLAN_KWARGS, **(plan_kwargs or {})}
+        w_pro = self.module.protein_likelihood_weight
+        if w_pro != 1.0 and "pro_recons_weight" in plan_kwargs:
+            if plan_kwargs["pro_recons_weight"] != w_pro:
+                raise ValueError(
+                    f"plan_kwargs pro_recons_weight={plan_kwargs['pro_recons_weight']!r} conflicts with "
+                    f"protein_likelihood_weight={w_pro!r}. Set the weight once, on the model."
+                )
+            # Equal values: the module already applies the weight, so do not apply it twice.
+            plan_kwargs = {k: v for k, v in plan_kwargs.items() if k != "pro_recons_weight"}
 
         # scvi-tools leaves the module in eval mode after a fit and after load, and
         # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
