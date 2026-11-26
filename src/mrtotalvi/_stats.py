@@ -310,6 +310,7 @@ def differential_abundance(
     density_estimator: Literal["posterior", "knn", "scale_floor"] = "posterior",
     knn_k: int = 50,
     scale_floor: float | None = None,
+    _return_aggregator: bool = False,
 ) -> xr.Dataset:
     """Compute MrVI-style differential abundance log probabilities over ``u``.
 
@@ -689,7 +690,118 @@ def differential_abundance(
             coords[enrich_dim] = np.asarray(values)
             data_vars[f"{key}_log_enrichs"] = (["cell_name", enrich_dim], arr)
 
+    if _return_aggregator:
+        return xr.Dataset(data_vars, coords=coords), aggregate
     return xr.Dataset(data_vars, coords=coords)
+
+
+def _label_permutations(n_a: int, n_total: int, max_exact: int, n_random: int, rng):
+    """Group-A index sets: every combination when there are at most ``max_exact``, else random ones."""
+    from itertools import combinations
+    from math import comb
+
+    if comb(n_total, n_a) <= max_exact:
+        return [np.asarray(c) for c in combinations(range(n_total), n_a)], True
+    return [np.sort(rng.permutation(n_total)[:n_a]) for _ in range(n_random)], False
+
+
+def differential_abundance_test(
+    model,
+    *,
+    adata,
+    sample_key: str,
+    sample_cov_key: str,
+    groupby: str,
+    validated_sample_order: list,
+    density_estimator: Literal["knn", "scale_floor"],
+    knn_k: int = 50,
+    scale_floor: float | None = None,
+    batch_size: int = 128,
+    min_samples_per_group: int = 8,
+    max_exact: int = 10000,
+    n_permutations: int = 9999,
+    random_state: int | None = None,
+) -> pd.DataFrame:
+    """Donor-level permutation test of differential abundance per cell group.
+
+    The per-cell score is the log-enrichment of group A against group B of the two-level
+    sample covariate ``sample_cov_key``. The statistic of a cell group (``groupby``, for
+    example cell-type labels) is the mean score over its cells. Sample labels are permuted:
+    every split when there are at most ``max_exact`` of them (exact test, the observed split
+    included), else ``n_permutations`` random splits with ``p = (1 + b) / (1 + n)``. The test
+    is two-sided on ``|statistic|``. ``padj`` is Benjamini-Hochberg over the cell groups.
+    """
+    from scipy.stats import false_discovery_control
+
+    if density_estimator not in ("knn", "scale_floor"):
+        raise ValueError(
+            "differential_abundance_test needs density_estimator='knn' or 'scale_floor'; "
+            "'posterior' is not calibrated under a null."
+        )
+    sample_info = adata.obs[[sample_key, sample_cov_key]].drop_duplicates(subset=sample_key).set_index(sample_key)
+    samples = [s for s in validated_sample_order if s in sample_info.index]
+    levels = pd.unique(sample_info.loc[samples, sample_cov_key])
+    if len(levels) != 2:
+        raise ValueError(f"{sample_cov_key!r} must have exactly two levels across samples, found {len(levels)}.")
+    level_a, level_b = sorted(levels, key=str)
+    labels = sample_info.loc[samples, sample_cov_key].to_numpy()
+    n_a, n_b = int((labels == level_a).sum()), int((labels == level_b).sum())
+    if min(n_a, n_b) < min_samples_per_group:
+        raise ValueError(
+            f"Each group needs at least {min_samples_per_group} samples; found {level_a}={n_a}, {level_b}={n_b}."
+        )
+    _, aggregate = differential_abundance(
+        model,
+        adata=adata,
+        sample_key=sample_key,
+        sample_cov_keys=[sample_cov_key],
+        omit_original_sample=True,
+        batch_size=batch_size,
+        validated_sample_order=samples,
+        density_estimator=density_estimator,
+        knn_k=knn_k,
+        scale_floor=scale_floor,
+        _return_aggregator=True,
+    )
+    groups = adata.obs[groupby].astype(str).to_numpy()
+    group_names = np.unique(groups)
+    members = [groups == g for g in group_names]
+    samples_arr = np.asarray(samples)
+
+    def statistic(a_idx: np.ndarray) -> np.ndarray:
+        in_a = np.zeros(len(samples), dtype=bool)
+        in_a[a_idx] = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            score = aggregate(samples_arr[in_a]) - aggregate(samples_arr[~in_a])
+            return np.asarray([np.nanmean(score[m]) for m in members])
+
+    observed = statistic(np.flatnonzero(labels == level_a))
+    rng = np.random.default_rng(random_state if random_state is not None else settings.seed)
+    splits, exact = _label_permutations(n_a, len(samples), max_exact, n_permutations, rng)
+    exceed = np.zeros(len(group_names))
+    for a_idx in splits:
+        exceed += np.abs(statistic(a_idx)) >= np.abs(observed) - 1e-12
+    pvalue = exceed / len(splits) if exact else (1 + exceed) / (1 + len(splits))
+    finite = np.isfinite(observed)
+    padj = np.full(len(group_names), np.nan)
+    padj[finite] = false_discovery_control(pvalue[finite], method="bh")
+    return pd.DataFrame(
+        {
+            "statistic": observed,
+            "n_cells": [int(m.sum()) for m in members],
+            "pvalue": np.where(finite, pvalue, np.nan),
+            "padj": padj,
+        },
+        index=pd.Index(group_names, name=groupby),
+    ).assign(
+        level_a=str(level_a),
+        level_b=str(level_b),
+        n_samples_a=n_a,
+        n_samples_b=n_b,
+        n_permutations=len(splits),
+        exact=exact,
+    )
 
 
 def _construct_design_matrix(

@@ -4,6 +4,14 @@
 
 ### Added
 
+- `differential_abundance_test`: a donor-level permutation test of differential abundance per cell group
+  (for example cell type). Sample labels are permuted, never cells: exact when there are at most 10,000 splits,
+  else 9,999 random splits. BH over cell groups; at least 8 samples per level by default. It refuses the
+  `"posterior"` density estimator, which is not calibrated under a null.
+
+- `allow_untrained_samples` on the counterfactual and local-sample methods: a target donor with no training
+  cells now raises a `ValueError` unless this is `True` (previously a warning and a `train_support` flag).
+
 - `get_sample_divergence` and `get_sample_embedding`: GloScope-style sample-level comparison
   (Wang et al. 2024). Each sample's cells in `z` get a Gaussian mixture (or k-NN) density; samples are
   compared by symmetric KL or Jensen-Shannon divergence, and classical MDS gives a sample embedding.

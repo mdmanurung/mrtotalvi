@@ -1575,6 +1575,97 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         )
         return result
 
+    def differential_abundance_test(
+        self,
+        sample_cov_key: str,
+        groupby: str,
+        adata: AnnData | None = None,
+        *,
+        density_estimator: Literal["knn", "scale_floor"],
+        knn_k: int = 50,
+        scale_floor: float | None = None,
+        sample_subset: list[str] | None = None,
+        batch_size: int = 128,
+        min_samples_per_group: int = 8,
+        max_exact: int = 10000,
+        n_permutations: int = 9999,
+        random_state: int | None = None,
+    ) -> pd.DataFrame:
+        """Donor-level permutation test of differential abundance per cell group.
+
+        The per-cell score is the log-enrichment of one level of the two-level sample
+        covariate ``sample_cov_key`` against the other, as in :meth:`differential_abundance`.
+        The statistic of each cell group in ``groupby`` (for example cell-type labels) is the
+        mean score over its cells. Sample labels are permuted, never cells: every split when
+        there are at most ``max_exact`` (an exact test), else ``n_permutations`` random splits
+        with ``p = (1 + b) / (1 + n)``. The test is two-sided, and ``padj`` is
+        Benjamini-Hochberg over the cell groups.
+
+        Parameters
+        ----------
+        sample_cov_key
+            Sample-level ``adata.obs`` column with exactly two levels.
+        groupby
+            Cell-level ``adata.obs`` column defining the cell groups tested.
+        adata
+            AnnData object. Defaults to the object used to initialise the model.
+        density_estimator
+            ``"knn"`` or ``"scale_floor"``. ``"posterior"`` is refused: under an
+            equal-population null it puts most cells beyond a twofold density ratio.
+        knn_k, scale_floor
+            As in :meth:`differential_abundance`.
+        sample_subset
+            Restrict to these samples.
+        batch_size
+            Dataloader batch size.
+        min_samples_per_group
+            Smallest number of samples allowed per level (default 8).
+        max_exact
+            Enumerate every split when there are at most this many.
+        n_permutations
+            Random splits otherwise.
+        random_state
+            Seed of the random splits. ``None`` uses :attr:`scvi.settings.seed`.
+
+        Returns
+        -------
+        :class:`~pandas.DataFrame` indexed by cell group, with ``statistic``, ``n_cells``,
+        ``pvalue``, ``padj`` and the design (levels, samples per level, number of splits,
+        ``exact``).
+        """
+        from ._stats import differential_abundance_test as _da_test
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        if groupby not in adata.obs:
+            raise KeyError(f"groupby column {groupby!r} is not in adata.obs.")
+        selected_samples, _ = validate_sample_metadata(
+            adata.obs,
+            sample_key=self.sample_key,
+            covariate_keys=[sample_cov_key],
+            donor_key=None,
+            sample_subset=sample_subset,
+            authoritative_order=self.sample_order,
+        )
+        result = _da_test(
+            self,
+            adata=adata,
+            sample_key=self.sample_key,
+            sample_cov_key=sample_cov_key,
+            groupby=groupby,
+            validated_sample_order=selected_samples,
+            density_estimator=density_estimator,
+            knn_k=knn_k,
+            scale_floor=scale_floor,
+            batch_size=batch_size,
+            min_samples_per_group=min_samples_per_group,
+            max_exact=max_exact,
+            n_permutations=n_permutations,
+            random_state=random_state,
+        )
+        result.attrs["density_estimator"] = density_estimator
+        return result
+
     def get_outlier_cell_sample_pairs(
         self,
         adata: AnnData | None = None,
