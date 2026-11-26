@@ -1297,6 +1297,25 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         self.isotype_names = (
             None if isotype_mask is None else [n for n, m in zip(names, isotype_mask, strict=True) if m]
         )
+        if protein_noise_model == "ambient_isotype":
+            if seed_background_prior_from_ambient:
+                warnings.warn(
+                    "seed_background_prior_from_ambient has no effect with protein_noise_model="
+                    "'ambient_isotype': this model drops the totalVI background prior.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            panels = self.module.protein_batch_mask or {}
+            blind = sorted(
+                code for code, measured in panels.items() if not np.asarray(measured, bool)[isotype_mask].any()
+            )
+            if blind:
+                warnings.warn(
+                    f"Panels {blind} (panel codes) measure no isotype control, so their nonspecific "
+                    "binding h is inferred from target counts alone. Treat their native protein with care.",
+                    UserWarning,
+                    stacklevel=3,
+                )
         if seed_background_prior_from_ambient:
             # C1-C3: seed the learnable totalVI background prior per protein from the
             # empty-droplet log1p mean and SD; training may still move it.
@@ -2045,9 +2064,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         wants_frame = not kwargs.get("return_numpy")
         # Upstream indexes a tuple with a list when it builds a DataFrame for a protein subset,
         # so ask for arrays and label them here.
-        out = self._in_request_order(
-            super().get_protein_foreground_probability, adata, indices, **{**kwargs, "return_numpy": True}
-        )
+        with _eval_mode(self.module):  # upstream leaves dropout and BatchNorm as the caller set them
+            out = self._in_request_order(
+                super().get_protein_foreground_probability, adata, indices, **{**kwargs, "return_numpy": True}
+            )
         if wants_frame and out.ndim == 2:
             names = np.asarray(self.protein_state_registry.column_names)
             if protein_list is not None:
@@ -2082,8 +2102,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
 
         The scvi-tools 1.5.2 body (``scvi/model/_totalvi.py:1046-1131``) validates
         ``adata`` but calls ``_get_denoised_samples`` without it, so correlations always
-        came from the training data. This copy passes ``adata`` through; nothing else
-        changes. See :meth:`scvi.model.TOTALVI.get_feature_correlation_matrix`.
+        came from the training data. This copy passes ``adata`` through. With
+        ``protein_noise_model="ambient_isotype"`` the isotype rows and columns are ``NaN``,
+        because a control's mixing gate is not identified. See
+        :meth:`scvi.model.TOTALVI.get_feature_correlation_matrix`.
         """
         from collections.abc import Iterable
 
@@ -2135,7 +2157,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                 self.protein_state_registry.column_names,
             ]
         )
-        return pd.DataFrame(corr_matrix, index=names, columns=names)
+        corr = pd.DataFrame(corr_matrix, index=names, columns=names)
+        if self.module.protein_noise_model == "ambient_isotype" and self.isotype_names:
+            # A control's sampled mixing gate is not identified, so its correlations are not either.
+            is_iso = np.isin(np.asarray(names).astype(str), self.isotype_names)
+            corr.iloc[is_iso, :] = np.nan
+            corr.iloc[:, is_iso] = np.nan
+        return corr
 
     def get_latent_representation(
         self,

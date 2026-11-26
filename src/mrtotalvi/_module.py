@@ -868,6 +868,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             while pro_batch_mask_minibatch.ndim < kl_div_back_pro_full.ndim:
                 pro_batch_mask_minibatch = pro_batch_mask_minibatch.unsqueeze(0)
             kl_div_back_pro_full = pro_batch_mask_minibatch.bool() * kl_div_back_pro_full
+            if self.protein_noise_model != "totalvi":
+                # A protein the panel never measured has no count to pull its gate; the stock
+                # totalvi mode keeps the upstream penalty unchanged.
+                lkl_protein_expressed = pro_batch_mask_minibatch.bool() * lkl_protein_expressed
         kl_div_back_pro = (
             kl_div_back_pro_full.sum(dim=-1) + lkl_back_pro_full.sum(dim=-1) + lkl_protein_expressed.sum(dim=-1)
         )
@@ -1284,6 +1288,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.native_form = native_form
         if protein_noise_model == "totalvi" and background_mixing_reg != 1e-3:
             raise ValueError("background_mixing_reg applies to the opt-in protein noise models only.")
+        # A negative weight lets -reg * log(pi) fall without bound as pi -> 0.
+        if not (np.isfinite(background_mixing_reg) and background_mixing_reg >= 0):
+            raise ValueError("background_mixing_reg must be finite and >= 0.")
+        if isinstance(n_nuisance, bool) or int(n_nuisance) != n_nuisance or n_nuisance < 1:
+            raise ValueError("n_nuisance must be a positive whole number.")
         self.background_mixing_reg = float(background_mixing_reg)
         P = self.n_input_proteins
         self.protein_noise_model = protein_noise_model
