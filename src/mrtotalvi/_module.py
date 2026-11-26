@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scvi import REGISTRY_KEYS
+from scvi.distributions._negative_binomial import log_nb_positive
 from scvi.module._constants import MODULE_KEYS
 from scvi.module._totalvae import TOTALVAE
 from scvi.module.base import EmbeddingModuleMixin, LossOutput, auto_move_data
@@ -49,6 +50,39 @@ def residual_collapse_metrics(eps: torch.Tensor, z: torch.Tensor) -> dict[str, t
         active = (eps.var(dim=0, unbiased=False) > RESIDUAL_ACTIVE_THRESHOLD).sum().to(eps.dtype)
         share = eps.pow(2).sum(-1).mean() / z.pow(2).sum(-1).mean().clamp_min(1e-12)
     return {"residual_active_units": active, "residual_share": share}
+
+
+POSTERIOR_SPLITS = ("excess", "whole")
+POSTERIOR_BACKGROUNDS = ("sampled", "lognormal_mean")
+
+
+def _check_posterior_options(split, background) -> None:
+    """Raise ``ValueError`` for an option outside the posterior readout's allowed values."""
+    for name, value, allowed in (
+        ("split", split, POSTERIOR_SPLITS),
+        ("background", background, POSTERIOR_BACKGROUNDS),
+    ):
+        if value not in allowed:
+            raise ValueError(f"{name} must be one of {allowed}; got {value!r}.")
+
+
+def _posterior_native(y, m1, fore_scale, theta, mixing, split):
+    """Per-draw ``r * y * share``, the foreground responsibility ``r`` and the mixture log-likelihood.
+
+    ``m1`` is the background-component mean (efficiency included), ``m2 = m1 * fore_scale``
+    the foreground mean, ``theta`` the NB inverse dispersion and ``mixing`` the logit of
+    ``pi = P(background)``. ``r = (1-pi) NB(y; m2) / [pi NB(y; m1) + (1-pi) NB(y; m2)]``.
+    ``share`` is ``(f-1)/f`` for ``split="excess"`` (binomial thinning of the foreground
+    count) and 1 for ``"whole"``.
+    """
+    log_nb1 = log_nb_positive(y, m1, theta)
+    log_nb2 = log_nb_positive(y, m1 * fore_scale, theta)
+    log_bg = F.logsigmoid(mixing) + log_nb1
+    log_fg = F.logsigmoid(-mixing) + log_nb2
+    log_lik = torch.logaddexp(log_bg, log_fg)
+    resp = torch.exp(log_fg - log_lik)
+    share = (fore_scale - 1.0) / fore_scale if split == "excess" else torch.ones_like(fore_scale)
+    return resp * y * share, resp, log_lik
 
 
 class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
@@ -1584,6 +1618,39 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if n_samples > 1:
             res = {k: v.mean(dim=0) for k, v in res.items()}
         return res
+
+    @torch.inference_mode()
+    def protein_posterior_readout(
+        self,
+        tensors: dict[str, torch.Tensor],
+        n_samples: int = 25,
+        split: str = "excess",
+        background: str = "sampled",
+    ):
+        """EXPERIMENTAL. Posterior expected native protein count given ``y``, ``E[native | y, z]``.
+
+        Only for ``protein_noise_model="totalvi"``. See
+        :meth:`MrTotalVI.get_protein_noise_decomposition` for the options. Returns
+        ``(cells, proteins)``, the plain mean over the ``n_samples`` draws.
+        """
+        _check_posterior_options(split, background)
+        if self.protein_noise_model != "totalvi":
+            raise NotImplementedError(
+                "The posterior protein readout is only implemented for protein_noise_model='totalvi'; "
+                f"got {self.protein_noise_model!r}."
+            )
+        tensors = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
+        inf_out = self.inference(**self._get_inference_input(tensors), n_samples=n_samples)
+        gen_out = self.generative(**self._get_generative_input(tensors, inf_out))
+        py_, eff = gen_out["py_"], gen_out["per_batch_efficiency"]
+        y = tensors[REGISTRY_KEYS.PROTEIN_EXP_KEY]
+        if background == "sampled":
+            rate_back = py_["rate_back"]
+        else:
+            rate_back = torch.exp(py_["back_alpha"] + 0.5 * py_["back_beta"].square())
+        m1 = eff * rate_back
+        res, _, _ = _posterior_native(y, m1, py_["fore_scale"], py_["r"], py_["mixing"], split)
+        return res.mean(dim=0) if res.ndim == 3 else res
 
     @torch.inference_mode()
     def _deterministic_decoder_parameters(

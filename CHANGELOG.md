@@ -4,6 +4,13 @@
 
 ### Added
 
+- `get_protein_noise_decomposition(readout="posterior")`: EXPERIMENTAL, opt-in readout of the posterior expected
+  native count given the observed counts, `E[native | y, z]`, for `protein_noise_model="totalvi"`. Per draw it is
+  `r * y * share`, with `r` the foreground responsibility under the NB mixture. Two keyword-only settings,
+  `split` (`"excess"` or `"whole"`) and `background` (`"sampled"` or `"lognormal_mean"`), have no package
+  default; the P2.5 comparison tests all 4 combinations. The readout is the plain mean over the draws. The
+  default (`"decoder"`) output is unchanged. Other protein noise models raise `NotImplementedError`.
+
 - `get_protein_noise_decomposition(size_factor="total_adt")`: opt-in depth normalisation. It divides `native`,
   `ambient`, `nonspecific` and `observed` by each cell's raw protein total over the median total of all cells in
   `adata`. The default (`None`) output is unchanged. The factor comes from noisy raw totals and does not remove

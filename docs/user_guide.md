@@ -375,6 +375,15 @@ One choice is untested on real data. The ADR-0011 simulations used `anneal_prote
 
 These are results from simulations and three real data sets, not validated defaults: `protein_noise_model` still defaults to `"totalvi"`. The ambient protein noise models are experimental in 1.0.0, so their arguments and outputs can change in a later release.
 
+## Posterior native readout (experimental)
+
+`model.get_protein_noise_decomposition(readout="posterior", split=..., background=...)` returns
+`native` as the posterior expected native count given the observed counts, `E[native | y, z]`. It works only with
+`protein_noise_model="totalvi"` and is **EXPERIMENTAL**: the options and outputs can change. The default
+`readout="decoder"` is unchanged. The readout never exceeds the observed count. The two settings have no
+package default; they are open choices to compare (`split` `"excess"` or `"whole"`, `background` `"sampled"` or
+`"lognormal_mean"`). The readout is the plain mean over the posterior draws of `z`.
+
 ## Ambient protein noise: isotype outputs
 
 ```{figure} _static/architecture_ambient-isotype.svg
