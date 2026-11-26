@@ -1396,6 +1396,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         indices: npt.ArrayLike | None = None,
         n_samples: int = 25,
         batch_size: int = 256,
+        *,
+        size_factor: Literal[None, "total_adt"] = None,
     ) -> dict[str, pd.DataFrame]:
         """Expected protein components on the raw count scale (ADR-0011).
 
@@ -1407,15 +1409,30 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         posterior probability of foreground given the observed counts ``y``. Isotype
         controls are dropped from the protein columns. Proteins not measured in a
         cell's panel are ``NaN``.
+
+        Parameters
+        ----------
+        size_factor
+            ``None`` (default) leaves the output unchanged. ``"total_adt"`` divides
+            ``native``, ``ambient``, ``nonspecific`` and ``observed`` by each cell's size
+            factor: the cell's raw protein total (all registered proteins, isotype controls
+            included, measured proteins only) over the median of that total across all
+            cells of ``adata``, not only ``indices``. ``foreground_probability`` is
+            unchanged. A cell with a total of 0 raises ``ValueError``. The factor comes
+            from noisy raw totals, so it re-adds per-cell depth noise and does not remove
+            composition-driven differences (in PBMC 5' it cut a 3.45x run gap on CD3 to
+            1.54x).
         """
         self._check_if_trained(warn=False)
         if isinstance(n_samples, bool) or not isinstance(n_samples, (int, np.integer)) or n_samples < 1:
             raise ValueError(f"n_samples must be an integer >= 1; got {n_samples!r}.")
-        return self._protein_decomposition(adata, indices, n_samples, batch_size)
+        if size_factor not in (None, "total_adt"):
+            raise ValueError(f"size_factor must be None or 'total_adt'; got {size_factor!r}.")
+        return self._protein_decomposition(adata, indices, n_samples, batch_size, size_factor=size_factor)
 
     @torch.inference_mode()
     def _protein_decomposition(
-        self, adata, indices, n_samples, batch_size, drop_isotypes=True
+        self, adata, indices, n_samples, batch_size, drop_isotypes=True, size_factor=None
     ) -> dict[str, pd.DataFrame]:
         """Body of :meth:`get_protein_noise_decomposition`, without the trained-model check."""
         adata = self._validate_anndata(adata)
@@ -1445,7 +1462,27 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             if available is not None:
                 values = np.where(available, values, np.nan)
             result[key] = pd.DataFrame(values[:, keep], index=index, columns=names[keep])
+        if size_factor == "total_adt":
+            factor = self._protein_size_factor(adata)[indices]
+            if (factor == 0).any():
+                raise ValueError(
+                    f"size_factor='total_adt': {int((factor == 0).sum())} requested cells have a raw protein total of 0."
+                )
+            for key in ("native", "ambient", "nonspecific", "observed"):
+                result[key] = result[key].div(factor, axis=0)
         return result
+
+    def _protein_size_factor(self, adata) -> np.ndarray:
+        """Per-cell raw protein total over its median across all cells, in ``adata`` order."""
+        # The registered protein field, as the model trains on it; rows follow adata.obs_names.
+        counts = self.get_anndata_manager(adata).get_from_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY)
+        counts = np.asarray(counts, dtype=float)
+        available = self._protein_available(adata, np.arange(adata.n_obs))
+        if available is not None:
+            counts = np.where(available, counts, 0.0)
+        total = counts.sum(axis=1)
+        # Zero totals stay in the median; only requested cells with a zero total raise.
+        return total / np.median(total)
 
     def get_aggregated_posterior(
         self,
