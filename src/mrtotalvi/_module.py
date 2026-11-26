@@ -755,7 +755,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         out["u"] = u
         out["z_base"] = z_base
         if self.protein_noise_model != "totalvi":
-            qc, qh = self.nuisance_encoder(y, getattr(self, "isotype_index", None))
+            qc, qh = self.nuisance_encoder(y, getattr(self, "isotype_index", None), batch_index)
             out["qc"] = qc
             out["log_c"] = qc.rsample((n_samples,)) if n_samples > 1 else qc.rsample()
             out["qh"] = qh
@@ -1245,6 +1245,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         isotype_mask: np.ndarray | None = None,
         ambient_burden_prior: tuple[float, float] = (0.0, 2.0),
         n_nuisance: int = 1,
+        nuisance_h_input: str = "isotypes_total",
         native_form: str = "scale",
         background_mixing_reg: float = 1e-3,
         learn_ambient_profile: bool = False,
@@ -1283,6 +1284,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 "protein_encoder_input='ambient_zscore' is blocked with u_prior='vamp': the "
                 "pseudo-inputs live in raw count space."
             )
+        if nuisance_h_input not in {"isotypes_total", "isotypes_batch"}:
+            raise ValueError("nuisance_h_input must be 'isotypes_total' or 'isotypes_batch'.")
+        if nuisance_h_input != "isotypes_total" and protein_noise_model != "ambient_isotype":
+            raise ValueError("nuisance_h_input applies to protein_noise_model='ambient_isotype' only.")
         if native_form not in {"scale", "excess"}:
             raise ValueError("native_form must be 'scale' or 'excess'.")
         self.native_form = native_form
@@ -1347,7 +1352,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 self.nuisance_eta = nn.Parameter(torch.zeros(max(self.n_batch, 1), P))
                 self.nuisance_lambda = nn.Parameter(0.1 * torch.ones(int(n_nuisance), P))
             self.register_buffer("target_mask", torch.as_tensor(target))
-            self.nuisance_encoder = AmbientNuisanceEncoder(P, n_isotypes=n_iso, n_nuisance=int(n_nuisance))
+            self.nuisance_encoder = AmbientNuisanceEncoder(
+                P, n_isotypes=n_iso, n_nuisance=int(n_nuisance), h_input=nuisance_h_input, n_batch=self.n_batch
+            )
 
         if protein_encoder_input == "ambient_zscore":
             if dsb_log_mean is None or dsb_log_sd is None:
