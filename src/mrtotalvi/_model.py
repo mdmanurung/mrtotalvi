@@ -39,7 +39,7 @@ from ._counterfactual import (
 )
 from ._counterfactual import get_counterfactual_latent as _get_counterfactual_latent
 from ._counterfactual import local_sample_enrichment as _local_sample_enrichment
-from ._module import MrTotalVAE
+from ._module import MrTotalVAE, _check_posterior_options
 from ._stats import (
     _as_indices,
     _differential_expression,
@@ -1398,6 +1398,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         batch_size: int = 256,
         *,
         size_factor: Literal[None, "total_adt"] = None,
+        readout: Literal["decoder", "posterior"] = "decoder",
+        split: Literal["excess", "whole"] = "excess",
+        background: Literal["sampled", "lognormal_mean"] = "sampled",
     ) -> dict[str, pd.DataFrame]:
         """Expected protein components on the raw count scale (ADR-0011).
 
@@ -1422,17 +1425,49 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             from noisy raw totals, so it re-adds per-cell depth noise and does not remove
             composition-driven differences (in PBMC 5' it cut a 3.45x run gap on CD3 to
             1.54x).
+        readout
+            ``"decoder"`` (default) leaves every output unchanged. ``"posterior"`` is
+            **EXPERIMENTAL**: it returns only ``native``, the posterior expected native count
+            given the observed counts ``y``, ``E[native | y, z]``, as the weighted mean over
+            ``n_samples`` draws of ``r * y * share``. Here ``r`` is the foreground
+            responsibility ``(1-pi) NB(y; m2) / [pi NB(y; m1) + (1-pi) NB(y; m2)]`` with
+            ``m1`` the background mean (efficiency included), ``m2 = m1 * f`` and
+            ``pi = sigmoid(mixing)``. The readout is at most ``y``. Only for
+            ``protein_noise_model="totalvi"``; other modes raise ``NotImplementedError``.
+        split, background
+            Used only with ``readout="posterior"``, but always validated. No package default
+            exists for them: the defaults here only make the signature valid, and the P2.5
+            comparison tests all 4 combinations. ``split``: ``"excess"`` uses
+            ``share = (f-1)/f``, the package ``native`` definition; ``"whole"`` uses
+            ``share = 1`` (totalVI ``include_protein_background=False``). ``background``:
+            ``"sampled"`` uses the sampled background rate of each draw; ``"lognormal_mean"``
+            uses ``exp(alpha + beta^2/2)``, as ``protein_components`` does. The readout is the
+            plain mean over the ``n_samples`` draws of ``q(z)``. With ``use_map=True`` (the
+            default) ``eps`` is a point estimate, so the draws vary ``z`` only through ``u``.
         """
         self._check_if_trained(warn=False)
         if isinstance(n_samples, bool) or not isinstance(n_samples, (int, np.integer)) or n_samples < 1:
             raise ValueError(f"n_samples must be an integer >= 1; got {n_samples!r}.")
         if size_factor not in (None, "total_adt"):
             raise ValueError(f"size_factor must be None or 'total_adt'; got {size_factor!r}.")
-        return self._protein_decomposition(adata, indices, n_samples, batch_size, size_factor=size_factor)
+        if readout not in ("decoder", "posterior"):
+            raise ValueError(f"readout must be 'decoder' or 'posterior'; got {readout!r}.")
+        _check_posterior_options(split, background)
+        posterior = None
+        if readout == "posterior":
+            if self.module.protein_noise_model != "totalvi":
+                raise NotImplementedError(
+                    "readout='posterior' is only implemented for protein_noise_model='totalvi'; "
+                    f"got {self.module.protein_noise_model!r}."
+                )
+            posterior = {"split": split, "background": background}
+        return self._protein_decomposition(
+            adata, indices, n_samples, batch_size, size_factor=size_factor, posterior=posterior
+        )
 
     @torch.inference_mode()
     def _protein_decomposition(
-        self, adata, indices, n_samples, batch_size, drop_isotypes=True, size_factor=None
+        self, adata, indices, n_samples, batch_size, drop_isotypes=True, size_factor=None, posterior=None
     ) -> dict[str, pd.DataFrame]:
         """Body of :meth:`get_protein_noise_decomposition`, without the trained-model check."""
         adata = self._validate_anndata(adata)
@@ -1449,7 +1484,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         chunks: dict[str, list] = {}
         with _eval_mode(self.module):
             for tensors in loader:
-                out = self.module.protein_components(tensors, n_samples=n_samples)
+                if posterior is None:
+                    out = self.module.protein_components(tensors, n_samples=n_samples)
+                else:
+                    out = {"native": self.module.protein_posterior_readout(tensors, n_samples=n_samples, **posterior)}
                 for key, value in out.items():
                     chunks.setdefault(key, []).append(value.cpu().numpy())
         index = adata.obs_names[indices]
