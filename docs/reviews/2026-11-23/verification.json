@@ -1,0 +1,436 @@
+{
+ "items": [
+  {
+   "group": "feature-identity",
+   "finding": "(a) Reordering RNA columns on a query AnnData changes the latent, and nothing checks ordered var_names at query, transfer or load.",
+   "verdict": "confirmed",
+   "evidence": "Script /tmp/claude-149488/review-verify/feature-identity/a.py on HEAD 0030c3d. Tiny model from scvi synthetic_iid, 10 genes, is_trained_=True. The query is a.copy()[:, [4,3,2,1,0,5..9]]. get_latent_representation(query) returns normally; max |z_ref - z_query| = 0.3385 (review says 0.396 on its fixture). MrTotalVI.load(dir, adata=reordered) also returns normally, same diff 0.3385, because scvi's _validate_var_names only warns (_save_load.py:239) and my script had warnings filtered. _validate_anndata (_model.py ~L1999) only resets _indices and calls _check_protein_names, which covers protein uns only. grep for var_names/_validate_var_names in src/mrtotalvi shows no RNA check. A fully renamed var_names (x0..x9) also passes and returns an identical latent (diff 0.0), so identity is never compared, only width. Not fixed on HEAD.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Add an RNA name check beside _check_protein_names in _validate_anndata: compare list(adata.var_names) to the registered names from self.adata_manager.get_state_registry(REGISTRY_KEYS.X_KEY).column_names (LayerField saves them; _get_var_names_from_manager reads the same key) and raise ValueError on mismatch. Also call it from load on model.adata, since load's own scvi check is only a warning and the registry holds the trained names. Ordered equality is correct because the decoder reads columns by position. Reject duplicate var_names at setup_anndata. The strict rule will also reject a rename with same order, which is arguably right but is a behaviour change, so state it in the changelog. No change to fitted results or checkpoints, because it only refuses inputs that were silently accepted. Add a test with an equal-width permutation on transfer and on load.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "feature-identity",
+   "finding": "(b) Public setup registers protein names from uns (p15, p14, ...) for a DataFrame whose columns are p0, p1, ..., with no error, so the protein-name validator in _contracts.py is bypassed.",
+   "verdict": "confirmed",
+   "evidence": "Script /tmp/claude-149488/review-verify/feature-identity/b.py on HEAD. 16 proteins; obsm DataFrame columns p0..p15; uns['pn'] = reversed list. setup_anndata(..., protein_names_uns_key='pn') succeeds and the registry column_names start ['p15','p14','p13','p12'], with only the scvi INFO line 'Using column names from adata.uns[pn]'. So uns wins silently over the DataFrame columns, which relabels the data columns. A uns list of 16 identical strings ('dup') is also registered as ['dup','dup',...], so uniqueness and string-type checks are bypassed too. Cause: MrTotalVI.setup_anndata (_model.py L960-1030) passes colnames_uns_key to scvi ProteinObsmField and never calls authoritative_protein_names. grep shows that validator is used only in _datamodule.py:130, the multi-file path. That validator raises on a DataFrame/uns mismatch (_contracts.py ~L284), on duplicates, on non-string names and on width mismatch. Not fixed on HEAD. The load/transfer side is only partly covered: _check_protein_names compares uns to the registry, not to the DataFrame columns.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Call authoritative_protein_names(adata, protein_expression_obsm_key=..., protein_names_uns_key=..., required=False) in setup_anndata, right after validate_anndata_counts and before the manager is built. It already enforces equal-width, unique, string, DataFrame-equals-uns checks. Keep it a pure check: do not rewrite uns, and leave the registered names unchanged for valid inputs. Also run it in _validate_anndata for the query so DataFrame columns are compared to the registered order, not just uns. Add a test for a conflicting DataFrame and uns, duplicates, and a DataFrame-only permutation. This only rejects inputs that were accepted wrongly. Existing checkpoints and valid fits are unchanged. Datasets that now raise were mislabelled, so tell users.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "cell-selection",
+   "finding": "(a) get_aggregated_posterior with a boolean mask plus sample= selects the wrong cell (row 0 instead of the masked row).",
+   "verdict": "confirmed",
+   "evidence": "Scratch /tmp/claude-149488/review-verify/cell-selection/g.py, run on HEAD 0030c3d via the public method. v2 fixture, 8 cells. Mask selects rows 3 and 6, sample='sample_0'. In-memory and backed both returned the single component [0.681, 0.501], which is row 0's posterior, not rows 3 and 6 (truth [[0.708,0.424],[0.699,0.557]]). Cause: _stats.py L122 passes the bool mask to np.intersect1d, so False/True become 0/1 and match positions 0 and 1; only position 0 is in sample_0. Narrower than the review wording: a mask without sample= is correct (matches rows 3 and 6), and integer indices with sample= are correct. Also checked: the same mask with sample=sample_of_row3 returned row 0 on a single-cell mask (earlier a.py).",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Put the bool-to-position conversion in _stats._as_indices: np.flatnonzero for a bool array, and raise ValueError if its length is not n_obs (as _counterfactual._as_indices does). Both get_aggregated_posterior and collect_u_posterior then share it. intersect1d also sorts and de-duplicates, which is harmless for a mixture with sample=. Without sample=, repeated indices keep duplicate equal-weight components, which looks intended.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "cell-selection",
+   "finding": "(b) Backed get_protein_foreground_probability (inherited) labels rows in request order but returns loader-sorted rows.",
+   "verdict": "confirmed",
+   "evidence": "Scratch e.py, run on HEAD via the public method. Backed, indices=[7,1,4], n_samples=1500. The index labels are ['7','1','4']. The values match the in-memory result for the sorted order [1,4,7] (max abs diff 0.0033) and differ from the in-memory result for [7,1,4] by 0.161. The review gives 0.152 for its own fixture. Repeated indices [7,1,4,1] raise TypeError 'Indexing elements must be in increasing order' (b.py). A boolean mask is fine, because its rows are already ascending. MrTotalVI has no override of this method, and HEAD commit 18cf23b did not wrap it.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Add a MrTotalVI override that follows the get_normalized_expression wrapper pattern. Call _loader_order, call super() with the unique sorted indices, then reorder with inverse and reset the DataFrame index to obs_names[requested]. A shared decorator or helper for the inherited get_* methods that take indices avoids repeating this per method. The review's 'share the sort-and-restore logic' is right, but only wrapping get_normalized_expression is not enough. Until then, raise on backed data with non-ascending or repeated indices.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "cell-selection",
+   "finding": "(c) Backed get_normalized_expression(indices=[7,1,4], n_samples_overall=2) raises IndexError.",
+   "verdict": "confirmed",
+   "evidence": "Scratch d.py, run on HEAD via the public method. In-memory works. Backed indices=[7,1,4] raises IndexError 'positional indexers are out-of-bounds'. A boolean-mask request raises the same IndexError. Sorted backed indices=[1,4,7] raises TypeError 'Indexing elements must be in increasing order'. Cause: upstream (scvi _totalvi.py L485) does np.random.choice(indices, n_samples_overall), which draws WITH replacement and returns n_samples_overall rows. The HEAD wrapper (_model.py ~L1706) passes the sorted unique indices through with n_samples_overall. It then applies inverse (3 entries) to a 2-row output. Upstream's draw can also repeat or reorder indices, which h5py rejects. The 18cf23b fix did not cover this path. n_samples_overall with indices=None on backed data does not raise; it works by luck of the draw.",
+   "severity": "crash_or_loud",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "In the wrapper, resolve the request first: flatnonzero for a mask, arange(n_obs) for None. If n_samples_overall is set, draw requested = np.random.choice(requested, n_samples_overall), the same call and RNG stream as upstream, so in-memory results stay identical. Then call super() with n_samples_overall=None. Run the normal _loader_order sort-and-restore on the drawn positions. Names then come from obs_names[drawn]. This is the review's 'select the requested observations before sorting'.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "cell-selection",
+   "finding": "(d1) Sweep: get_latent_library_size (inherited) on backed data.",
+   "verdict": "confirmed",
+   "evidence": "Scratch b.py and d.py, run on HEAD in eval mode (the output is deterministic). Backed indices=[7,1,4] returned [1.454, 1.476, 2.253]. In-memory returned [2.253, 1.454, 1.476]. That is the sorted order, with max abs diff 1.748 against 0.0 for in-memory. The output is a bare ndarray with no labels, so the error is fully silent. A repeated request raises TypeError. A mask is fine. No override exists in MrTotalVI.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Wrap it like get_normalized_expression, using _loader_order and reordering by inverse. This is not in the review's list of sites.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "cell-selection",
+   "finding": "(d2) Sweep: posterior_predictive_sample (inherited) on backed data.",
+   "verdict": "confirmed",
+   "evidence": "Scratch f.py, run on HEAD with n_samples=3000 and the per-cell sum of the mean RNA draw. In-memory [7,1,4] gave [50.6, 57.3, 25.7]. In-memory [1,4,7] gave [55.5, 25.8, 49.1]. Backed [7,1,4] gave [56.6, 26.2, 50.1], which is the sorted-order pattern. The return is a dict of arrays with no labels, so the error is silent. A repeated request raises TypeError (b.py). A mask is fine.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Same wrapper as for foreground probability and latent library size. Apply inverse to every array in the returned dict.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "cell-selection",
+   "finding": "(d3) Sweep: every other public method taking indices, on backed data with unsorted or repeated indices, and with masks.",
+   "verdict": "partly",
+   "evidence": "Run on HEAD (b.py, d.py, e.py), compared with in-memory runs. Correct on backed for unsorted, repeated and mask requests: get_latent_representation, get_local_sample_representation, get_protein_noise_decomposition (errors equal the in-memory noise floor), and get_normalized_expression (apart from n_samples_overall, see (c)). get_local_sample_distances and get_counterfactual_latent ran with unsorted and mask requests on backed without error; their value order is covered by tests/test_review_fixes.py::test_backed_adata_returns_rows_in_request_order. The counterfactual methods reject duplicate indices by design. A mask raises nothing on the checked paths except n_samples_overall. Still wrong: get_protein_foreground_probability (b), get_latent_library_size (d1) and posterior_predictive_sample (d2), all on unsorted requests (silent) and repeated requests (TypeError). Order-free scalars (get_elbo, get_reconstruction_error) run on backed unsorted without error; repeated requests were not run. Not applicable: get_likelihood_parameters and get_marginal_ll raise NotImplementedError; differential_expression is disabled with a RuntimeError; differential_abundance and get_outlier_cell_sample_pairs take no indices. Not run: get_feature_correlation_matrix (HEAD wraps it, and a correlation over cells is row-order invariant). Not run: local_sample_enrichment, because it needs sample_cov_keys and the reference_indices path. The review's source-level claim that get_normalized_expression is the only unwrapped site understates the problem.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Wrap the three remaining inherited methods. Add one regression test that loops over all public indices-taking methods on a backed copy with [7,1,4], [7,1,4,1] and a mask, and compares each with the in-memory result. Alternatively raise a clear error on backed data for these methods until wrapped. Both choices leave fitted parameters and checkpoints unchanged.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "training-support",
+   "finding": "A registered donor can have zero factual training cells, and get_counterfactual_latent still reports target_support=True and admissible=True for it.",
+   "verdict": "confirmed",
+   "evidence": "HEAD 0030c3d, public API, script /tmp/claude-149488/review-verify/training-support/r2.py (output out2.txt). _make_adata(3) (8 cells), seed 0, MrTotalVI centered_v2, train(max_epochs=1, train_size=0.5, validation_size=0.25, batch_size=8). Per-donor counts: train [2 2 0], val [1 0 1], test [0 1 1]. get_counterfactual_latent with the default reference (all cells) on training cells gave target_support all True and admissible all True for target sample_2, with finite z. Cause in code: _model.py:424 counts donors in the registered AnnData, not the training split. train() (L801) only checks that case again on the AnnData, and _counterfactual.py:574-600 scores against reference_indices (default all cells, including validation and test cells). Seed 0 was enough; tiny fixture, so counts differ from the review's [3,3,0] but the failure mode is the same.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Compute per-donor training counts from train_indices after the split, store them as an attribute (for example n_train_cells_per_sample_), and write them into the counterfactual output as a separate variable, for example train_support (n_train_cells > 0), next to the existing target_support. Warn at train() end when any donor has zero training cells, since the donor's observed response never entered the likelihood.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "training-support",
+   "finding": "Resolve the train/validation/test split before fit, and save the split identity and per-donor training counts in the checkpoint.",
+   "verdict": "partly",
+   "evidence": "Split identity is already saved. train() resolves the split before fit only when _init_prior_from_data is true (_model.py:826-840). Otherwise scvi's own splitter runs inside super().train(). In both cases scvi sets train_indices_, validation_indices_ and test_indices_, and r2.py shows they are in the saved attr_dict (keys: train_indices_, validation_indices_, test_indices_, vamp_training_indices_sha256_). After save and load, train_indices_ came back as [1 7 3 0]. What is missing is (a) per-donor training counts and (b) any use of the split in the counterfactual code. No code under src/mrtotalvi reads train_indices for support (grep for train_indices only hits the vamp initialisation).",
+   "severity": "doc_or_claim",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Do not re-plumb the split. Derive counts from the existing train_indices_ at the end of train() (np.bincount over _scvi_sample). Add them to attr_dict so they survive a reload. If the counts are unavailable after load, return unknown. Resolving the split earlier for every model is optional, and risks changing seeded RNG order, so verify the split is identical before adopting it.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "training-support",
+   "finding": "Old checkpoints without a recoverable split should report unknown training support.",
+   "verdict": "confirmed",
+   "evidence": "Checkpoints saved by HEAD already carry train_indices_ (r2.py), so 'unknown' applies only to older or hand-built models that lack it. The rule is sound: absence must give NaN or a missing flag, never True. Not tested against a real old checkpoint.",
+   "severity": "design_question",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Store a nullable train_support (-1 or NaN for unknown) and warn once. Never default an unknown to supported.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "training-support",
+   "finding": "Keep training support separate from overlap with the chosen reference.",
+   "verdict": "confirmed",
+   "evidence": "r2.py: with reference_indices=train_indices, donor sample_2 gets target_support False for both queries (adm [[True,False,False],[True,True,False]]), because the reference has no cells from that donor. So passing the training indices already works as a workaround. The default (all cells) does not, because a validation or test cell from the donor counts as reference. The two ideas differ: reference overlap is user-chosen, training support is a property of the fit. A donor with validation cells only passes the first and fails the second.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Add a distinct variable train_support. Leave target_support and admissible meaning unchanged.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "training-support",
+   "finding": "Refuse unsupported targets by default; is that a behaviour change needing user approval?",
+   "verdict": "confirmed",
+   "evidence": "Yes. It turns today's finite output into an error or NaN for existing calls, and the same call on a loaded model could change from success to failure. Under the user's impactful-choices rule (a choice that changes a headline estimate or conclusion) it is the user's choice, needs its own approved plan row, and cannot be a silent default. It does not change weights, fitted parameters or checkpoint contents beyond adding a field.",
+   "severity": "design_question",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Ship non-breaking first: add train_support and n_train_cells variables plus a train-time warning when any donor has zero training cells. Then ask the user whether the default for unsupported targets should be raise, mask to NaN, or flag only. If they choose refusal, add an explicit opt-out argument (for example allow_untrained_targets=False default) and record it in CHANGELOG.md.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "heldout-prior",
+   "finding": "(a) Held-out proteins change the starting model: scvi-tools' empirical protein background prior is computed at construction from all registered cells.",
+   "verdict": "confirmed",
+   "evidence": "Source: scvi 1.5.2 model/_totalvi.py L170-175 enables the prior when n_proteins>10 and the arg is None. It calls _get_totalvi_protein_priors(adata) in __init__ (L1185+), which draws np.random.choice over ALL cells per batch. MrTotalVI._model.py ~L397 calls super().__init__ with no override, so the default applies. The train/validation split is made later, at train(), so it is not known at construction. Repro (/tmp/claude-149488/review-verify/heldout-prior/a.py): synthetic_iid, 14 proteins, 100 cells, np.random.seed(0) before construction. Scaling the last 10 cells' protein counts by 20 moved module.background_pro_alpha from 1.8907 to 2.0613 and log_beta from -3.4547 to -3.4929. The direction matches the review, but the magnitudes differ from its 1.528 to 1.951 because the fixture differs. The unseeded global np.random is a further reproducibility gap: init varies run to run unless the user seeds NumPy. Whether this changes final accuracy was not measured (the review says the same). The prior only initializes a learned parameter.",
+   "severity": "design_question",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "The split is unknown at construction, so the prior cannot just move inside it. Options: (1) in MrTotalVI.__init__ default empirical_protein_background_prior to False and document it; (2) compute the prior in train() after the split resolves and write it into module.background_pro_alpha and background_pro_log_beta, as the Vamp path does (_initialize_vamp_from_training_indices, _model.py ~L545); (3) at minimum seed the RNG and record the indices used. Option 1 is minimal. Options 1 and 2 change the default start for every model with >10 proteins, so they change fitted results and need user approval. Existing tests already pass empirical_protein_background_prior=False in places.",
+   "changes_fitted_results": true
+  },
+  {
+   "group": "heldout-prior",
+   "finding": "(b) The inherited empirical background initializer uses sqrt(sum(s_i^2))/n, so the init SD halves when sampled cells go 25 to 100.",
+   "verdict": "confirmed",
+   "evidence": "scvi _totalvi.py L1265: batch_avg_scale = sqrt(sum(scales^2)/(n_cells**2)). That equals rms(s)/sqrt(n), the standard error of the mean of the per-cell background locations. It is not the between-cell spread. Direct call on my fixture (np.random.seed(0), 14 proteins): n_cells=25 gives scale 0.05986; n_cells=100 gives 0.03080. The ratio is 1.94, about 2, as expected for 1/sqrt(n). In practice n_cells is fixed at 100 and not exposed through MrTotalVI, so the SD is a constant s/10 for any user. The review's 25-to-100 comparison needs a direct call with a non-default n_cells. Judgement: this is an upstream design choice (the prior over the average background, not over per-cell backgrounds), and the learned parameter back_mean_prior is only initialized from it. It is not a defect in mrtotalvi, and it is not a silent wrong answer.",
+   "severity": "design_question",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Do not patch scvi internals. If between-cell spread is wanted, override _get_totalvi_protein_priors in MrTotalVI to use the per-cell SD (including between-cell variation in mu). That changes the init prior and fitted results, so it is impactful and needs user approval. Otherwise document that the init SD is the standard error of the mean at 100 cells.",
+   "changes_fitted_results": true
+  },
+  {
+   "group": "heldout-prior",
+   "finding": "(c) The batch-protein efficiency lognormal penalty enters once per cell rather than once per shared parameter (_module.py ~L833).",
+   "verdict": "partly",
+   "evidence": "Code confirmed: _module.py L833-835 builds lkl_back_pro_full = -LogNormal(0,1).log_prob(per_batch_efficiency), which is broadcast per cell, summed over proteins and added into kl_div_back_pro. loss() then takes the mean over cells (L851-857), so the shared parameter's prior is weighted by n_b/N per batch, i.e. cell-count weighted. This is not a mrtotalvi regression: stock scvi TOTALVAE does the identical thing (scvi module/_totalvae.py L707-725, kl_div_back_pro includes lkl_back_pro_full.sum(dim=1) per cell). The arithmetic claim n_batch_cells x (-log p) is correct for the summed objective, though the training loss is a per-cell mean. I did not run a numerical test of the effect on fits. Judgement: an inherited design choice that mirrors totalVI's ELBO convention. With a prior on an N-cell-shared parameter, the effective prior strength grows with N, which is the usual per-cell-normalized treatment. That makes it a deliberate-looking approximation rather than a clear bug.",
+   "severity": "design_question",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Do not change by default: counting the prior once would weaken it by a factor of about N and change every fit and every checkpoint comparison. If the user wants it, add an opt-in flag, version the objective and replay legacy checkpoints. Otherwise just document the per-cell weighting in the loss docstring and ADR-0011, which currently only states the LogNormal(0,1) prior.",
+   "changes_fitted_results": true
+  },
+  {
+   "group": "likelihood-outputs",
+   "finding": "(a) ambient_isotype: foreground probability of isotype controls is unidentified, and public get_protein_foreground_probability and get_normalized_expression report arbitrary values for controls.",
+   "verdict": "confirmed",
+   "evidence": "Built ambient_isotype model on simulate_citeseq (seed 0, 40 cells/donor), no training needed. Flipped only the last-layer bias of the mixing head (decoder.py_background_decoder) for the two isotype columns, -12 to +12, same torch seeds. Public get_protein_foreground_probability on isotype columns: 0.99998695 / 0.9999965 -> 3.1e-6 / 1.1e-5. get_normalized_expression protein output on the same columns: 0.829 / 0.766 -> 2.6e-6 / 8.8e-6. Loss identical to all digits (1804.264892578125). Cause in source: _module.py ~1375 sets native = exp(alpha)*(f-shift)*target_mask, so rate_fore == rate_back for controls; the Bernoulli mixing regulariser is also masked by target_mask (~line 841). Upstream scvi _totalvi.py:548 returns rate_fore*(1-mixing), so the arbitrary gate scales (A+N). Already handled in get_protein_noise_decomposition: protein_components gives native = 0 for controls (test_isotype_columns_have_no_native_term) and the method drops isotype columns, so the decomposition never exposes the problem. The gap is only in the inherited getters, which still return control columns. Scripts: /tmp/claude-149488/review-verify/likelihood-outputs/a.py (output a.out). Magnitudes differ slightly from REVIEW (untrained model, my fixture) but the effect and direction reproduce.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Override get_protein_foreground_probability in MrTotalVI to return NaN for isotype columns when protein_noise_model=='ambient_isotype', and document it. For get_normalized_expression, 'emit zero native signal' is not exactly right: upstream returns rate_fore*(1-mixing) and rate_fore for a control is ambient+nonspecific, not native. Either set control columns to NaN or to zero (native is zero by construction), or drop them as the decomposition does. Which one is a user choice because it changes a public output convention. Do not change training, the mixing head or the loss. Test by flipping only the control bias and checking every public getter is unchanged.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "likelihood-outputs",
+   "finding": "(b) ZINB: counterfactual rna_rate sums to the library (52) while the expected observed count is (1-p_zero)*rate (26); the low-level sampler draws NB under ZINB.",
+   "verdict": "confirmed",
+   "evidence": "MrTotalVI(gene_likelihood='zinb', centered_v2) with px_dropout head zeroed (p_zero 0.5). get_counterfactual_expression(specified_library_size=52, library_policy='specified'): rna_rate sums to 52.0, 51.999996, 51.999996 for 3 cells. Module forward: expected ZINB mean sum is 21.5/23.0/26.5 against NB rate sum 43/46/53, so half the NB rate. _deterministic_decoder_parameters (_module.py ~1510) returns rna_rate = library_size*rna_scale and never decodes the dropout head. Sampler _module.py ~920 hard-codes NegativeBinomial(mu=px_['rate'], theta=px_['r']) while loss uses ZeroInflatedNegativeBinomial when gene_likelihood=='zinb'. Upstream posterior_predictive_sample raises ValueError 'Invalid gene_likelihood' for this model, so the public sampler rejects ZINB. Default NB path unaffected. Script: /tmp/claude-149488/review-verify/likelihood-outputs/b.py.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "Keep rna_rate as the NB component mean, because ADR-0007 fixes that name and the NB default must not change. Add new variables, for example rna_zero_probability and rna_expected_count = (1-p_zero)*rate, computed per draw inside the decoder before the weighted aggregation in _counterfactual.py ~1609 (a product of averaged terms differs from the average of products). Document rna_rate as the NB component rate under ZINB. In MrTotalVAE.sample, either draw ZeroInflatedNegativeBinomial when gene_likelihood=='zinb' or raise, to match the loss. Renaming rna_rate would break the documented schema, so avoid it. Adding variables is additive but is a public-output schema change; confirm with the user.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "likelihood-outputs",
+   "finding": "(c) 'observed' in the decomposition is a fitted expected count and foreground_probability is the mixture weight (1 - sigmoid(mixing)), not a posterior given y; docstrings should say so.",
+   "verdict": "confirmed",
+   "evidence": "protein_components (_module.py ~1386-1424): fg = 1 - sigmoid(py_['mixing']); native = eff*fg*native_mean; observed = native + ambient + nonspecific, which equals the mixture mean eff*(A + N + fg*S). It uses the decoder mixing logit given z only; y is never used, so it is a prior mixture weight averaged over z draws, not P(foreground | y). The method docstring (_model.py 1149-1165) says 'Posterior expected protein components' and lists foreground_probability without saying what it is. 'Posterior' there refers to the posterior over z, which a reader can misread as posterior given counts. ADR-0011 lines 56-59 also never state the scale of foreground_probability. The upstream docstring of get_protein_foreground_probability cites 'totalVI paper (1 - pi)', consistent with the mixture-weight reading. Review text is accurate. HEAD fixes (0030c3d, 18cf23b) do not touch this.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Docstring-only change: state that foreground_probability is the decoder mixture weight 1-pi averaged over z draws (not P(foreground | y)), that observed is the fitted mixture mean, and that isotypes are dropped. Also note the same distinction in ADR-0011 near the decomposition paragraph. No code change needed.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "inference-state",
+   "finding": "(a) get_protein_noise_decomposition runs an untrained model in train-mode BatchNorm with n_samples=0 and advances BatchNorm counters.",
+   "verdict": "confirmed",
+   "evidence": "Script /tmp/claude-149488/review-verify/inference-state/a.py (output a.out), HEAD 0030c3d, public API only. Fresh scvi synthetic_iid model, use_batch_norm='both', is_trained False, module.training True. get_protein_noise_decomposition(indices=arange(4), n_samples=0) returned finite native/ambient/nonspecific/observed/foreground_probability, shape (4,5). Seven num_batches_tracked counters moved (7 of 7). n_samples=25 also moved 7. n_samples=-3 also returned. module.training stayed True afterwards. Code: _model.py:1148 is decorated only with @torch.inference_mode(); it has no _check_if_trained, no module.eval() and no n_samples validation. _counterfactual.py already calls model._check_if_trained(warn=False) and model.module.eval() in its public functions, so this method is the odd one out. After module.eval() the counters did not move (0), so eval mode is the right remedy. Train-mode BN also uses batch statistics, so outputs depend on batch composition.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Call self._check_if_trained(warn=False). Raise ValueError unless n_samples is an int >= 1. Then set module.eval() and restore the prior training flag in a try/finally. Put the eval/restore in one small helper and reuse it in the other get_* methods that lack it. A state-dict snapshot test is the right acceptance check. One caveat: the review's 'returned finite' point is partly a symptom of missing validation; with n_samples=0 the mean over an empty draw axis is skipped in protein_components, so no NaN appears.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "inference-state",
+   "finding": "(b) An all-zero supplied ambient composition passes validation and becomes NaN after normalization.",
+   "verdict": "confirmed",
+   "evidence": "Same script. dataclasses.replace(profile, profile=zeros) on a simulate_citeseq profile, then MrTotalVI(..., ambient_profile=z, protein_noise_model='ambient') constructed without error. module.ambient_profile buffer was all NaN (tensor([nan, nan, nan])). A one-epoch train then failed loudly: 'Expected parameter loc ... Normal ... found invalid values: nan'. So the failure is loud at train time but the cause is hidden, and an untrained model would run decomposition on NaN silently. Code: _module.py ~1231 checks finite and min()>=0 only, then divides by profile.sum(axis=1) with no positivity check. The same hole applies to a per-batch row that is all zero.",
+   "severity": "crash_or_loud",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "In configure_protein_noise, require profile.sum(axis=1) > 0 for every row (clear ValueError naming the batch row), and ideally validate in AmbientProfile.__post_init__ or aligned() too so the dataclass cannot carry a zero profile. Also check the log-stat arrays (dsb_log_sd > 0 and finite) and ambient_burden_prior scale > 0, as the review says. Fail before the module builds.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "inference-state",
+   "finding": "(c) With decoder BatchNorm, protein_background_source='z_base' runs the full decoder twice per training forward, advancing RNA-path BatchNorm counters twice.",
+   "verdict": "confirmed",
+   "evidence": "Same script, one module forward on 64 cells in train mode, use_batch_norm='decoder'. Source 'z': px_decoder, py_back_decoder, py_fore_decoder and sigmoid_decoder counters each 0 to 1. Source 'z_base': the same four counters 0 to 2. Code: _module.py generative() calls super().generative(z_base, ...) at ~1341 and keeps only back_alpha, back_beta and rate_back. The px_decoder (RNA) and py_fore_decoder run on z_base and update their running mean and variance with z_base activations, and the discarded first-pass background head also updates py_back stats with z. So the running statistics that eval mode uses are a mix of z and z_base inputs. The training-mode loss and gradients are unchanged, because train-mode BN uses batch statistics. Only eval-mode outputs after training differ.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Restricting the second pass to the background head fixes the RNA, fore and sigmoid counters, but py_back would still see z in pass one and z_base in pass two. A cleaner fix is to decode the background head once on z_base and skip the first-pass background head (or run the discarded part with BN momentum 0 or in eval mode). Add a test that checks every unrelated running buffer after one forward. Do not ship this silently: it changes eval-mode outputs of any z_base model trained with decoder BN, and it changes state-dict values of existing checkpoints on retraining. The state-dict keys stay the same, so old checkpoints still load. It is an impactful change the user must approve. It does not matter when use_batch_norm excludes the decoder.",
+   "changes_fitted_results": true
+  },
+  {
+   "group": "engineering-misc",
+   "finding": "(a) Seed combiner accepts results with different context hashes (size factors doubled) and keeps the first hash.",
+   "verdict": "confirmed",
+   "evidence": "Script /tmp/claude-149488/review-verify/engineering-misc/a.py on HEAD 0030c3d. I built _make_context_v2_model, ran get_counterfactual_expression(latent_mean, n_draws=1, library_policy='observed') once on the data and once with obs['size_factor'] x2. Hashes differ (6cb4dc716f vs 46ff9cc519). combine_mrtotalvi_seed_results({0:r0,1:r1}) returned without error or warning, kept context_table_sha256=6cb4dc716f..., and gave mean rna_rate_between_seed_sd 3.38. Cause: _seed.py _ESTIMAND_ATTRS (L17-L39) does not list context_table_sha256, so the L123 loop never compares it. Caveat for the fix: _counterfactual.py L243-L247 sets observed_library_estimand='posterior_lognormal_mean' when the library is model-estimated. The hash then differs per seed legitimately.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "In the combiner, require equal context_table_sha256 across seeds, except when observed_library_estimand == 'posterior_lognormal_mean' (library sizes come from each seed's model). In that case keep per-seed hashes (store a comma list or drop the attr) instead of the first. Treat a missing hash on only some results like _LATER_SETTING_ATTRS: warn that it is unverifiable, do not raise, so old saved results still combine. Add a regression test with doubled size factors that expects ValueError. A broader 'fingerprint of supplied data' is not needed because the hash already covers per-cell batch, panel, library and weight tables. Reference-cell and support settings are already in _ESTIMAND_ATTRS.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "engineering-misc",
+   "finding": "(b) A named protein subset on a DataFrame-backed protein axis raises TypeError in get_normalized_expression.",
+   "verdict": "confirmed",
+   "evidence": "Script b2.py. Fixture: scvi.data.synthetic_iid with obsm['protein_expression'] as a DataFrame with columns CD3, CD4, CD8, then setup_anndata and an MrTotalVI model. model.get_normalized_expression(adata, n_samples=1, protein_list=['CD3','CD8']) raised 'TypeError: tuple indices must be integers or slices, not list' at scvi/model/_totalvi.py:587 (protein_names[protein_mask]). protein_state_registry.column_names is a tuple. The call without protein_list works and returns a DataFrame. protein_list with return_numpy=True works and gives shape (8,2). It is an upstream scvi-tools 1.5.2 bug that the MrTotalVI wrapper (_model.py L1717) passes through. This is a loud crash, not a silent wrong result.",
+   "severity": "crash_or_loud",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "In the wrapper, when protein_list is given and a DataFrame is wanted, call upstream with return_numpy=True and build the DataFrames from the registry names (gene names via the manager, protein names as np.asarray(column_names)[mask], index from obs_names[indices]). Do not mutate the registry tuple, because it is saved state. Check that the n_samples>1 / return_mean=False path, which already forces numpy, is unchanged.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "engineering-misc",
+   "finding": "(c) gene_dispersion='gene-cell' hits UnboundLocalError px_r at first forward.",
+   "verdict": "confirmed",
+   "evidence": "Script c.py. The constructor succeeds with gene_dispersion='gene-cell'. train(max_epochs=1, early_stopping=False) then fails in scvi/module/_totalvae.py L618 with 'UnboundLocalError: cannot access local variable px_r'. This comes from upstream: the px_r if/elif chain has no 'gene-cell' branch. The same bug exists for protein_dispersion='protein-cell' (c2.py gives UnboundLocalError for py_r), which the review did not list and which _model.py L377-L389 does not reject either. Only 'gene-label' and 'protein-label' are rejected there.",
+   "severity": "crash_or_loud",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Extend the construction-time checks at _model.py L377-L389 to reject gene_dispersion='gene-cell' and protein_dispersion='protein-cell', with the same style of message ('use gene or gene-batch', 'protein or protein-batch'). Add tests beside tests/test_unsafe_paths.py L72. Rejecting also validates unknown strings only if you add an allow-list; that is optional.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "engineering-misc",
+   "finding": "(d) The checkpoint-loading flag (_model.py ~L674) is class-level and shared across instances.",
+   "verdict": "confirmed",
+   "evidence": "Script d.py. MrTotalVI._loading_checkpoint is a class attribute (L264). load() sets it True at L673 and False in finally at L677. I held a load inside TOTALVI.load in thread A, then built a fresh MrTotalVI in thread B. The flag read True, and the fresh model's saved init param spec_defaults came out False. It should be True, so it got the legacy encoder architecture. The flag was False again after load. Impact is real only for concurrent threads (load plus construct), or a nested or re-entrant load, which would reset the flag early. Single-threaded use is correct. A fresh model built in the same thread inside super().load is the intended consumer (L318, L324, L434).",
+   "severity": "design_question",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Replace the class attribute with a contextvars.ContextVar (or threading.local) set and reset with a token in load(), and read it at L318, L324 and L434. The same-thread consumer still sees it. Reset by token so nested loads restore the previous value. Run the frozen legacy checkpoint replay tests (tests/test_mrtotalvi_v2.py ~L254) afterwards. Keep a MrTotalVI._loading_checkpoint property if external code reads it.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "engineering-misc",
+   "finding": "(e1) Legacy outlier cutoff (_stats.py ~L1235) materializes all pairs within a sample.",
+   "verdict": "confirmed",
+   "evidence": "Code: ap.component_distribution.log_prob(in_sample.unsqueeze(-2)) at ~L1231-L1235 is unchunked, then _rowwise_max_excluding_diagonal builds an n x n bool eye and a torch.where copy. The outer loop over all cells is already chunked by batch_size. Script e1.py (Independent(Normal), n=3000, D=10): intermediate n*n*D float32 = 343 MiB, measured peak RSS growth 689 MiB, about 2x. Quadratic in the sample size. The default subsample_size=5000 makes the review's 0.93 GiB (5000x5000x10x4 bytes) the per-sample floor, with about 2x peak. I did not run a full 5,000-cell model through get_outlier_cell_sample_pairs because the machine was at load 38. This is a memory scaling limit, not a wrong number.",
+   "severity": "design_question",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Compute the leave-one-out thresholds in row chunks (for example 256 rows at a time). For each chunk call log_prob on that chunk, set entries [i, chunk_start+i] to -inf, and take the row max. The result is identical because each row max is independent. No change to fitted values or thresholds. Test equality against the current output on a small sample, plus a peak-memory test.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "engineering-misc",
+   "finding": "(e2) Ambient calibration (_ambient.py ~L179) densifies selected rows.",
+   "verdict": "confirmed",
+   "evidence": "Script e2.py, tracemalloc. Sparse 6000 droplets x 4000 features, all 6000 selected as cell-free. estimate_adt_ambient(..., adt_features=None): one dense float64 copy 183 MiB, measured peak 550 MiB (about 3x, from toarray plus log(counts+pseudocount) plus the centered temporaries in std). With adt_features=names[:5], peak is 1.6 MiB. So densification is limited to the requested columns and the problem appears only for adt_features=None on RNA+ADT input, or very wide ADT panels. The review's 7.45 GiB for 50,000 x 20,000 float64 is one copy; the real peak is about 3x that. The arithmetic is right.",
+   "severity": "design_question",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Process cell_free in column blocks. Per-feature adt_sum, log mean and log SD (ddof=1) are column-independent, so chunking over columns gives the same values, with float summation per column unchanged. Also consider raising or warning when adt_features is None and the matrix is wider than a few hundred features, since the docstring says 'ADT features to profile' and None uses every column including RNA.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "engineering-misc",
+   "finding": "(f) pyproject classifiers list Python 3.14/3.15 but CI tests 3.12/3.13; scvi-tools>=1.5.2 has no upper bound and the code uses private scvi API.",
+   "verdict": "confirmed",
+   "evidence": "pyproject.toml L19-L22 list 3.12, 3.13, 3.14, 3.15. L89-L94 matrix: stable on 3.12 and 3.13, pre-release deps on 3.13 only. The test.yaml workflow builds its jobs from this hatch matrix. L27: 'scvi-tools>=1.5.2', no upper bound, requires-python>=3.12. Private imports in src: scvi.data._utils._check_if_view, scvi.model._totalvi.TOTALVI, scvi.model._utils.get_max_epochs_heuristic and parse_device_args, scvi.module._constants.MODULE_KEYS, scvi.module._totalvae.TOTALVAE. The wrapper also copies upstream method bodies and cites line numbers of 1.5.2. The venv has scvi-tools 1.5.2, so only the minimum is exercised locally. I could not test a newer scvi-tools (no network use here), so 'newest supported version' is untested by me.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Either add 3.14 (and 3.15 once it exists in CI) to the hatch matrix, or drop the 3.14/3.15 classifiers. Add a CI job pinned to scvi-tools==1.5.2 (lowest direct resolution, uv --resolution lowest-direct). Decide whether to cap scvi-tools (for example <1.6 or <2) given private API use. The cap is the user's call because it limits installs. The 'pre' job already tests newer pre-releases on 3.13.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "stats-claims",
+   "finding": "(a) Default abundance score under a true null: SD 10.652 nats at posterior-SD 0.05, 0.210 with scale floor 0.4, 0.295 with 50-NN; |score|>log2 in 1465/2400, 28/2400, 43/2400.",
+   "verdict": "confirmed",
+   "evidence": "Reran tests/test_da_density_estimator.py::_enrich (stub, 4 samples x 600 cells, no depletion) on HEAD 0030c3d. Output: posterior SD 10.6515, 1465/2400; scale_floor SD 0.2103, 28/2400; knn SD 0.2946, 43/2400; 0 NaN. Default is density_estimator='posterior' and omit_original_sample=True (_stats.py L257, L252; _model.py L1224/L1229). Extra sweep of the stub posterior scale: SD 2.67 (0.1), 0.70 (0.2), 0.34 (0.3), 0.145 (0.5); counts above log2: 686, 165, 61, 8. So the result is a function of the prescribed SD, not of the estimator in general. Script: /tmp/claude-149488/review-verify/stats-claims/a.py. The repo already documents this: test_posterior_is_noise_dominated_on_the_null, the differential_abundance docstring (_stats.py ~L280-300), user_guide.md L312 and L483. Caveat: the SD 0.05 is a stub value. No trained model's posterior SDs were measured, so the review's size claim is a fixture result, and the documented 'noise-dominated when SD is far below cell spacing' is the sound reading. The public method is already labelled 'descriptive'.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "proposed_fix_needs_change",
+   "better_fix": "The review's advice (keep scores descriptive until a donor-level null) is already how the docstring and guide read, so no code fix is needed to make the claim true. Do not change the default estimator without the user: it would change every default output and the 'reproduces earlier outputs exactly' guarantee. Cheaper, non-impactful option: emit a UserWarning when the median posterior scale is below the median nearest-neighbour spacing, and report the real-model posterior-SD to spacing ratio on one trained fit so the 10.65 figure can be placed. Also state that the review figure holds only for the stub SD.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "stats-claims",
+   "finding": "(b) Centering penalty: factual penalty ||a||^2/(2 sigma^2) versus minimum raw-mean penalty ||a||^2/[2 sigma^2 (S-1)].",
+   "verdict": "confirmed",
+   "evidence": "Derivation: fix a factual centered residual a. Raw r_s = c_s + m with centered parts summing to zero, and the minimum over the common shift m is m=0. The other S-1 centered residuals must sum to -a, so min sum ||b||^2 = ||a||^2/(S-1). Total = ||a||^2 S/(S-1), and the ADR's mean over S samples gives ||a||^2/(2 sigma^2 (S-1)). SLSQP check with sigma=1, d=3, S=2,3,5,8: numeric minimum equals a.a/(2(S-1)) to 1e-15 each time (0.2217, 0.4979, 0.3042, 0.4363), versus factual a.a/2 (0.2217, 0.9957, 1.2166, 3.0538). Matches docs/adr/0007 amendment of 2026-11-20 and tests/test_review_fixes.py::test_residual_prior_modes_have_closed_form_costs (0.25 for a=1, S=3). Script: /tmp/claude-149488/review-verify/stats-claims/b.py. Wording caveats: 'factual penalty' means residual_prior_mode='factual' (also the legacy private-residual cost); the default is 'raw_mean' (_module.py L1006-1013). The S-1 factor is a lower bound the network may not reach, which the review says. S=2 gives equality of both costs. It is already in the ADR, so it is not new.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "no_fix_needed",
+   "better_fix": "None. Optional: add the sample-universe size S and residual_prior_mode to the fit summary/provenance so fits with different S are not compared as like for like. That is logging only.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "stats-claims",
+   "finding": "(c) Invariance penalty is nonzero (0.02455) with identical donor embeddings under use_map=False, because residuals are drawn independently for the two decodes (_module.py ~L1148).",
+   "verdict": "confirmed",
+   "evidence": "Built tests/test_u_invariance.py::_model (sample_blind, u_invariance_weight=5, seed 0), set all rows of module.qz.embedding.weight equal, called the module's u_invariance_penalty on the same batch. use_map=True: 0.0 (seeds 0,1,2). use_map=False: 0.024552077 at seed 0 (matches the review's 0.02455), 0.02636 and 0.01975 at other seeds, so it is draw noise. Cause in code: self.qz(u_detached, s) at _module.py ~L1148 is called without deterministic=True, and EncoderUZ.forward (_components.py L1170-1216) draws eps_dist.rsample() when use_map=False. Only the legacy hierarchy is affected, because centered_v2 requires use_map=True (_model.py L366, L704). Existing test test_counterfactual_is_exactly_zero_when_samples_are_identical only uses the default use_map=True. Output: /tmp/claude-149488/review-verify/stats-claims/c.out; script c.py.",
+   "severity": "wrong_result_silent",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "One-line change: call self.qz(u_detached, s, deterministic=True) in the penalty (forward already has that argument and it is a no-op when use_map=True, so default fits are bit-identical). Add a regression test mirroring the zero-embedding test with use_map=False. Using a shared draw for both decodes would also work but tests invariance to noise as well; the deterministic mean matches the docstring ('deterministic decodes'). Scope: only fits with use_map=False and u_invariance_weight>0 change; that is opt-in, so still ask the user before merging because it changes training for those fits. No checkpoint format change.",
+   "changes_fitted_results": true
+  },
+  {
+   "group": "stats-claims",
+   "finding": "(d) The private Wald statistic sums over latent coordinates and uses sample-count df (_stats.py ~L1003); is it public anywhere?",
+   "verdict": "partly",
+   "evidence": "The code is as described: ts = (betas_norm**2).sum(-1).mean(0) then _wald_pvalue(ts, df=n_admissible per cell) (_stats.py L1003-1008, L724). It is not public: MrTotalVI.differential_expression raises RuntimeError and refuses p-values (_model.py L1532-1563); the only caller is MrTotalVI._legacy_differential_expression_for_reproducibility (_model.py ~L1648), used by tests/test_mrtotalvi.py. It is not in __all__ (__init__.py L14-19). docs/user_guide.md L522-527 already says the Wald statistic is private, uses df = number of admissible samples 'as in the MrVI reference', is uncalibrated, and can be anti-conservative with fewer samples than latent dimensions. So the review's claim is correct and already disclosed; I did not run a null simulation of the p-value calibration, and I did not check the MrVI reference's df.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "no_fix_needed",
+   "better_fix": "None needed for the claim. If the legacy method stays in the tree, consider a UserWarning when the returned p-values are read, or dropping the p-value array from the private output; neither is required because the public path refuses.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "stats-claims",
+   "finding": "(e) Monitoring: scale_observations=True weights the scalar loss by donor, but logged components keep cell weights; early stopping uses the cell-weighted metric.",
+   "verdict": "confirmed",
+   "evidence": "Code: with scale_observations the module builds per_cell, then loss=(per_cell*weights).mean() (centered_v2 weights N/(S n_s)) or (per_cell/prefactors).mean() (legacy), but returns LossOutput with reconstruction_loss and kl_local unweighted (_module.py L1035-1075, L1085-1097). scvi's TrainingPlan.compute_and_log_metrics builds elbo_{mode} from reconstruction_loss_sum and kl_local_sum, and the Trainer's early_stopping_monitor defaults to 'elbo_validation' (scvi/train/_trainer.py L108-110). Run (70/20/10 donor split, 3 donors, one batch, eval mode, kl_weight=1): centered_v2 scalar loss 171.367 equals the donor-mean of per-cell component losses 171.367 while the cell-weighted component mean (what elbo_validation reports) is 170.954; legacy scalar loss 2.658 (divided by n_s) against cell-weighted 175.477 and donor-mean 177.183, so the legacy scalar scale is not comparable to elbo_validation at all. Script: /tmp/claude-149488/review-verify/stats-claims/e.py, output e.out. The mismatch is the mechanism the review names; I did not construct an imbalanced split where the two rankings reverse, so 'can select a different fit' is shown by mechanism, not by an observed reversal. I did not check the protein-annealing and terminal-KL-weight parts of this item. The docstring and user guide (L376-392) already disclose the penalty scaling in elbo_validation, but not the donor-weighting mismatch.",
+   "severity": "design_question",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Logging a donor-balanced validation loss next to elbo_validation is non-impactful and safe. Switching the early-stopping monitor to a donor-weighted metric (or changing scale_observations semantics) changes when training stops, so it is an impactful choice the user must approve. A cheap option: document in the docstring that early stopping tracks the cell-weighted elbo_validation under scale_observations=True, and warn when both are set. The review's imbalanced-split reversal test is worth adding before any default change.",
+   "changes_fitted_results": true
+  },
+  {
+   "group": "experiments",
+   "finding": "Both arms recover almost none of the planted induced-marker shift (error 2.85-3.82 vs planted 4.05-4.28): evaluation artifact or model failure?",
+   "verdict": "partly",
+   "evidence": "Planted P15/P16 native is exactly 0 in ct1 ctrl and lognormal(log 15, 0.3) (mean ~15.7) in ct1 stim (tests/_simulate_adt.py lines ~85-87), so planted log2((15.7+1)/(0+1)) = 4.05-4.08. The evaluation scale matches the simulator: native-mean contrast, +1 pseudocount, ct1 only; 4.05 is also the cap, so error is dominated by how well ctrl native is driven to 0. I re-ran seed 17, 8 donors x 80 cells, 20/donor held out (rng 3301), ambient calibration without held-out barcodes, 100 epochs CPU, training seed 11 (scripts /tmp/claude-149488/review-verify/experiments/fit.py, fit2.py; logs a100.log, b100.log, c100.log). Held-out ct1 P15/P16 LFC, planted 4.05/4.08: raw observed counts 2.55/2.64 (ambient+nonspecific background compresses it); default totalVI native 0.77/0.87 (ctrl native mean 6.65 vs true 0, error ~3.3, close to review 3.76); protein_noise_model='ambient' (no seed_background_prior_from_ambient) native 0.00/0.00 (native collapses to 0 in both conditions, error ~4.05; decomposition 'observed' LFC 1.20/0.78), consistent with the review's ambient error 3.4-3.8; protein_noise_model='ambient' + seed_background_prior_from_ambient=True native 3.79/3.23 (error 0.26/0.85), observed 3.09/2.79. So the large error is a real fit failure at the review's configuration, not a scale or pseudocount artifact. Caveat: the review does not record the ambient-arm kwargs (only 'default hierarchy'); the flag is the likely difference but I could not confirm it. One data seed and one training seed.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Record the exact kwargs of each arm in assessment.md and the tsv. State that the ambient arm without seed_background_prior_from_ambient collapsed native to 0 for the induced markers at 100 epochs, and that the ADR A1 arm (seed flag on) recovered 3.2-3.8 of 4.05. Add that result before concluding that the ambient model cannot recover induced effects. Do not change any default from this evidence alone: changing the default of seed_background_prior_from_ambient would alter fitted results and is the user's call.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "experiments",
+   "finding": "Contrast definition and scale: pseudocount +1 on mean native counts versus planted fold change.",
+   "verdict": "refuted",
+   "evidence": "Planted contrast in the evaluator (run_arm.py lines ~121-124) and in my check uses true native means, log2((mean_stim+1)/(mean_ctrl+1)), the same formula as fitted. Both sides share the pseudocount, and native mean 15.5 gives 4.05, matching planted_P15_log2_fc 4.047 in heldout_protein.tsv. The +1 does shrink the scale (without it the planted LFC is unbounded because ctrl is 0), but it affects planted and fitted identically. Fitted contrast is computed from get_protein_noise_decomposition 'native' (posterior expected native count, 16 draws), not the observed output. Native and observed differ: observed LFC is lower in my runs (e.g. 3.09 vs 3.79) because background counts are added. Reading the review's claim of 'mean absolute LFC error' as native-based is correct.",
+   "severity": "none",
+   "fix_judgement": "no_fix_needed",
+   "better_fix": "Optionally add an observed-count LFC (raw 2.55/2.64 here) as a reference line, so readers see that the attainable observed contrast is about 2.6, not 4.05.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "experiments",
+   "finding": "Default training (100 epochs, 480 cells, ~23 stim ct1 cells) plausibly recovers the induced effect.",
+   "verdict": "partly",
+   "evidence": "Only ~51 held-out and ~114 training ct1 cells exist, ~60 of them stim. Default-totalVI native contrast at 100 epochs is 0.77/0.87 (ctrl native mean 6.65 vs true 0, stim 12-14 vs true 15.5-15.9); the ambient model with the seed flag gets 3.79/3.23 at the same budget, so the budget is enough when the background prior is seeded and not enough otherwise. I did not complete a longer-epoch run (400 and 300-epoch jobs were killed after heavy CPU contention; load average ~35 on 4 cores), so the effect of training length is untested.",
+   "severity": "design_question",
+   "fix_judgement": "needs_user_decision",
+   "better_fix": "Add one longer-epoch fit (for example 400) for the default and ambient arms before attributing failure to the model class. Epoch count and seeding flags are impactful choices that the user must approve.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "experiments",
+   "finding": "Figure caption/text mismatch: text says panel C compares aggregate contrasts across all held-out cells, panel is titled 'Other 18 markers'.",
+   "verdict": "partly",
+   "evidence": "Not a contradiction. The evaluator's null contrast (run_arm.py ~125-131) uses all cells for the non-induced targets, so 'other 18 markers over all held-out cells' is consistent with the text. But the panel title and y-label do not say 'all cells' while B says 'two induced markers' (ct1 only), and panel B and C axes are not on the same scale (C values 0.08-0.10 are in a regime of native means ~150, where +1 pseudocount makes the contrast insensitive). The figure PNG shows A, B and C as titled; assessment.md line 51 gives the scope in text only. Panel C also shows no improvement for ambient in 3 of 4 lines, matching the text.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Retitle panel B 'Two induced markers, affected cell type' and panel C 'Other 18 markers, all held-out cells'. Add one sentence that C is insensitive to marker-level errors because of high native means and the +1 pseudocount.",
+   "changes_fitted_results": false
+  },
+  {
+   "group": "experiments",
+   "finding": "The archived benchmark evaluator scores training rows (all registered cells), not a held-out set, and the isotype arm scores 20 features versus 22.",
+   "verdict": "confirmed",
+   "evidence": "tusoskill_runs/mrtotalvi_ambient_20261122/benchmark/run_arm.py: run_one registers all simulated cells (line ~106), trains, then calls model.get_protein_noise_decomposition(n_samples=10) with no adata/indices (line 110), and every metric (rmse, native_r, lfc errors, recon_r) uses all rows of adata (lines 112-149). There is no split. Targets come from comp['native'].columns (line 112); the decomposition drops isotype columns only when isotype_names is set (_model.py lines 1171-1173), which only arms A2/A3 set, so those score 20 features and A0/A1 score 22 (includes the two isotype columns with true native 0). The claim is accurate, with the note that indices INDUCED=[15,16] still map to P15/P16 in both layouts.",
+   "severity": "doc_or_claim",
+   "fix_judgement": "proposed_fix_right",
+   "better_fix": "Freeze a split and one target list (20 biological markers) before any arm and score isotypes as a separate endpoint, as the review proposes. This changes only the archived evaluator, not the package or its fitted results.",
+   "changes_fitted_results": false
+  }
+ ],
+ "critic": {
+  "spot_checks": [
+   "cell-selection (a), bool mask with sample= in get_aggregated_posterior: re-read src/mrtotalvi/_stats.py L51-54 and L117-123 on HEAD 0030c3d. _as_indices only does np.asarray, so a bool mask reaches np.intersect1d as 0/1. The finding holds by source. My scripted rerun (cell-selection/g.py) did not finish: the host was heavily loaded and it timed out. I did not independently reproduce the numbers.",
+   "feature-identity (a), no RNA name check: grep for var_names in src/mrtotalvi finds no check in _model.py. The only var_names uses are the multi-file datamodule, one counterfactual use (_counterfactual.py L1323) and the manager getter. _check_protein_names (_model.py L2037-2060) covers protein uns only. Source supports the verdict. The 0.3385 latent diff was not rerun, same timeout.",
+   "feature-identity (b), protein validator bypassed: authoritative_protein_names is imported only in _datamodule.py (L53, L130). _model.py never calls it, so setup_anndata cannot reach it. Source supports the verdict. Note that _check_protein_names' docstring says scvi itself compares DataFrame column names on transfer. The verdict's claim that a DataFrame-only permutation passes at query time was not tested."
+  ],
+  "uncovered": [
+   "README 'sample-free cell state' example and the sample_blind donor-leakage argument: no verdict covers it. Review advice is to correct the README and test donor predictability within cell type.",
+   "Penalized-objective claims: get_elbo cannot rank prior scales or architectures. No verdict covers this documentation point.",
+   "Monitoring item, partial: the extra claims are untested. They are the global embedding penalty using the registered cell count, protein-likelihood warm-up entering with the KL weight, and the terminal KL weight below one on large runs.",
+   "Invariance item, second half: no verdict covers the claim that the inherited adversary can turn on for all-zero panel entries and acts on z, including the donor residual.",
+   "Mixture-mean identity efficiency*E[B]*[1+(1-pi)(f-1)] and the ambient c*a term: no verdict re-derived it. Only the existing test is cited by the review.",
+   "Conditional non-identifiability of c versus B and f (c'=c+delta, B'=B-delta*a, f' preserved): no verdict checked the algebra numerically.",
+   "Isotype-mode nuisance encoder reading total ADT counts, so target expression can enter it: no verdict covers it.",
+   "Upstream normalized protein expression includes the full foreground rate with ambient signal, and the review asks for a consistent public native-component entry point: only partly touched by the isotype verdict.",
+   "Experiments headline: median RMSE on log1p native counts fell 0.599 to 0.503 across all four pairs, and the 'other 18 markers improved in only one pair' claim. The experiments skeptic only reran one fit (seed 17) for induced markers. The RMSE and 18-marker claims, the seed-29 data and the 'eight fits' were not reproduced.",
+   "Earlier-simulation claims (donor-pooling 0.043 vs MrTotalVI 0.232 vs stock totalVI 0.457; longer training helps): no verdict. They are labelled archived runs on an older commit.",
+   "Paired-DA fixture (mean donor log ratio -0.400 vs grouped +0.680) and the kNN-versus-kernel pooling and donor-weighting argument: no verdict.",
+   "Package-tested-behaviour claims: the 418 passed, 1 skipped suite result, the 26 passed ambient tests at 37bd399, and 'ambient-isotype save/load returns matching native predictions'. None was rerun.",
+   "Review proposal to freeze the training split before estimating empirical masks and weighting denominators (not only the protein prior), with 'supplied experimental panel masks distinct': only the protein background prior was checked. Empirical missingness masks and weighting denominators are unchecked.",
+   "Review's 'test on the newest scvi-tools version claimed as supported' for the inherited API combinations: no newer version was tested.",
+   "Sample_blind fixture claim about the DA 'omit_original_sample' group construction (one reference sample in its own group, two in the other) was not independently checked."
+  ],
+  "weak_verdicts": [
+   "cell-selection (d3), 'partly': get_local_sample_distances and get_counterfactual_latent are marked fine on backed data by pointing to tests/test_review_fixes.py::test_backed_adata_returns_rows_in_request_order, not by a value comparison run. Repeated-index requests for get_elbo and get_reconstruction_error were not run. local_sample_enrichment was not run. 'Sweep complete' is overstated.",
+   "feature-identity (b), 'confirmed': the reproduction covers a uns-versus-DataFrame conflict and duplicate uns names. The proposed fix to also compare DataFrame columns to the registry at query time is untested. The _check_protein_names docstring says scvi already compares DataFrame columns on transfer, so the DataFrame-only permutation case is unverified.",
+   "feature-identity (a), better_fix: strict ordered equality will also reject a same-order rename, such as symbols versus Ensembl IDs, and users may rely on that. It is a behaviour change the user should approve. The verdict calls it fixed_results-neutral but does not flag this as a decision.",
+   "training-support, first finding, 'confirmed': one seed, one tiny fixture, counts [2 2 0]. The review's [3,3,0] was not matched. The failure mode is real, but how often a donor lands with zero training cells depends on the fixture. Its severity 'wrong_result_silent' therefore needs the caveat that it needs a small donor.",
+   "training-support, 'Resolve the split before fit' is marked partly but its fix says do not re-plumb. The review's acceptance check (identical priors when held-out counts change) is the heldout-prior item, and the two groups give different remedies: training-support says derive counts post-hoc; heldout-prior says compute the prior in train() after the split. They need one decision, because the second changes the starting model and needs approval.",
+   "heldout-prior (b), 'confirmed': the verdict itself says this is an upstream design choice (SE of the mean) and not a defect. The label 'confirmed' on the review's wording is misleading. A fairer label is 'confirmed arithmetic, not a bug'. The review's 0.05176 to 0.02588 was reproduced as a ratio only (0.0599 to 0.0308), with n_cells set by direct call.",
+   "heldout-prior (c), 'partly': no numerical test of fit impact. The verdict agrees stock scvi does the same, so it is a deliberate convention. The review's 'count once and version the objective' is correctly flagged as impactful.",
+   "stats-claims (a), 'confirmed': the 10.65 nats figure holds only for the stub posterior SD of 0.05. No trained model's posterior SDs were measured, so the review's practical claim ('often looks large') is shown for the fixture only. The verdict says so, but the label 'confirmed' hides it.",
+   "stats-claims (e), 'confirmed' by mechanism only: no imbalanced split was built where the rankings reverse, and the protein-annealing and terminal-KL parts were not checked. The review's 'can select a different fit' is unproven.",
+   "experiments, first finding, 'partly': the skeptic could not recover the ambient arm's kwargs. The conclusion 'real fit failure at the review's configuration' rests on a guess that the seed_background_prior_from_ambient flag was off. One data seed, one training seed, and the review's own 3.4-3.8 error is matched only by the flag-off run. It also did not use the review's exact split seed and per-arm configuration.",
+   "experiments, 'refuted' (contrast scale): this checks formula consistency between planted and fitted, which is sound. It does not address the review's question of whether the metric fits the induced-marker claim, since a native mean of 0 in control makes the planted LFC capped at 4.05.",
+   "inference-state (b), 'confirmed': the NaN profile was built with dataclasses.replace, which is not a normal user route. The constructor path is public, so the claim holds, but a loud failure at training makes 'silent' apply only to an untrained model.",
+   "likelihood-outputs (a), run on an untrained model with last-layer bias flipped by hand. That shows non-identifiability of the mixing head under the loss, not that a trained model reports arbitrary values. A trained ambient_isotype fit was not checked.",
+   "engineering-misc (d), thread race: shown with a held load in a second thread, which is a synthetic schedule. Real impact needs concurrent loads, so 'design_question' is right. 'confirmed' overstates it for single-threaded users.",
+   "engineering-misc (e1)/(e2), memory: measured on synthetic arrays and not through a full model call. The 7.45 GiB figure is one float64 copy, and the real peak was measured at about 3x on a smaller case.",
+   "Cross-group tension on the isotype fix: likelihood-outputs says NaN or zero for control columns is the user's choice, while cell-selection proposes a general wrapper for inherited getters. A single wrapper design must handle both the isotype masking and the backed reorder, or the two fixes will conflict in get_normalized_expression and get_protein_foreground_probability."
+  ]
+ }
+}
