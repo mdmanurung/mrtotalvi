@@ -192,6 +192,25 @@ implemented sample-conditioning paths, but this software property alone does
 not establish biological disentanglement. Use `z` for registered-sample model
 transformations and local sample distances.
 
+### Sample-level embedding (GloScope)
+
+`get_sample_divergence` compares whole samples, in the style of GloScope {cite:p}`Wang_2024`. Each
+sample is the distribution of its cells’ posterior-mean `z`. The default fits a Gaussian mixture per
+sample and returns the symmetric KL divergence between every pair, as an `(sample_x, sample_y)` array.
+`get_sample_embedding` runs classical MDS on that matrix, as GloScope’s `plotMDS` does.
+
+```python
+div = model.get_sample_divergence()  # dens="GMM", dist_metric="KL"
+emb = model.get_sample_embedding(div, n_components=2)  # DataFrame indexed by sample
+```
+
+`z` holds both cell-state composition and within-state sample shifts, so the divergence reflects
+both. `dens="KNN"` uses k-nearest-neighbour estimators (`k=50`) instead of a mixture, and
+`dist_metric="JS"` gives the Jensen-Shannon divergence. The defaults follow GloScope 2.1.2, with two
+departures: the mixture has full covariances (mclust `VVV`; GloScope uses `VVE`, which
+scikit-learn lacks), and the `r=10000` Monte Carlo draws are made once per sample, not once per pair.
+GloScope warns below 500 cells per sample; so does this method.
+
 ## Batch representation
 
 By default the batch covariate is one-hot encoded, so every batch adds a column to the

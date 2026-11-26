@@ -4,6 +4,12 @@
 
 ### Added
 
+- `get_sample_divergence` and `get_sample_embedding`: GloScope-style sample-level comparison
+  (Wang et al. 2024). Each sample's cells in `z` get a Gaussian mixture (or k-NN) density; samples are
+  compared by symmetric KL or Jensen-Shannon divergence, and classical MDS gives a sample embedding.
+  Defaults follow GloScope 2.1.2, except full-covariance mixtures (scikit-learn has no `VVE`) and
+  Monte Carlo draws made once per sample rather than once per pair.
+
 - Opt-in `learn_ambient_profile` (EXPERIMENTAL): the ambient composition becomes `softmax(logits)`, started at
   the profile, with the cell-free droplets' multinomial likelihood as a global penalty. `AmbientProfile` keeps
   `droplet_counts`. On the ADR-0012 simulation it gave no clear gain (native log1p RMSE 0.267 vs 0.282 per-batch,
