@@ -2680,3 +2680,125 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         if keep_cell:
             group_coords["cell_name"] = cell_names
         return xr.Dataset(data_vars, coords={**coords, **group_coords})
+
+    def get_sample_divergence(
+        self,
+        adata: AnnData | None = None,
+        indices: npt.ArrayLike | None = None,
+        dens: Literal["GMM", "KNN"] = "GMM",
+        dist_metric: Literal["KL", "JS"] = "KL",
+        r: int = 10000,
+        num_components: tuple[int, ...] = (5, 10, 15, 20),
+        k: int = 50,
+        random_state: int | None = None,
+        batch_size: int | None = None,
+    ) -> xr.DataArray:
+        """GloScope divergence between the cell distributions of every pair of samples.
+
+        Each sample is the distribution of its cells' posterior-mean ``z`` (the
+        sample-aware latent of :meth:`get_latent_representation`), so the divergence
+        reflects both cell-state composition and within-state sample shifts. This ports
+        GloScope 2.1.2 (Wang et al., Genome Biol 2024, doi:10.1186/s13059-024-03398-1). Departures
+        from the R package: full-covariance mixtures (scikit-learn has no mclust ``VVE``), and
+        Monte Carlo draws made once per sample rather than once per pair.
+
+        Parameters
+        ----------
+        adata
+            AnnData object. Defaults to the object used to initialise the model.
+        indices
+            Indices of observations to use.
+        dens
+            ``"GMM"`` (GloScope default) fits a full-covariance Gaussian mixture per
+            sample. ``"KNN"`` uses k-nearest-neighbour estimators with no density fit.
+        dist_metric
+            ``"KL"`` (GloScope default): ``KL(p||q) + KL(q||p)``. ``"JS"``:
+            Jensen-Shannon divergence.
+        r
+            Monte Carlo draws per sample (GMM only). GloScope default.
+        num_components
+            Candidate GMM component counts, chosen by BIC. GloScope default.
+        k
+            Neighbour rank for ``dens="KNN"``. GloScope default. Samples with ``k`` or
+            fewer cells get NaN.
+        random_state
+            Seed of the GMM fits and Monte Carlo draws. ``None`` uses
+            :attr:`scvi.settings.seed`.
+        batch_size
+            Minibatch size for encoding.
+
+        Returns
+        -------
+        :class:`~xarray.DataArray` of shape ``(sample_x, sample_y)``, symmetric with a
+        zero diagonal, in ``sample_order``. Samples with no cell in the selection
+        are left out.
+        """
+        from ._gloscope import sample_divergence
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        # A divergence depends only on each sample's set of cells, so sorted unique indices
+        # keep the latent rows and obs rows aligned for backed data and drop repeats.
+        if indices is not None:
+            indices = np.asarray(indices)
+            indices = np.unique(np.flatnonzero(indices) if indices.dtype == bool else indices)
+        z = self.get_latent_representation(adata, indices=indices, give_mean=True, give_z=True, batch_size=batch_size)
+        obs = adata.obs if indices is None else adata.obs.iloc[indices]
+        sample_ids = obs[self.sample_key].to_numpy()
+        present = set(sample_ids.tolist())
+        samples = [s for s in self.sample_order if s in present]
+        values, samples = sample_divergence(
+            z,
+            sample_ids,
+            samples=samples,
+            dens=dens,
+            dist_metric=dist_metric,
+            r=r,
+            num_components=num_components,
+            k=k,
+            random_state=random_state,
+        )
+        return xr.DataArray(
+            values,
+            dims=["sample_x", "sample_y"],
+            coords={"sample_x": samples, "sample_y": samples},
+            name="sample_divergence",
+            attrs={"dens": dens, "dist_metric": dist_metric, "latent": "z"},
+        )
+
+    def get_sample_embedding(
+        self,
+        divergence: xr.DataArray | None = None,
+        n_components: int = 2,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """Sample-level embedding: classical MDS of the GloScope divergence matrix.
+
+        Parameters
+        ----------
+        divergence
+            Output of :meth:`get_sample_divergence`. ``None`` computes it with ``kwargs``.
+        n_components
+            Number of MDS axes.
+        **kwargs
+            Passed to :meth:`get_sample_divergence` when ``divergence`` is ``None``.
+
+        Returns
+        -------
+        :class:`~pandas.DataFrame` indexed by sample, one column per MDS axis
+        (``MDS1``, ``MDS2``, ...). The eigenvalue of each axis is in ``.attrs["eigenvalues"]``.
+        """
+        from ._gloscope import classical_mds
+
+        if divergence is None:
+            divergence = self.get_sample_divergence(**kwargs)
+        elif kwargs:
+            raise ValueError("Pass either divergence or get_sample_divergence arguments, not both.")
+        coords, eigval = classical_mds(divergence.values, n_components)
+        frame = pd.DataFrame(
+            coords,
+            index=pd.Index(divergence["sample_x"].values, name="sample"),
+            columns=[f"MDS{i + 1}" for i in range(coords.shape[1])],
+        )
+        frame.attrs["eigenvalues"] = eigval
+        return frame
