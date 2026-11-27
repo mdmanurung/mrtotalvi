@@ -515,8 +515,9 @@ def test_counterfactual_donor_never_reaches_q_zp():
 def test_mog_prior_has_twenty_components_and_trains():
     model = _fit(protein_latent_prior="mog")
     assert model.module.pzp.u_prior_means.shape == (20, N_ZP)
-    for name in ("kl_zp_train", "kl_zp_validation"):
+    for name in ("kl_zp_mc_estimate_train", "kl_zp_mc_estimate_validation"):
         assert np.isfinite(model.history[name].to_numpy(dtype=float)).all()
+    assert "kl_zp_train" not in model.history  # the MoG KL is a Monte Carlo estimate and is labelled as one
     module, tensors, inference, generative = _outputs(model)
     module.train()
     inference = module.inference(**module._get_inference_input(tensors))
@@ -527,7 +528,7 @@ def test_mog_prior_has_twenty_components_and_trains():
 
 @torch.no_grad()
 def test_mog_with_one_live_component_matches_the_closed_form_kl():
-    model = _model(protein_latent_prior="mog")
+    model = _model(protein_latent_prior="mog", protein_latent_mog_kl_draws=1)  # the 20000 draws below are the estimate
     module, tensors, inference, _ = _outputs(model)
     prior = module.pzp
     prior.u_prior_means.zero_()
@@ -561,12 +562,30 @@ def test_consistency_kl_matches_the_closed_form_on_a_hand_example():
     without = module.loss(tensors, patched, generative, kl_weight=0.3)
     # G180: the weight is annealed with kl_weight like the other KL terms.
     assert (with_weight.loss - without.loss).item() == pytest.approx(0.3 * 0.5 * expected, rel=1e-4)
-    assert with_weight.kl_local["kl_div_zp_consistency"].mean().item() == pytest.approx(expected, rel=1e-5)
+    # A2: the consistency KL is a training term and a logged metric only; it never enters kl_local (ELBO).
+    assert "kl_div_zp_consistency" not in with_weight.kl_local
+    assert with_weight.extra_metrics["kl_zp_consistency"].item() == pytest.approx(expected, rel=1e-5)
+
+
+def test_consistency_weight_leaves_the_reported_elbo_terms_unchanged():
+    # Codex A2: enabling the weight must not change validation ELBO (sum of kl_local) or early stopping.
+    model = _consistency_model()
+    module, tensors, inference, generative = _outputs(model)
+    on = module.loss(tensors, inference, generative, kl_weight=1.0)
+    module.protein_latent_consistency_weight = 0.0
+    off = module.loss(tensors, inference, generative, kl_weight=1.0)
+    assert on.kl_local.keys() == off.kl_local.keys()
+    for key in off.kl_local:
+        assert torch.equal(on.kl_local[key], off.kl_local[key]), key
+    assert on.extra_metrics["kl_zp_consistency"].item() > 0
+    assert "kl_zp_consistency" not in off.extra_metrics
 
 
 def test_consistency_off_by_default_logs_nothing():
     module, tensors, inference, generative = _outputs(_model())
-    assert "kl_div_zp_consistency" not in module.loss(tensors, inference, generative).kl_local
+    out = module.loss(tensors, inference, generative)
+    assert "kl_div_zp_consistency" not in out.kl_local
+    assert "kl_zp_consistency" not in out.extra_metrics
 
 
 def test_consistency_with_mismatched_dimensions_stops():
@@ -624,6 +643,7 @@ KNOBS = {
     "protein_latent_free_bits_granularity": "group",
     "protein_latent_free_bits_statistic": "per_cell",
     "protein_latent_free_bits_schedule": "after_warmup",
+    "protein_latent_mog_kl_draws": 4,
     "protein_latent_decode_draw": "mean",
 }
 
@@ -675,7 +695,47 @@ def test_invalid_options_raise(kw):
 def test_mog_prior_with_per_dimension_free_bits_is_not_implemented():
     with pytest.raises(NotImplementedError, match="free_bits"):
         _model(protein_latent_prior="mog", protein_latent_free_bits=0.25)
+    _model(
+        protein_latent_prior="mog",
+        protein_latent_free_bits=0.25,
+        protein_latent_free_bits_granularity="group",
+    )
+
+
+def test_mog_kl_draws_default_is_64_and_is_validated():
+    # G190: default 64. MoG checkpoints without the argument load, so MoG with free bits builds without it.
+    assert _model(protein_latent_prior="mog").module.protein_latent_mog_kl_draws == 64
     _model(protein_latent_prior="mog", protein_latent_free_bits=0.25, protein_latent_free_bits_granularity="group")
+    for bad in (0, -1, 2.5, True, None):
+        with pytest.raises(ValueError, match="protein_latent_mog_kl_draws"):
+            _model(protein_latent_prior="mog", protein_latent_mog_kl_draws=bad)
+
+
+@torch.no_grad()
+def test_mog_free_bits_average_draws_before_clamping():
+    # Codex A3: identical N(0, 1) components, q = N(0.2, 1), true KL 0.02, floor 0.125. One draw clamps a
+    # noisy estimate (about 0.163 per cell); many draws average the noise out before the clamp (about 0.125).
+    def mean_cost(draws):
+        model = _model(
+            n_zp=1,
+            protein_latent_prior="mog",
+            protein_latent_free_bits=0.125,
+            protein_latent_free_bits_granularity="group",
+            protein_latent_free_bits_statistic="per_cell",
+            protein_latent_mog_kl_draws=draws,
+        )
+        module = model.module.eval()
+        module.pzp.u_prior_means.zero_()
+        module.pzp.u_prior_scales.zero_()
+        qzp = Normal(torch.full((4000, 1), 0.2), torch.ones(4000, 1))
+        torch.manual_seed(0)
+        term, _, _ = module._zp_loss({"qzp": qzp, "zp": qzp.sample()}, kl_weight=1.0)
+        return term.mean().item()
+
+    assert mean_cost(1) > 0.15
+    assert mean_cost(256) < 0.135
+    # G190: the default of 64 draws sits close to max(floor, true KL) = 0.125, not the one-draw 0.163.
+    assert mean_cost(64) == pytest.approx(max(0.125, 0.02), abs=0.01)
 
 
 @pytest.mark.parametrize("mode", ["ambient", "ambient_isotype"])
@@ -795,3 +855,30 @@ def test_precomputed_matrix_with_nan_or_wrong_shape_raises():
 
     with pytest.raises(ValueError, match="shape"):
         _precomputed_adata(drop_column)
+
+
+def test_precomputed_matrix_reaches_the_private_lfc_path():
+    # Codex A4: the private LFC path dropped protein_latent_input in both inference calls and raised.
+    def add_condition(adata):
+        adata.obs["condition"] = np.where(adata.obs["sample"] == "sample_0", "a", "b")
+
+    adata = _precomputed_adata(add_condition)
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=N_Z, n_latent_u=2, n_latent_protein_only=N_ZP,
+        protein_latent_encoder_input="precomputed",
+    )  # fmt: skip
+    model.train(max_epochs=1, **TRAIN)
+    de = model._legacy_differential_expression_for_reproducibility(
+        sample_cov_keys=["condition"], mc_samples=2, batch_size=32, store_lfc=True, delta=None
+    )
+    assert np.all(np.isfinite(de["lfc"].values))
+    # The full-inference fallback (no cached aux) takes the matrix too.
+    module = model.module.eval()
+    tensors = next(iter(model._make_data_loader(adata=adata, batch_size=8)))
+    inputs = module._get_inference_input(tensors)
+    inputs = {k: v for k, v in inputs.items() if k != "n_samples"}
+    zeros = torch.zeros(8, N_Z)
+    with pytest.warns(UserWarning):
+        out = module.compute_h_from_x_eps(extra_eps=zeros, **inputs)
+    assert torch.isfinite(out).all()
+    assert torch.isfinite(module._infer_lfc_aux(**inputs)["library_gene"]).all()

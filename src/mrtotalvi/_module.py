@@ -238,6 +238,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         protein_latent_free_bits_granularity: str = "per_dim",
         protein_latent_free_bits_statistic: str = "batch_mean",
         protein_latent_free_bits_schedule: str = "constant",
+        protein_latent_mog_kl_draws: int = 64,
         protein_latent_decode_draw: str = "draw",
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
@@ -326,6 +327,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             protein_latent_free_bits_statistic,
             protein_latent_free_bits_schedule,
             protein_latent_decode_draw,
+            protein_latent_mog_kl_draws,
             u_invariance_weight=u_invariance_weight,
         )
 
@@ -1742,6 +1744,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         statistic,
         schedule,
         decode_draw,
+        mog_kl_draws,
         *,
         u_invariance_weight,
     ) -> None:
@@ -1766,6 +1769,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 f"protein_latent_consistency_weight must be a finite number >= 0; got {consistency_weight!r}."
             )
         check_free_bits_options(kl_weight, free_bits, granularity, statistic, schedule, "protein_latent")
+        if isinstance(mog_kl_draws, bool) or not isinstance(mog_kl_draws, int) or mog_kl_draws < 1:
+            raise ValueError(f"protein_latent_mog_kl_draws must be a whole number >= 1; got {mog_kl_draws!r}.")
         self.n_latent_protein_only = int(n)
         self.protein_latent_combination = combination
         self.protein_latent_heads = heads
@@ -1779,6 +1784,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.protein_latent_free_bits_statistic = statistic
         self.protein_latent_free_bits_schedule = schedule
         self.protein_latent_decode_draw = decode_draw
+        self.protein_latent_mog_kl_draws = mog_kl_draws
         # Set by readouts that decode the posterior mean of z_p (see ``_zp_mean_decode_if_set``).
         self._zp_mean_decode = False
         if self.n_latent_protein_only == 0:
@@ -1855,13 +1861,20 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     def _kl_zp(self, inference_outputs) -> torch.Tensor | None:
         """``KL(q(z_p | y) || p(z_p))`` per cell, shape ``(batch,)``; ``None`` when ``z_p`` is off.
 
-        Closed form for ``N(0, I)``; a Monte-Carlo estimate on the draws of ``z_p`` for the MoG prior.
+        Closed form for ``N(0, I)``. For the MoG prior it is a Monte-Carlo estimate on the draws of ``z_p``.
+        The estimate averages ``protein_latent_mog_kl_draws`` draws per cell (default 64: the draw of the
+        forward pass plus fresh ``rsample`` draws from ``q(z_p | y)``), always, before any free-bits floor
+        clamps it, because the clamp of a single noisy draw is biased upward.
         """
         qzp = inference_outputs.get("qzp")
         if qzp is None:
             return None
         if self.protein_latent_prior == "mog":
-            return _kl_u(self.pzp, qzp, inference_outputs["zp"], None)
+            kl = _kl_u(self.pzp, qzp, inference_outputs["zp"], None)
+            extra = self.protein_latent_mog_kl_draws - 1
+            for _ in range(extra):
+                kl = kl + _kl_u(self.pzp, qzp, qzp.rsample(), None)
+            return kl / (1 + extra)
         return self._kl_zp_dims(qzp).sum(dim=-1)
 
     @staticmethod
@@ -1888,10 +1901,16 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     def _zp_loss(self, inference_outputs, kl_weight: float, cell_weights: torch.Tensor | None = None):
         """Loss term, ``kl_local`` entries and logged metrics of ``z_p``; ``None`` when it is off.
 
-        The term per cell is ``kl_weight * beta * cost + consistency_weight * KL_consistency``, where
+        The term per cell is ``kl_weight * (beta * cost + consistency_weight * KL_consistency)``, where
         ``cost`` is the KL with the free-bits floor (:func:`~mrtotalvi._kl_free_bits.kl_with_free_bits`).
-        ``kl_div_zp`` keeps the true KL, so logs and ``elbo_validation`` stay comparable. The
-        consistency weight is annealed with ``kl_weight`` like the other KL terms (G180).
+        ``kl_div_zp`` keeps the true KL, so logs and ``elbo_validation`` stay comparable. The consistency
+        weight is annealed with ``kl_weight`` like the other KL terms (G180). The consistency KL is a
+        training penalty, not part of the ELBO: it is returned in the metrics only (``kl_zp_consistency``),
+        never in ``kl_local``, so enabling it leaves ``elbo_validation`` and early stopping unchanged.
+        Its estimand is the conditional KL ``KL(q(z | u, x, y) || q(z_p | y))`` averaged over ``u`` (the
+        draws of ``u`` of the minibatch); averaging over ``u`` adds the conditional mutual information
+        between ``z`` and ``u`` to the marginal KL, so it is not the marginal ``KL(q(z | x, y) || q(z_p | y))``.
+        For the MoG prior, ``kl_div_zp`` and the logged ``kl_zp_mc_estimate`` are Monte-Carlo estimates.
         """
         qzp = inference_outputs.get("qzp")
         if qzp is None:
@@ -1918,7 +1937,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             )
         term = kl_weight * self.protein_latent_kl_weight * cost
         kl_local = {"kl_div_zp": kl}
-        metrics = {"kl_zp": kl.detach().mean()}
+        metrics = {("kl_zp_mc_estimate" if self.protein_latent_prior == "mog" else "kl_zp"): kl.detach().mean()}
         loc = qzp.loc.detach()
         # The variance across one cell is 0, which would bias the epoch mean low.
         if loc.shape[0] >= 2:
@@ -1931,7 +1950,6 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         consistency = self._consistency_kl(inference_outputs)
         if consistency is not None:
             term = term + kl_weight * self.protein_latent_consistency_weight * consistency
-            kl_local["kl_div_zp_consistency"] = consistency
             metrics["kl_zp_consistency"] = consistency.detach().mean()
         return term, kl_local, metrics
 
@@ -2405,6 +2423,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         cat_covs: torch.Tensor | None = None,
         sample_index: torch.Tensor | None = None,
         cf_sample: torch.Tensor | None = None,
+        protein_latent_input: torch.Tensor | None = None,
         **_,
     ) -> dict:
         """Return inference outputs that are constant across CRN MC draws.
@@ -2430,6 +2449,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             cat_covs=cat_covs,
             sample_index=sample_index,
             cf_sample=cf_sample,
+            protein_latent_input=protein_latent_input,
         )
         return {"library_gene": out["library_gene"]}
 
@@ -2538,6 +2558,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 cat_covs=cat_covs,
                 sample_index=sample_index,
                 cf_sample=cf_sample,
+                protein_latent_input=protein_latent_input,
             )
             qu = out["qu"]
             u = u_anchor if u_anchor is not None else qu.mean

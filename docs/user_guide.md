@@ -587,7 +587,7 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   u-encoder's sample-conditioned mechanism), the prior is `N(0, I)` with weight 1, annealed with `kl_weight` like `kl_z`, and `w` is
   sampled in training. `protein_residual_heads="fore_mixing"` lets the foreground and mixing heads read
   `[z, w]`; `"all"` adds the background head. There is no package default for the heads: `"fore_mixing"` only
-  makes the signature valid. The RNA scale never reads `w`. Counterfactual and DE decodes set `w = 0`;
+  makes the signature valid. The RNA scale never reads `w`. Counterfactual and private legacy DE/LFC decodes set `w = 0` (public `differential_expression` raises);
   `get_protein_noise_decomposition` (both readouts) and `get_normalized_expression` use each cell's own
   draws. Each epoch logs `kl_w` and `protein_residual_active_units` (`<name>_train` and `<name>_validation`):
   a `kl_w` near 0 with no active units means `w` collapsed, a large `kl_w` means it absorbs the protein
@@ -628,16 +628,16 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   per-cell clamp, and `..._schedule` is `"constant"` or `"after_warmup"` (once `kl_weight` reaches the plan's `max_kl_weight`). The logged
   `kl_div_zp` stays the true KL. With the MoG prior only `"group"` is defined. `protein_latent_consistency_weight > 0`
   adds that weight times `KL(q(z | x, y) || q(z_p | y))`: closed form, conditional on the draw of `u`, annealed
-  with `kl_weight` like the other KL terms. It needs `n_latent_protein_only == n_latent` (no projection between different sizes is
+  with `kl_weight` like the other KL terms. It is a training penalty only: it is not in `kl_local`, so `elbo_validation` and early stopping do not change, and it is logged as `kl_zp_consistency`. Averaging the conditional KL over `u` adds the conditional mutual information between `z` and `u` to the marginal KL. It needs `n_latent_protein_only == n_latent` (no projection between different sizes is
   defined), `use_map=False` and `hierarchy_mode="legacy"`.
-  Counterfactual and DE decodes decode each cell's own `z_p` at its posterior mean (own batch and donor, never a
+  Counterfactual and private legacy DE/LFC decodes decode each cell's own `z_p` at its posterior mean (own batch and donor, never a
   counterfactual one), so in `"replace"` mode a donor change leaves every protein output unchanged (up to float32
   rounding). `"replace"` needs `protein_latent_heads="all"` (the background head reads `z_p` too) and raises
   `ValueError` otherwise; `"concat"` keeps both head options. The posterior mean is used for CF/DE whatever
   `protein_latent_decode_draw` says.
   `protein_latent_decode_draw` sets what factual readouts (`get_normalized_expression`, the protein noise
   decomposition, the posterior readout) decode: one draw of `z_p` per draw of `z` (`"draw"`, scvi's behaviour) or
-  its posterior mean (`"mean"`). Training and validation losses always draw. Each epoch logs `kl_zp`,
+  its posterior mean (`"mean"`). Training and validation losses always draw. With the MoG prior the KL is a Monte-Carlo estimate, logged as `kl_zp_mc_estimate`; `protein_latent_mog_kl_draws` (default 64) draws per cell are averaged, always, before any free-bits floor clamps it. Each epoch logs `kl_zp`,
   `protein_latent_active_units` and, with the `N(0, I)` prior, `kl_zp_dim_<d>` (`<name>_train` and
   `<name>_validation`): a `kl_zp` near 0 with no active units means `z_p` collapsed, a large `kl_zp` means it
   absorbs the protein signal. Only `protein_noise_model="totalvi"` is supported. The options cannot be combined

@@ -2,6 +2,25 @@
 
 ## 1.0.0
 
+### Fixed
+
+- Protein-only latent consistency KL (`protein_latent_consistency_weight > 0`) no longer enters `kl_local` or the ELBO: it
+  stays in the annealed training loss and is logged as `kl_zp_consistency`, so `elbo_validation` and early stopping do not
+  change when it is enabled. The estimand is the conditional KL averaged over `u`.
+- `protein_latent_encoder_input="precomputed"` now reaches both inference calls of the private LFC path
+  (`_infer_lfc_aux`, `compute_h_from_x_eps`); before, the legacy DE/LFC path raised. Docs no longer name the public
+  `differential_expression` (it raises) for these decodes.
+- `get_protein_noise_decomposition(readout="posterior", size_factor="total_adt")` raised `KeyError('ambient')`; only
+  returned count components are scaled.
+
+### Changed
+
+- With `protein_latent_prior="mog"` the logged KL is `kl_zp_mc_estimate`, a Monte-Carlo estimate. New
+  `protein_latent_mog_kl_draws` (default 64, G190) sets how many draws per cell are averaged, always (also with free
+  bits 0), before the free-bits floor clamps the estimate. MoG fits therefore differ from main (one draw), and the
+  MoG metric is renamed `kl_zp_mc_estimate`; the default-off state-dict hash tests are unaffected (no golden test
+  covers MoG).
+
 ### Added
 
 - `n_latent_protein_only` (EXPERIMENTAL, default `0`, which is off and leaves every output byte-identical): a saved
