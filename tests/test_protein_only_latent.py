@@ -222,10 +222,9 @@ def _inference_pair(model):
     )
 
 
-@pytest.mark.parametrize("heads", ["fore_mixing", "all"])
 @torch.no_grad()
-def test_replace_mode_protein_heads_ignore_rna_input_given_fixed_zp(heads):
-    model = _model(protein_latent_combination="replace", protein_latent_heads=heads)
+def test_replace_mode_protein_heads_ignore_rna_input_given_fixed_zp():
+    model = _model(protein_latent_combination="replace", protein_latent_heads="all")
     module, tensors, inf_a, perturbed, inf_b = _inference_pair(model)
     # q(z_p | y) reads y only, so perturbing x leaves it identical while z moves.
     assert torch.equal(inf_a["qzp"].loc, inf_b["qzp"].loc)
@@ -235,11 +234,16 @@ def test_replace_mode_protein_heads_ignore_rna_input_given_fixed_zp(heads):
     b = _generate(module, perturbed, inf_b, zp)["py_"]
     assert (a["mixing"] - b["mixing"]).abs().max().item() == 0.0
     assert (a["fore_scale"] - b["fore_scale"]).abs().max().item() == 0.0
-    if heads == "all":
-        assert (a["back_alpha"] - b["back_alpha"]).abs().max().item() == 0.0
-        assert (a["back_beta"] - b["back_beta"]).abs().max().item() == 0.0
-    else:  # the background head still reads z
-        assert not torch.equal(a["back_alpha"], b["back_alpha"])
+    # G181: in replace mode the background head reads z_p too.
+    assert (a["back_alpha"] - b["back_alpha"]).abs().max().item() == 0.0
+    assert (a["back_beta"] - b["back_beta"]).abs().max().item() == 0.0
+
+
+def test_replace_mode_refuses_heads_that_leave_the_background_on_z():
+    with pytest.raises(ValueError, match="replace"):
+        _model(protein_latent_combination="replace", protein_latent_heads="fore_mixing")
+    _model(protein_latent_combination="concat", protein_latent_heads="fore_mixing")
+    assert _model().module.protein_latent_heads == "all"  # the signature default is valid with replace
 
 
 @pytest.mark.parametrize("heads", ["fore_mixing", "all"])
@@ -267,9 +271,10 @@ def test_perturbing_zp_leaves_rna_scale_exactly_unchanged(combination):
     assert not torch.equal(a["py_"]["mixing"], b["py_"]["mixing"])  # the protein side does move
 
 
-@pytest.mark.parametrize("combination", ["replace", "concat"])
 @torch.no_grad()
-def test_heads_knob_is_honoured(combination):
+def test_heads_knob_is_honoured_in_concat_mode():
+    combination = "concat"
+
     def pair(heads):
         module, tensors, inference, _ = _outputs(
             _model(protein_latent_combination=combination, protein_latent_heads=heads)
@@ -554,8 +559,8 @@ def test_consistency_kl_matches_the_closed_form_on_a_hand_example():
     with_weight = module.loss(tensors, patched, generative, kl_weight=0.3)
     module.protein_latent_consistency_weight = 0.0
     without = module.loss(tensors, patched, generative, kl_weight=0.3)
-    # The weight is constant: it does not follow the kl_weight warm-up.
-    assert (with_weight.loss - without.loss).item() == pytest.approx(0.5 * expected, rel=1e-5)
+    # G180: the weight is annealed with kl_weight like the other KL terms.
+    assert (with_weight.loss - without.loss).item() == pytest.approx(0.3 * 0.5 * expected, rel=1e-4)
     assert with_weight.kl_local["kl_div_zp_consistency"].mean().item() == pytest.approx(expected, rel=1e-5)
 
 
@@ -690,7 +695,7 @@ def test_u_invariance_is_not_combined_with_z_p():
 
 
 def test_background_source_z_base_needs_a_background_head_that_ignores_z_p():
-    model = _model(protein_latent_heads="fore_mixing")
+    model = _model(protein_latent_combination="concat", protein_latent_heads="fore_mixing")
     model.module.configure_protein_noise(protein_background_source="z_base")
     assert model.module.protein_background_source == "z_base"
     with pytest.raises(ValueError, match="protein_background_source"):
@@ -699,7 +704,7 @@ def test_background_source_z_base_needs_a_background_head_that_ignores_z_p():
 
 @torch.no_grad()
 def test_z_base_background_ignores_z_p_and_the_donor():
-    model = _model(protein_latent_combination="replace", protein_latent_heads="fore_mixing")
+    model = _model(protein_latent_combination="concat", protein_latent_heads="fore_mixing")
     model.module.configure_protein_noise(protein_background_source="z_base")
     module, tensors, inference, _ = _outputs(model)
     torch.manual_seed(0)

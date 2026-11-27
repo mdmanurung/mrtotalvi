@@ -605,19 +605,21 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   `"ambient_zscore"` (DSB z-score, needs `ambient_profile`; `q(u)` keeps its own `protein_encoder_input`) or `"precomputed"` (a per-cell matrix you compute, for example full dsb with both steps, passed as `setup_anndata(protein_latent_input_obsm_key=...)`: a DataFrame with the counts' protein names in the same order and no NaN; the package feeds it per minibatch as given, with no gradient, and never computes dsb).
   `protein_latent_conditioning="donor"` adds the real donor to `q(z_p | y)` by the u-encoder's mechanism.
   `protein_background_source="z_base"` is allowed when the background head ignores `z_p`
-  (`protein_latent_heads="fore_mixing"`). Only the KL weight has a package default (1.0, scvi's `max_kl_weight`); for the rest the signature
+  (`"concat"` with `protein_latent_heads="fore_mixing"`). Only the KL weight has a package default (1.0, scvi's `max_kl_weight`); for the rest the signature
   defaults only make it valid, and the P2.5 comparison names the values it tests.
   The KL of `z_p` is weighted by `protein_latent_kl_weight` times the annealed `kl_weight`. A free-bits floor
   (`protein_latent_free_bits`, in nats; 0 is off) makes a dimension, or all dimensions as one group, cost
   `max(floor, KL)`; `..._granularity` is `"per_dim"` or `"group"`, `..._statistic` is the minibatch mean or the
   per-cell clamp, and `..._schedule` is `"constant"` or `"after_warmup"` (once `kl_weight` reaches 1.0). The logged
   `kl_div_zp` stays the true KL. With the MoG prior only `"group"` is defined. `protein_latent_consistency_weight > 0`
-  adds that weight times `KL(q(z | x, y) || q(z_p | y))`: closed form, conditional on the draw of `u`, constant
-  across the warm-up. It needs `n_latent_protein_only == n_latent` (no projection between different sizes is
+  adds that weight times `KL(q(z | x, y) || q(z_p | y))`: closed form, conditional on the draw of `u`, annealed
+  with `kl_weight` like the other KL terms. It needs `n_latent_protein_only == n_latent` (no projection between different sizes is
   defined), `use_map=False` and `hierarchy_mode="legacy"`.
   Counterfactual and DE decodes decode each cell's own `z_p` at its posterior mean (own batch and donor, never a
-  counterfactual one), so in `"replace"` mode with `protein_latent_heads="all"` a donor change leaves every protein
-  output unchanged, while with `"fore_mixing"` the background head still reads `z` and moves.
+  counterfactual one), so in `"replace"` mode a donor change leaves every protein output unchanged (up to float32
+  rounding). `"replace"` needs `protein_latent_heads="all"` (the background head reads `z_p` too) and raises
+  `ValueError` otherwise; `"concat"` keeps both head options. The posterior mean is used for CF/DE whatever
+  `protein_latent_decode_draw` says.
   `protein_latent_decode_draw` sets what factual readouts (`get_normalized_expression`, the protein noise
   decomposition, the posterior readout) decode: one draw of `z_p` per draw of `z` (`"draw"`, scvi's behaviour) or
   its posterior mean (`"mean"`). Training and validation losses always draw. Each epoch logs `kl_zp`,

@@ -220,7 +220,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         protein_residual_encoder_input: str = "protein",
         n_latent_protein_only: int = 0,
         protein_latent_combination: str = "replace",
-        protein_latent_heads: str = "fore_mixing",
+        protein_latent_heads: str = "all",
         protein_latent_prior: str = "standard",
         protein_latent_encoder_input: str = "log1p",
         protein_latent_conditioning: str = "blind",
@@ -1752,6 +1752,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 "n_latent_protein_only > 0 cannot be combined with n_latent_protein_residual > 0: both feed "
                 "the protein heads and the choice between them is not made here. Use one of them."
             )
+        if combination == "replace" and heads != "all":
+            raise ValueError(
+                "protein_latent_combination='replace' needs protein_latent_heads='all': the background head "
+                "reads z_p too (G181). Use protein_latent_combination='concat' for 'fore_mixing'."
+            )
         if u_invariance_weight > 0:
             raise NotImplementedError(
                 "u_invariance_weight > 0 is not implemented with n_latent_protein_only > 0: its counterfactual "
@@ -1850,7 +1855,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         The term per cell is ``kl_weight * beta * cost + consistency_weight * KL_consistency``, where
         ``cost`` is the KL with the free-bits floor (:func:`~mrtotalvi._kl_free_bits.kl_with_free_bits`).
         ``kl_div_zp`` keeps the true KL, so logs and ``elbo_validation`` stay comparable. The
-        consistency weight is constant: it does not follow the ``kl_weight`` warm-up.
+        consistency weight is annealed with ``kl_weight`` like the other KL terms (G180).
         """
         qzp = inference_outputs.get("qzp")
         if qzp is None:
@@ -1883,7 +1888,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 metrics[f"kl_zp_dim_{index:02d}"] = value
         consistency = self._consistency_kl(inference_outputs)
         if consistency is not None:
-            term = term + self.protein_latent_consistency_weight * consistency
+            term = term + kl_weight * self.protein_latent_consistency_weight * consistency
             kl_local["kl_div_zp_consistency"] = consistency
             metrics["kl_zp_consistency"] = consistency.detach().mean()
         return term, kl_local, metrics

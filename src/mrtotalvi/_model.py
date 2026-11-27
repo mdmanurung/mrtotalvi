@@ -316,7 +316,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         check both. Checkpoints without it load with ``0``.
     protein_latent_combination
         **EXPERIMENTAL.** ``"replace"``: the protein heads read ``z_p`` only, so the protein decode has no
-        path from the RNA. ``"concat"``: they read ``[z, z_p]``. Counterfactual and DE decodes
+        path from the RNA. ``"concat"``: they read ``[z, z_p]``. ``"replace"`` needs ``protein_latent_heads="all"`` (``ValueError`` otherwise). Counterfactual and DE decodes
         (``get_counterfactual_expression``, ``differential_expression``) decode each cell's *own*
         ``z_p`` at its posterior mean, so a donor change does not move a protein head that reads only
         ``z_p``; the posterior mean keeps the two arms of a contrast on the same ``z_p``.
@@ -339,7 +339,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         donor).
     protein_latent_consistency_weight
         **EXPERIMENTAL.** ``0`` (default) is off. ``> 0`` adds ``weight * KL(q(z | x, y) || q(z_p | y))``
-        to the loss, closed form and constant (it does not follow the ``kl_weight`` warm-up). It needs
+        to the loss, closed form and annealed with ``kl_weight`` like the other KL terms. It needs
         ``n_latent_protein_only == n_latent`` (otherwise ``ValueError``; no projection is defined) and an
         analytic ``q(z | u) = N(z_base + mean(eps), scale(eps))``, so ``use_map=False`` and
         ``hierarchy_mode="legacy"``. The term is conditional on the draw of ``u``. Both sides get gradient.
@@ -511,7 +511,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         protein_residual_encoder_input: Literal["protein", "protein_sample"] = "protein",
         n_latent_protein_only: int = 0,
         protein_latent_combination: Literal["replace", "concat"] = "replace",
-        protein_latent_heads: Literal["fore_mixing", "all"] = "fore_mixing",
+        protein_latent_heads: Literal["fore_mixing", "all"] = "all",
         protein_latent_prior: Literal["standard", "mog"] = "standard",
         protein_latent_encoder_input: Literal["log1p", "ambient_zscore"] = "log1p",
         protein_latent_conditioning: Literal["blind", "donor"] = "blind",
