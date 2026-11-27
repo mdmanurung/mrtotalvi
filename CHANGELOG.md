@@ -46,8 +46,12 @@
 - `get_sample_divergence` and `get_sample_embedding`: GloScope-style sample-level comparison
   (Wang et al. 2024). Each sample's cells in `z` get a Gaussian mixture (or k-NN) density; samples are
   compared by symmetric KL or Jensen-Shannon divergence, and classical MDS gives a sample embedding.
-  Defaults follow GloScope 2.1.2, except full-covariance mixtures (scikit-learn has no `VVE`) and
-  Monte Carlo draws made once per sample rather than once per pair.
+  Defaults follow GloScope, except full-covariance mixtures (scikit-learn has no `VVE`). The GMM Monte Carlo KL
+  and JS redraw `r` points per sample pair and direction, as R GloScope does, with a per-(pair, direction) random
+  stream derived from `random_state` and the sorted-label rank of the samples (independent of sample order). The
+  Draw counts per component follow hard-classification proportions, as in R. GMM values do not match R GloScope
+  yet (mclust `VVV` with k-means initialisation, not `VVE`). The k-NN estimator has exact R parity (checked against GloScope 1.4.0 and
+  2.0.1; Mule, 1e-13).
 
 - `nuisance_h_input` (EXPERIMENTAL, default `"isotypes_total"`): `"isotypes_batch"` feeds the `h` encoder the
   isotype counts and a one-hot batch instead of the all-protein log total. In a public CITE-seq benchmark with the
@@ -93,6 +97,10 @@
   enters the loss as `penalty / n_cells`. See `docs/user_guide.md`.
 
 ### Changed
+
+- `get_sample_divergence(dens="GMM")` output changes: Monte Carlo points are now drawn fresh for every sample pair and
+  direction instead of once per sample and reused. Values shift within Monte Carlo error at the same seed;
+  `dens="KNN"` is byte-identical.
 
 - scvi-tools is pinned to `>=1.5.2,<1.6` (also in the `autotune` extra), because the package imports private
   scvi-tools modules and only 1.5.2 is tested. The sdist ships an explicit file list. The package ships

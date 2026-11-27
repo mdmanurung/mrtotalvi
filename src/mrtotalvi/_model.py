@@ -2986,9 +2986,13 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         Each sample is the distribution of its cells' posterior-mean ``z`` (the
         sample-aware latent of :meth:`get_latent_representation`), so the divergence
         reflects both cell-state composition and within-state sample shifts. This ports
-        GloScope 2.1.2 (Wang et al., Genome Biol 2024, doi:10.1186/s13059-024-03398-1). Departures
-        from the R package: full-covariance mixtures (scikit-learn has no mclust ``VVE``), and
-        Monte Carlo draws made once per sample rather than once per pair.
+        GloScope (Wang et al., Genome Biol 2024, doi:10.1186/s13059-024-03398-1); parity was
+        checked against GloScope 1.4.0 and 2.0.1. ``dens="KNN"`` is the estimator with exact R
+        parity (verified on Mule to 1e-13). ``dens="GMM"`` does not match R GloScope yet: the
+        mixture is scikit-learn ``GaussianMixture`` with full covariance (mclust ``VVV`` with
+        k-means initialisation, not GloScope's ``VVE``). As in R, the Monte Carlo component
+        counts follow the hard-classification shares of the sample's cells, and fresh draws
+        are made for every sample pair and direction.
 
         Parameters
         ----------
@@ -3003,7 +3007,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             ``"KL"`` (GloScope default): ``KL(p||q) + KL(q||p)``. ``"JS"``:
             Jensen-Shannon divergence.
         r
-            Monte Carlo draws per sample (GMM only). GloScope default.
+            Monte Carlo draws per sample pair and direction (GMM only). GloScope default.
         num_components
             Candidate GMM component counts, chosen by BIC. GloScope default.
         k
@@ -3011,7 +3015,9 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             fewer cells get NaN.
         random_state
             Seed of the GMM fits and Monte Carlo draws. ``None`` uses
-            :attr:`scvi.settings.seed`.
+            :attr:`scvi.settings.seed`. Each (pair, direction) draw has its own stream derived
+            from the seed and the sorted-label rank of the samples, so results do not depend
+            on the order of samples or on pair scheduling.
         batch_size
             Minibatch size for encoding.
 
