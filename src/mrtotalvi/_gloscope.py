@@ -36,17 +36,32 @@ numpy and scipy only. Sources:
 - Scrucca, Fop, Murphy and Raftery (2016), R Journal 8(1):289-317: mclust 5 model names, the
   hc subset option, the VVE estimator, and the BIC convention (larger is better).
 - Scrucca and Raftery (2015), Adv Data Anal Classif 9:447-460: the scaled SVD transform.
+- Banfield and Raftery (1993), Biometrics 49:803-821: model-based agglomerative clustering,
+  which merges the pair of clusters that gives the largest classification likelihood.
+- Fraley (1998), SIAM J Sci Comput 20:270-281, is cited by the mclust help pages for the hc
+  algorithms. It was not available, so none of it is used (see below).
 
 As in R GloScope, Monte Carlo draws split the ``r`` points over components by the
 hard-classification proportions of the sample's cells, while log-densities use the fitted
 mixing weights (G143). This holds for both ``gmm_model`` values.
 
-This is a clean-room implementation. It does NOT reproduce R mclust. mclust starts EM from
-model-based hierarchical clustering (VVV criterion). That criterion is not in the
-documentation, so this code starts from Ward clustering of the scaled-SVD data on a seeded
-subset of at most 2000 cells. On Mule it picks a larger component count (G=20 in 74 of 100
-fits, against 4 of 100 for R) and reaches a higher log-likelihood. Divergences correlate with
-R at Pearson about 0.70 (bench report R098). The free-parameter count and BIC match mclust.
+EM starts from model-based agglomerative clustering with unconstrained covariances (hcModelName
+"VVV", hcUse "SVD", subset 2000 cells; the mclust.options defaults) on the scaled-SVD data
+(Banfield and Raftery 1993). Each step merges the pair of clusters with the smallest increase of
+``sum_k n_k log|Sigma_k|``, the classification-likelihood criterion. The published text of the
+treatment of clusters with fewer points than dimensions (Fraley 1998) was not available, so this
+port makes its own choice: ``Sigma_k = (W_k + s0 I) / (n_k + 1)``, with ``W_k`` the scatter of
+the cluster and ``s0`` the mean variance of the transformed data (one pseudo-observation at the
+overall mean variance; mclust documents ``alpha = beta = 1`` as defaults, but not their role).
+EM has no iteration cap, as in mclust 6.1.4 (``emControl()$itmax`` is 2147483647), with
+relative tolerance 1e-5.
+
+This is a clean-room implementation. It does NOT reproduce R mclust. The merge tree differs
+from R's: on Mule sample d233 the partitions agree with R's ``hclass`` at an adjusted Rand
+index of about 0.5 to 0.7. The earlier Ward-based start picked a larger component count than R
+(G=20 in 74 of 100 fits, against 4 of 100) with a higher log-likelihood and a divergence
+Pearson of about 0.70 with R (bench report R098); see the CHANGELOG for the figures of this
+start. The free-parameter count and BIC formula match mclust.
 """
 
 from __future__ import annotations
@@ -66,7 +81,6 @@ MIN_CELLS = 500  # GloScope warns below this many cells per sample
 
 _VVE_SUBSET = 2000  # hc subset size for the initial partition when a sample has more cells (mclust default)
 _VVE_TOL = 1e-5  # relative log-likelihood tolerance of EM (mclust emControl default)
-_VVE_MAX_ITER = 300  # EM iteration cap; a fit that has not converged by then is kept
 _VVE_EPS = np.finfo(float).eps  # a variance below eps * the largest one counts as singular
 
 
@@ -147,13 +161,15 @@ def _vve_estep(x, pro, mean, rot, omega):
     return np.exp(cols - ll[:, None]), ll.sum()
 
 
-def _vve_fit(x, z0, tol=_VVE_TOL, max_iter=_VVE_MAX_ITER):
-    """EM for VVE from initial responsibilities ``z0`` of shape ``(n, G)``."""
+def _vve_fit(x, z0, tol=_VVE_TOL, max_iter=None):
+    """EM for VVE from initial responsibilities ``z0`` of shape ``(n, G)``; ``max_iter=None`` means no cap."""
     if z0.sum(0).min() < 1:
         raise _VVEError("empty component at start")
     pro, mean, rot, omega = _vve_mstep(x, z0, None)
     ll_old, trace = -np.inf, []
-    for _ in range(max_iter):
+    it = 0
+    while max_iter is None or it < max_iter:
+        it += 1
         z, ll = _vve_estep(x, pro, mean, rot, omega)
         if not np.isfinite(ll) or z.sum(0).min() < 1e-3 or omega.min() <= _VVE_EPS * omega.max():
             raise _VVEError("singular or empty component")
@@ -168,22 +184,75 @@ def _vve_fit(x, z0, tol=_VVE_TOL, max_iter=_VVE_MAX_ITER):
     return {"pro": pro, "mean": mean, "rot": rot, "omega": omega, "loglik": ll, "z": z, "loglik_trace": trace}
 
 
+def _vvv_hc(t: np.ndarray, gs: list[int]) -> dict[int, np.ndarray]:
+    """Model-based agglomerative clustering with unconstrained covariances; partitions for each count in ``gs``.
+
+    Starts from singletons. Each step merges the pair of clusters with the smallest increase of
+    ``sum_k n_k log|Sigma_k|`` (Banfield and Raftery 1993), where ``Sigma_k = (W_k + s0 I) / (n_k + 1)`` keeps the
+    covariance of small clusters non-singular (this port's own choice; see the module docstring). Returns
+    ``{g: labels}`` with labels ``0..g-1``.
+    """
+    n, d = t.shape
+    s0 = np.trace(np.cov(t.T, bias=True)) / d
+    count = np.ones(n)
+    mean = t.copy()
+    scatter = np.zeros((n, d, d))
+    logdet = np.full(n, d * np.log(s0 / 2))  # singleton: Sigma = s0 I / 2
+
+    def merge_cost(i, js):
+        nij = count[i] + count[js]
+        diff = mean[i] - mean[js]
+        wij = (
+            scatter[i] + scatter[js] + (count[i] * count[js] / nij)[:, None, None] * diff[:, :, None] * diff[:, None, :]
+        )
+        sigma = (wij + s0 * np.eye(d)) / (nij + 1)[:, None, None]
+        return nij * np.linalg.slogdet(sigma)[1] - count[i] * logdet[i] - count[js] * logdet[js]
+
+    cost = np.full((n, n), np.inf)  # upper triangle: cost[i, j] for i < j
+    for i in range(n - 1):
+        js = np.arange(i + 1, n)
+        cost[i, js] = merge_cost(i, js)
+    label = np.arange(n)
+    alive = np.ones(n, dtype=bool)
+    out = {}
+    for k in range(n, min(gs), -1):
+        i, j = np.unravel_index(np.argmin(cost), cost.shape)
+        nij = count[i] + count[j]
+        diff = mean[i] - mean[j]
+        scatter[i] += scatter[j] + (count[i] * count[j] / nij) * np.outer(diff, diff)
+        mean[i] = (count[i] * mean[i] + count[j] * mean[j]) / nij
+        count[i] = nij
+        logdet[i] = np.linalg.slogdet((scatter[i] + s0 * np.eye(d)) / (nij + 1))[1]
+        alive[j] = False
+        label[label == j] = i
+        cost[j, :] = np.inf
+        cost[:, j] = np.inf
+        others = np.flatnonzero(alive)
+        others = others[others != i]
+        c = merge_cost(i, others)
+        above = others > i
+        cost[i, others[above]] = c[above]
+        cost[others[~above], i] = c[~above]
+        if k - 1 in gs:
+            out[k - 1] = np.unique(label, return_inverse=True)[1]
+    if n in gs:
+        out[n] = np.arange(n)
+    return out
+
+
 def _vve_init(x: np.ndarray, gs: list[int], rng: np.random.Generator) -> dict[int, np.ndarray]:
     """Initial responsibilities per component count.
 
-    Ward clustering of the scaled-SVD data of a seeded subset (at most 2000 cells), one M-step on
-    the subset, one E-step on all cells. This is not mclust's VVV criterion.
+    VVV model-based agglomerative clustering of the scaled-SVD data of a seeded subset (at most 2000 cells), one
+    M-step on the subset, one E-step on all cells (the mclust way of starting EM from a subset).
     """
-    from scipy.cluster.hierarchy import fcluster, ward
-
     n = x.shape[0]
     idx = np.sort(rng.choice(n, _VVE_SUBSET, replace=False)) if n > _VVE_SUBSET else np.arange(n)
-    tree = ward(_svd_transform(x[idx]))
+    partitions = _vvv_hc(_svd_transform(x[idx]), gs)
     out = {}
     for g in gs:
-        lab = fcluster(tree, g, criterion="maxclust")
-        zs = (lab[:, None] == np.unique(lab)[None, :]).astype(float)
-        if zs.shape[1] != g or zs.sum(0).min() < 2:
+        zs = (partitions[g][:, None] == np.arange(g)[None, :]).astype(float)
+        if zs.sum(0).min() < 2:
             continue
         try:
             pro, mean, rot, omega = _vve_mstep(x[idx], zs, None)

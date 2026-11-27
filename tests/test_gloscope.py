@@ -343,3 +343,61 @@ def test_vve_fit_at_iteration_cap_reports_loglik_of_returned_parameters():
     z, ll = _vve_estep(x, fit["pro"], fit["mean"], fit["rot"], fit["omega"])
     assert fit["loglik"] == pytest.approx(ll, abs=1e-9)
     np.testing.assert_allclose(fit["z"], z)
+
+
+# --- model-based VVV hierarchical initialisation and the uncapped EM (G192-G194) ---------------------------------
+
+
+def test_vvv_hc_merges_the_closest_pairs_first():
+    # Closed form: with 5 points the 3-cluster partition joins the two tight pairs and leaves the far point alone.
+    from mrtotalvi._gloscope import _vvv_hc
+
+    t = np.array([[0.0, 0.0], [0.1, 0.0], [10.0, 10.0], [10.0, 10.1], [-10.0, 10.0]])
+    out = _vvv_hc(t, [2, 3, 4])
+    assert len(set(out[4].tolist())) == 4
+    g3 = out[3]
+    assert g3[0] == g3[1] and g3[2] == g3[3] and len({g3[0], g3[2], g3[4]}) == 3
+    assert len(set(out[2].tolist())) == 2
+    # Nested: every 2-cluster group is a union of 3-cluster groups.
+    assert {frozenset(np.flatnonzero(out[2] == v)) for v in set(out[2].tolist())} in (
+        {frozenset({0, 1}), frozenset({2, 3, 4})},
+        {frozenset({0, 1, 4}), frozenset({2, 3})},
+        {frozenset({0, 1, 2, 3}), frozenset({4})},
+    )
+
+
+def test_vvv_hc_matches_r_mclust_hc_on_iris_two_groups():
+    # R mclust 6.1.4 hc(iris[, 1:4], modelName = "VVV", use = "SVD"), hclass(, 2), called as a black box
+    # (bench scripts/iris_hc.R): setosa without row 42 forms one group, every other row the second.
+    from sklearn.datasets import load_iris
+
+    from mrtotalvi._gloscope import _svd_transform, _vvv_hc
+
+    r_labels = np.ones(150, dtype=int)
+    r_labels[:50] = 0
+    r_labels[41] = 1
+    mine = _vvv_hc(_svd_transform(load_iris().data), [2])[2]
+    assert len(set(mine.tolist())) == 2
+    assert (mine == mine[0]).tolist() == (r_labels == r_labels[0]).tolist()
+
+
+def test_vve_init_is_seeded_and_returns_responsibilities_per_component_count():
+    from mrtotalvi._gloscope import _vve_init
+
+    x, _ = _vve_data(n=800)
+    a = _vve_init(x, [2, 3], np.random.default_rng(0))
+    b = _vve_init(x, [2, 3], np.random.default_rng(0))
+    assert set(a) == {2, 3}
+    for g in a:
+        assert a[g].shape == (len(x), g)
+        np.testing.assert_allclose(a[g].sum(1), 1.0)
+        np.testing.assert_array_equal(a[g], b[g])
+
+
+def test_vve_em_has_no_iteration_cap_by_default():
+    import inspect
+
+    from mrtotalvi import _gloscope
+
+    assert inspect.signature(_gloscope._vve_fit).parameters["max_iter"].default is None
+    assert not hasattr(_gloscope, "_VVE_MAX_ITER")
