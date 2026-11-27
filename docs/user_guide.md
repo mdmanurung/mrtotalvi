@@ -604,7 +604,8 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   `"batch_mean"` clamps a group when its minibatch-mean KL is below `lambda`, and each cell then carries the
   constant `lambda` for that group (the clamped total spread equally over cells); `"per_cell"` clamps each cell's
   own group KL. `protein_residual_free_bits_schedule="after_warmup"` applies the floor only once `kl_weight` has reached
-  `1.0`. Under `scale_observations` the clamp uses the unweighted batch mean. Logged `kl_w` and
+  the plan's `max_kl_weight` (default `1.0`; set from `plan_kwargs` in `train()`). Under `scale_observations` the
+  clamp uses the batch mean weighted by the donor weights, so the loss stays continuous at the floor. Logged `kl_w` and
   `kl_w_dim_<i>` (per-dimension KL) stay the true KL. `elbo_validation` stays the true ELBO, so early stopping
   tracks it while training optimises the floored objective. The `per_dim`, `always` and `batch_mean`
   defaults of groups, schedule and statistic are placeholders; the P2.5 search tests both values of each.
@@ -624,7 +625,7 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   The KL of `z_p` is weighted by `protein_latent_kl_weight` times the annealed `kl_weight`. A free-bits floor
   (`protein_latent_free_bits`, in nats; 0 is off) makes a dimension, or all dimensions as one group, cost
   `max(floor, KL)`; `..._granularity` is `"per_dim"` or `"group"`, `..._statistic` is the minibatch mean or the
-  per-cell clamp, and `..._schedule` is `"constant"` or `"after_warmup"` (once `kl_weight` reaches 1.0). The logged
+  per-cell clamp, and `..._schedule` is `"constant"` or `"after_warmup"` (once `kl_weight` reaches the plan's `max_kl_weight`). The logged
   `kl_div_zp` stays the true KL. With the MoG prior only `"group"` is defined. `protein_latent_consistency_weight > 0`
   adds that weight times `KL(q(z | x, y) || q(z_p | y))`: closed form, conditional on the draw of `u`, annealed
   with `kl_weight` like the other KL terms. It needs `n_latent_protein_only == n_latent` (no projection between different sizes is

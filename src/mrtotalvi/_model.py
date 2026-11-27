@@ -309,7 +309,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``lambda > 0`` the KL of each group is clamped below at ``lambda``: the term is
         ``sum_g max(lambda, stat(KL_g))`` and a clamped group has zero gradient. It removes the penalty
         below the floor; it does not force ``w`` to be used. Under ``scale_observations`` the clamp uses the
-        unweighted minibatch mean. The logged ``kl_w`` and ``kl_w_dim_<i>`` (per-dimension KL, logged for
+        minibatch mean weighted by the donor weights, so threshold and loss use the same weights. The logged ``kl_w`` and ``kl_w_dim_<i>`` (per-dimension KL, logged for
         every ``w``) stay the true, unclamped KL, and ``elbo_validation`` stays the true ELBO while training
         optimises the floored objective. Saved in ``init_params_``.
     protein_residual_free_bits_granularity
@@ -318,8 +318,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         search tests both values. Saved in ``init_params_``.
     protein_residual_free_bits_schedule
         **EXPERIMENTAL.** ``"constant"`` (default): the floor applies from epoch 0. ``"after_warmup"``: it applies
-        only once the annealed ``kl_weight`` reaches ``1.0``, the scvi default ``max_kl_weight``. With a
-        ``max_kl_weight`` below ``1.0`` it never applies. The default is a placeholder: no package default
+        only once the annealed ``kl_weight`` reaches the plan's ``max_kl_weight`` (default ``1.0``; pass it in
+        ``plan_kwargs``). The default is a placeholder: no package default
         exists, and the P2.5 search tests both values. Saved in ``init_params_``.
     protein_residual_free_bits_statistic
         **EXPERIMENTAL.** ``"batch_mean"`` (default, Kingma et al. 2016, C.8): a group is clamped when its
@@ -387,7 +387,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``"per_cell"`` clamps every cell.
     protein_latent_free_bits_schedule
         **EXPERIMENTAL.** ``"constant"``: the floor applies from epoch 0. ``"after_warmup"``: only once the
-        annealed ``kl_weight`` reaches 1.0 (scvi's default ``max_kl_weight``).
+        annealed ``kl_weight`` reaches the plan's ``max_kl_weight`` (default 1.0).
     protein_latent_decode_draw
         **EXPERIMENTAL.** ``"draw"``: factual readouts decode one draw of ``z_p`` per draw of ``z``, as
         scvi does. ``"mean"``: they decode the posterior mean of ``q(z_p | y)``. The training and validation
@@ -1248,6 +1248,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
         # would then run without dropout and skip the u-invariance penalty.
         self.module.train()
+        # "after_warmup" free bits start when kl_weight reaches the plan's cap.
+        self.module.kl_warmup_target = float(plan_kwargs.get("max_kl_weight", 1.0))
         result = super().train(
             max_epochs=max_epochs,
             lr=lr,

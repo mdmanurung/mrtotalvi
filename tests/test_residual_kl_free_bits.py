@@ -14,6 +14,7 @@ from scvi import REGISTRY_KEYS
 from torch.distributions import Normal
 
 from mrtotalvi import MrTotalVI
+from mrtotalvi._kl_free_bits import free_bits_active, kl_with_free_bits
 from tests.test_protein_residual_latent import PATHS, TRAIN, _outputs
 from tests.test_protein_residual_latent import _model as _w_model
 
@@ -306,3 +307,69 @@ def test_non_default_knob_without_residual_latent_raises(knob):
 def test_invalid_knob_raises(knob):
     with pytest.raises(ValueError):
         _w_model(**knob)
+
+
+# -- donor weights and warm-up cap (Codex review) -------------------------------------------
+
+
+def _weighted_cost(a, weights=(0.1, 1.0), free_bits=1.0):
+    """Donor-weighted mean cost of two cells with one unit and KLs (a, 0)."""
+    kl = torch.tensor([[a], [0.0]])
+    w = torch.tensor(weights)
+    cost = kl_with_free_bits(kl, free_bits, "per_dim", "batch_mean", weights=w)
+    return (w * cost).mean().item()
+
+
+def test_floor_threshold_uses_the_donor_weights_so_the_loss_is_continuous():
+    # Codex example: weights (0.1, 1), floor 1, KLs (2 +- 1e-6, 0). The unweighted mean 1 sat on
+    # the threshold, so raising the KL cut the weighted cost from 0.55 to 0.10. With the weights in
+    # the statistic the unit stays floored on both sides.
+    assert _weighted_cost(2 - 1e-6) == pytest.approx(_weighted_cost(2 + 1e-6), abs=1e-4)
+    assert _weighted_cost(2 + 1e-6) == pytest.approx(0.55, abs=1e-4)
+    # The weighted threshold: normalised weights (0.18, 1.82) give a weighted mean KL of 0.0909 * a,
+    # so the floor of 1 switches off at a = 11. The cost is continuous there.
+    assert _weighted_cost(11 - 1e-3) == pytest.approx(_weighted_cost(11 + 1e-3), abs=1e-3)
+
+
+def test_unit_weights_leave_the_floor_unchanged():
+    kl = torch.tensor([[0.1, 0.5], [0.1, 0.5]])
+    plain = kl_with_free_bits(kl, 0.25, "per_dim", "batch_mean")
+    same = kl_with_free_bits(kl, 0.25, "per_dim", "batch_mean", weights=torch.ones(2))
+    assert torch.equal(plain, same)
+
+
+@pytest.mark.parametrize(
+    ("target", "kl_weight", "active"),
+    [(0.5, 0.25, False), (0.5, 0.5, True), (2.0, 1.0, False), (2.0, 2.0, True), (1.0, 0.7, False), (1.0, 1.0, True)],
+)
+def test_after_warmup_follows_the_max_kl_weight(target, kl_weight, active):
+    assert free_bits_active("after_warmup", kl_weight, target) is active
+    assert free_bits_active("constant", 0.0, target) is True
+
+
+def test_after_warmup_tolerates_float32_kl_weight():
+    # scvi hands the module float32 tensors, e.g. float32(0.7) < 0.7.
+    assert free_bits_active("after_warmup", torch.tensor(0.7), 0.7)
+
+
+def test_train_passes_the_plan_max_kl_weight_to_the_module():
+    model = _w_model(protein_residual_free_bits=0.25, protein_residual_free_bits_schedule="after_warmup")
+    assert model.module.kl_warmup_target == 1.0
+    scvi.settings.seed = 0
+    model.train(
+        max_epochs=1, check_val_every_n_epoch=1, early_stopping=False, plan_kwargs={"max_kl_weight": 0.5}, **TRAIN
+    )
+    assert model.module.kl_warmup_target == 0.5
+
+
+def test_module_floor_follows_kl_warmup_target():
+    module, tensors, inference, generative = _setup(2)
+    loc = _kl_to_loc(_cells([0.1, 0.5]))
+    knobs = {"protein_residual_free_bits": 0.25, "protein_residual_free_bits_schedule": "after_warmup"}
+    module.kl_warmup_target = 0.5
+    off = _loss(module, tensors, inference, generative, loc, 0.25)
+    on_low = _loss(module, tensors, inference, generative, loc, 0.25, **knobs)
+    on_cap = _loss(module, tensors, inference, generative, loc, 0.5, **knobs)
+    off_cap = _loss(module, tensors, inference, generative, loc, 0.5)
+    assert on_low.loss.item() == off.loss.item()
+    assert on_cap.loss.item() > off_cap.loss.item()

@@ -304,6 +304,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.n_latent_protein_residual = int(n_latent_protein_residual)
         self.protein_residual_heads = protein_residual_heads
         self.protein_residual_encoder_input = protein_residual_encoder_input
+        # The plan's max_kl_weight; MrTotalVI.train() sets it. "after_warmup" floors from this kl_weight.
+        self.kl_warmup_target = 1.0
         self.protein_residual_kl_weight = float(protein_residual_kl_weight)
         self.protein_residual_free_bits = float(protein_residual_free_bits)
         self.protein_residual_free_bits_granularity = protein_residual_free_bits_granularity
@@ -1334,15 +1336,21 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         kl_w = self._kl_w(inference_outputs)
         if kl_w is not None:
             kl_local["kl_div_w"] = kl_w
+        # Donor weights the loss applies below; the free-bits threshold uses the same ones (their scale
+        # cancels, so the centered and legacy weightings give the same threshold).
+        cell_weights = None
+        if self._scale_observations and self.n_obs_per_sample is not None:
+            cell_weights = 1.0 / self.n_obs_per_sample[tensors[REGISTRY_KEYS.SAMPLE_KEY].to(torch.int64).flatten()]
         # kl_w_term is the per-cell w term; the free-bits floor (if on) is inside it. The logged
         # kl_local["kl_div_w"] above stays the true KL.
         kl_w_term = (
             0.0
             if kl_w is None
-            else (kl_weight * self.protein_residual_kl_weight) * self._kl_w_term(inference_outputs, kl_w, kl_weight)
+            else (kl_weight * self.protein_residual_kl_weight)
+            * self._kl_w_term(inference_outputs, kl_w, kl_weight, cell_weights)
         )
         # Protein-only latent z_p: weighted KL with the free-bits floor, plus the optional consistency KL.
-        zp_terms = self._zp_loss(inference_outputs, kl_weight)
+        zp_terms = self._zp_loss(inference_outputs, kl_weight, cell_weights)
         if zp_terms is not None:
             kl_w_term = kl_w_term + zp_terms[0]
             kl_local.update(zp_terms[1])
@@ -1877,7 +1885,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         kl = kl_divergence(qz, inference_outputs["qzp"]).sum(dim=-1)
         return kl.mean(dim=0) if kl.ndim > 1 else kl
 
-    def _zp_loss(self, inference_outputs, kl_weight: float):
+    def _zp_loss(self, inference_outputs, kl_weight: float, cell_weights: torch.Tensor | None = None):
         """Loss term, ``kl_local`` entries and logged metrics of ``z_p``; ``None`` when it is off.
 
         The term per cell is ``kl_weight * beta * cost + consistency_weight * KL_consistency``, where
@@ -1890,17 +1898,23 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             return None
         floor = (
             self.protein_latent_free_bits
-            if free_bits_active(self.protein_latent_free_bits_schedule, kl_weight)
+            if free_bits_active(self.protein_latent_free_bits_schedule, kl_weight, self.kl_warmup_target)
             else 0.0
         )
         if self.protein_latent_prior == "mog":
             kl, dims = self._kl_zp(inference_outputs), None
-            cost = kl_with_free_bits(kl.unsqueeze(-1), floor, "group", self.protein_latent_free_bits_statistic)
+            cost = kl_with_free_bits(
+                kl.unsqueeze(-1), floor, "group", self.protein_latent_free_bits_statistic, cell_weights
+            )
         else:
             dims = self._kl_zp_dims(qzp)
             kl = dims.sum(dim=-1)
             cost = kl_with_free_bits(
-                dims, floor, self.protein_latent_free_bits_granularity, self.protein_latent_free_bits_statistic
+                dims,
+                floor,
+                self.protein_latent_free_bits_granularity,
+                self.protein_latent_free_bits_statistic,
+                cell_weights,
             )
         term = kl_weight * self.protein_latent_kl_weight * cost
         kl_local = {"kl_div_zp": kl}
@@ -1949,17 +1963,24 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         qw = inference_outputs["qw"]
         return kl_divergence(qw, Normal(torch.zeros_like(qw.loc), torch.ones_like(qw.scale)))
 
-    def _kl_w_term(self, inference_outputs, kl_w: torch.Tensor, kl_weight: float) -> torch.Tensor:
+    def _kl_w_term(
+        self,
+        inference_outputs,
+        kl_w: torch.Tensor,
+        kl_weight: float,
+        cell_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Per-cell KL term for ``w`` before the ``kl_weight * protein_residual_kl_weight`` factor.
 
         The floor is :func:`~mrtotalvi._kl_free_bits.kl_with_free_bits`, shared with ``z_p``. Off
-        (``protein_residual_free_bits == 0``, or ``"after_warmup"`` while ``kl_weight < 1``) the term is the
+        (``protein_residual_free_bits == 0``, or ``"after_warmup"`` before ``kl_weight`` reaches ``max_kl_weight``) the term is the
         true ``kl_w``. With ``batch_mean`` a clamped group adds the constant ``lambda`` to every cell (the
         clamped total spread equally) and an unclamped group keeps each cell's own KL, so the batch mean
-        of the term is ``sum_g max(lambda, mean_cell KL_g)``. The clamp uses the unweighted minibatch mean.
+        of the term is ``sum_g max(lambda, mean_cell KL_g)``. The clamp uses the minibatch mean weighted by ``cell_weights`` (donor weights under
+        ``scale_observations``), the same weights the loss applies, so the loss stays continuous.
         """
         if self.protein_residual_free_bits == 0.0 or not free_bits_active(
-            self.protein_residual_free_bits_schedule, kl_weight
+            self.protein_residual_free_bits_schedule, kl_weight, self.kl_warmup_target
         ):
             return kl_w
         return kl_with_free_bits(
@@ -1967,6 +1988,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             self.protein_residual_free_bits,
             self.protein_residual_free_bits_granularity,
             self.protein_residual_free_bits_statistic,
+            cell_weights,
         )
 
     def _residual_metrics(self, inference_outputs, kl_w: torch.Tensor) -> dict[str, torch.Tensor]:

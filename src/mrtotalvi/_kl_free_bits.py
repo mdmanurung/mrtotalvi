@@ -16,14 +16,18 @@ FREE_BITS_GRANULARITY = ("per_dim", "group")
 FREE_BITS_STATISTIC = ("batch_mean", "per_cell")
 FREE_BITS_SCHEDULE = ("constant", "after_warmup")
 
-# scvi anneals ``kl_weight`` from 0 to its ``max_kl_weight`` (default 1.0). "after_warmup" starts the
-# floor when ``kl_weight`` reaches that value.
-WARMUP_DONE_KL_WEIGHT = 1.0
+# scvi anneals ``kl_weight`` from 0 to the plan's ``max_kl_weight`` (default 1.0). "after_warmup" starts the
+# floor when ``kl_weight`` reaches that cap; the module passes the cap it was trained with.
+DEFAULT_WARMUP_TARGET = 1.0
 
 
-def free_bits_active(schedule: str, kl_weight: float) -> bool:
-    """``True`` when the floor applies at this ``kl_weight``."""
-    return schedule == "constant" or kl_weight >= WARMUP_DONE_KL_WEIGHT
+def free_bits_active(schedule: str, kl_weight: float, warmup_target: float = DEFAULT_WARMUP_TARGET) -> bool:
+    """``True`` when the floor applies at this ``kl_weight``.
+
+    ``"after_warmup"`` applies it once ``kl_weight`` has reached ``warmup_target`` (the plan's
+    ``max_kl_weight``). A relative 1e-6 slack absorbs float32 rounding of the scvi tensor.
+    """
+    return schedule == "constant" or float(kl_weight) >= warmup_target * (1 - 1e-6)
 
 
 def kl_with_free_bits(
@@ -31,6 +35,7 @@ def kl_with_free_bits(
     free_bits: float = 0.0,
     granularity: str = "per_dim",
     statistic: str = "batch_mean",
+    weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Per-cell KL cost with a free-bits floor; ``kl`` is ``(batch, dims)``, the result ``(batch,)``.
 
@@ -39,9 +44,13 @@ def kl_with_free_bits(
     ``lambda`` nats when its KL is below ``lambda``. ``statistic="batch_mean"`` compares the
     minibatch mean KL with ``lambda`` (Kingma 2016); ``"per_cell"`` clamps every cell.
 
-    With ``batch_mean`` the floor is a mask on the unweighted batch mean, so the mean of the result
-    is ``sum_d max(lambda, mean_batch KL_d)`` and a donor weight on the cells does not change which
-    units are floored.
+    ``weights`` are the per-cell loss weights the caller applies later (donor weights under
+    ``scale_observations``). The ``batch_mean`` statistic is then the weighted mean with the weights
+    scaled to mean 1, so the threshold and the weighted loss use the same weights and the loss stays
+    continuous at the floor. A floored unit gives each cell the constant ``lambda``, so the weighted
+    cost of the unit is ``mean(weights) * lambda``, equal to its weighted cost at the threshold.
+    Without ``weights`` the mean is the plain batch mean and the mean of the result is
+    ``sum_d max(lambda, mean_batch KL_d)``.
     """
     if free_bits == 0.0:
         return kl.sum(dim=-1)
@@ -49,7 +58,12 @@ def kl_with_free_bits(
         kl = kl.sum(dim=-1, keepdim=True)
     if statistic == "per_cell":
         return kl.clamp(min=free_bits).sum(dim=-1)
-    keep = kl.detach().mean(dim=0) >= free_bits
+    if weights is None:
+        stat = kl.detach().mean(dim=0)
+    else:
+        scaled = (weights / weights.mean()).detach().to(kl.dtype)
+        stat = (scaled.unsqueeze(-1) * kl.detach()).mean(dim=0)
+    keep = stat >= free_bits
     return torch.where(keep, kl, torch.full_like(kl, free_bits)).sum(dim=-1)
 
 
