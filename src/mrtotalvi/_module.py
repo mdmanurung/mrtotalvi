@@ -168,6 +168,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         :class:`~mrtotalvi.MrTotalVI`.
     protein_residual_encoder_input
         ``"protein"`` (default) or ``"protein_sample"``. See :class:`~mrtotalvi.MrTotalVI`.
+    residual_kl_weight, residual_free_bits, residual_free_bits_groups, residual_free_bits_schedule, residual_free_bits_statistic
+        **EXPERIMENTAL.** KL weight and free-bits floor on ``w``. Valid only with
+        ``n_latent_protein_residual > 0``. See :class:`~mrtotalvi.MrTotalVI`.
     **kwargs
         All remaining keyword arguments forwarded verbatim to
         :class:`~scvi.module._totalvae.TOTALVAE`.
@@ -209,6 +212,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         n_latent_protein_residual: int = 0,
         protein_residual_heads: str = "fore_mixing",
         protein_residual_encoder_input: str = "protein",
+        residual_kl_weight: float = 1.0,
+        residual_free_bits: float = 0.0,
+        residual_free_bits_groups: str = "per_dim",
+        residual_free_bits_schedule: str = "always",
+        residual_free_bits_statistic: str = "batch_mean",
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
@@ -233,6 +241,14 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             )
         if protein_residual_encoder_input not in {"protein", "protein_sample"}:
             raise ValueError("protein_residual_encoder_input must be one of {'protein', 'protein_sample'}.")
+        self._check_residual_kl_knobs(
+            n_latent_protein_residual,
+            residual_kl_weight,
+            residual_free_bits,
+            residual_free_bits_groups,
+            residual_free_bits_schedule,
+            residual_free_bits_statistic,
+        )
         if protein_residual_heads not in PROTEIN_RESIDUAL_HEADS:
             raise ValueError(f"protein_residual_heads must be one of {sorted(PROTEIN_RESIDUAL_HEADS)}.")
         if u_prior not in {"standard", "mog", "vamp"}:
@@ -266,6 +282,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.n_latent_protein_residual = int(n_latent_protein_residual)
         self.protein_residual_heads = protein_residual_heads
         self.protein_residual_encoder_input = protein_residual_encoder_input
+        self.residual_kl_weight = float(residual_kl_weight)
+        self.residual_free_bits = float(residual_free_bits)
+        self.residual_free_bits_groups = residual_free_bits_groups
+        self.residual_free_bits_schedule = residual_free_bits_schedule
+        self.residual_free_bits_statistic = residual_free_bits_statistic
 
         # Store hyperparams so _setup_hierarchy can use them if called deferred
         self._n_sample = n_sample
@@ -1157,9 +1178,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 )
             kl_w = self._kl_w(inference_outputs)
             if kl_w is not None:
-                # p(w) = N(0, I), weight 1, annealed with kl_weight like kl_z (G82).
+                # p(w) = N(0, I), weight beta_w * kl_weight like kl_z (G82, G157), optional free bits.
+                kl_w_term = self._kl_w_term(inference_outputs, kl_w, kl_weight)
                 return LossOutput(
-                    loss=loss_out.loss + kl_weight * kl_w.mean(),
+                    loss=loss_out.loss + (kl_weight * self.residual_kl_weight) * kl_w_term.mean(),
                     reconstruction_loss=loss_out.reconstruction_loss,
                     kl_local={**loss_out.kl_local, "kl_div_w": kl_w},
                     extra_metrics={**loss_out.extra_metrics, **self._residual_metrics(inference_outputs, kl_w)},
@@ -1207,7 +1229,13 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         kl_w = self._kl_w(inference_outputs)
         if kl_w is not None:
             kl_local["kl_div_w"] = kl_w
-        kl_w_term = 0.0 if kl_w is None else kl_weight * kl_w
+        # kl_w_term is the per-cell w term; the free-bits floor (if on) is inside it. The logged
+        # kl_local["kl_div_w"] above stays the true KL.
+        kl_w_term = (
+            0.0
+            if kl_w is None
+            else (kl_weight * self.residual_kl_weight) * self._kl_w_term(inference_outputs, kl_w, kl_weight)
+        )
 
         if self._scale_observations and self.n_obs_per_sample is not None:
             # Weight each cell's ELBO by 1/n_cells_in_that_sample so high-cell-count
@@ -1574,6 +1602,57 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             return None
         return kl_divergence(qw, Normal(torch.zeros_like(qw.loc), torch.ones_like(qw.scale))).sum(dim=-1)
 
+    @staticmethod
+    def _check_residual_kl_knobs(n_w, beta, free_bits, groups, schedule, statistic) -> None:
+        """Validate the KL knobs on ``w``; a non-default knob needs ``n_latent_protein_residual > 0``."""
+        for name, value in {"residual_kl_weight": beta, "residual_free_bits": free_bits}.items():
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite number >= 0; got {value!r}.")
+        for name, value, allowed in [
+            ("residual_free_bits_groups", groups, ("per_dim", "all")),
+            ("residual_free_bits_schedule", schedule, ("always", "after_warmup")),
+            ("residual_free_bits_statistic", statistic, ("batch_mean", "per_cell")),
+        ]:
+            if value not in allowed:
+                raise ValueError(f"{name} must be one of {set(allowed)}; got {value!r}.")
+        non_default = (beta, free_bits, groups, schedule, statistic) != (1.0, 0.0, "per_dim", "always", "batch_mean")
+        if non_default and not n_w:
+            raise ValueError("residual_kl_weight and residual_free_bits_* need n_latent_protein_residual > 0.")
+
+    def _kl_w_dims(self, inference_outputs) -> torch.Tensor:
+        """``KL(q(w_d | y) || N(0, 1))`` per cell and dimension, shape ``(batch, n_latent_protein_residual)``."""
+        qw = inference_outputs["qw"]
+        return kl_divergence(qw, Normal(torch.zeros_like(qw.loc), torch.ones_like(qw.scale)))
+
+    def _kl_w_term(self, inference_outputs, kl_w: torch.Tensor, kl_weight: float) -> torch.Tensor:
+        r"""Per-cell KL term for ``w`` before the ``kl_weight * residual_kl_weight`` factor.
+
+        Off (``residual_free_bits == 0``, or ``"after_warmup"`` while ``kl_weight < 1``) this is the
+        true ``kl_w``. With a floor :math:`\lambda` (Kingma et al. 2016, appendix C.8) the groups are
+        single dimensions (``"per_dim"``) or all dimensions together (``"all"``); with :math:`K_{gc}`
+        the KL of group :math:`g` in cell :math:`c`:
+
+        - ``"per_cell"``: cell term :math:`\sum_g \max(\lambda, K_{gc})`.
+        - ``"batch_mean"``: group :math:`g` is clamped when its minibatch mean :math:`\bar K_g < \lambda`.
+          The cell term is :math:`\sum_g [\lambda` if clamped, else :math:`K_{gc}]`, so the batch mean of
+          the term is :math:`\sum_g \max(\lambda, \bar K_g)`. A clamped group adds the constant
+          :math:`\lambda` to every cell (the clamped total spread equally) and has zero gradient.
+
+        The clamp decision uses the unweighted minibatch mean; donor weights (``scale_observations``)
+        then weight each cell's term as usual. ``"after_warmup"`` floors only once ``kl_weight >= 1``,
+        the default ``max_kl_weight``.
+        """
+        lam = self.residual_free_bits
+        if lam == 0.0 or (self.residual_free_bits_schedule == "after_warmup" and kl_weight < 1.0):
+            return kl_w
+        groups = self._kl_w_dims(inference_outputs)
+        if self.residual_free_bits_groups == "all":
+            groups = groups.sum(dim=-1, keepdim=True)
+        if self.residual_free_bits_statistic == "per_cell":
+            return groups.clamp(min=lam).sum(dim=-1)
+        clamped = groups.detach().mean(dim=0, keepdim=True) < lam
+        return torch.where(clamped, torch.full_like(groups, lam), groups).sum(dim=-1)
+
     def _residual_metrics(self, inference_outputs, kl_w: torch.Tensor) -> dict[str, torch.Tensor]:
         """Logged each epoch (G96): mean ``kl_w`` and the active units of ``w``.
 
@@ -1582,6 +1661,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         and a ``kl_w`` near 0; ``w`` absorbing the protein signal gives a large ``kl_w``.
         """
         metrics = {"kl_w": kl_w.detach().mean()}
+        # True (unclamped) KL per dimension (1k), whatever the free-bits floor is.
+        dims = self._kl_w_dims(inference_outputs).detach().mean(dim=0)
+        metrics.update({f"kl_w_dim_{i}": dims[i] for i in range(dims.shape[0])})
         loc = inference_outputs["qw"].loc.detach()
         # The variance across one cell is 0, which would bias the epoch mean low.
         if loc.shape[0] >= 2:

@@ -16,6 +16,19 @@
   to `q(w | y)` by the u-encoder's sample-conditioned mechanism; no package default, P2.5 tests both. Under
   `gene_likelihood="zinb"` `w` reaches the RNA dropout through the shared mixing trunk; the RNA scale is unchanged.
 
+- `residual_kl_weight`, `residual_free_bits`, `residual_free_bits_groups`, `residual_free_bits_schedule` and
+  `residual_free_bits_statistic` (EXPERIMENTAL, defaults `1.0`, `0.0`, `"per_dim"`, `"always"`, `"batch_mean"`, which
+  leave training byte-identical): saved KL knobs on the protein residual latent `w`. They need
+  `n_latent_protein_residual > 0` and raise `ValueError` otherwise. `residual_kl_weight` (`beta_w`) multiplies the
+  annealed `kl_weight` on `KL(q(w | y) || N(0, I))`. `residual_free_bits` is a free-bits floor in nats (Kingma et al.
+  2016, appendix C.8): the term is `sum_g max(lambda, stat(KL_g))`, with groups per dimension or all dimensions
+  together, and `stat` the minibatch mean (a clamped group adds the constant `lambda` to every cell and has zero
+  gradient) or each cell's own KL. `"after_warmup"` floors only once `kl_weight` reaches `1.0`. The floor clamps the
+  unweighted batch mean under `scale_observations`. Logged `kl_w` stays the true KL, and each epoch now also logs
+  `kl_w_dim_<i>`, the true per-dimension KL. With `beta_w != 1` or a floor the objective is no longer an ELBO;
+  `elbo_validation` stays the true ELBO. The groups and schedule defaults are placeholders: the P2.5 search tests
+  both values of each.
+
 - `protein_likelihood_weight` (EXPERIMENTAL, default `1.0`, which leaves training unchanged): a saved
   constructor argument that multiplies the protein reconstruction term and the protein background terms
   (background KL, efficiency prior, mixing regulariser) by `w`. scvi-tools scales the reconstruction only. Both

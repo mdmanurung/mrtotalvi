@@ -272,6 +272,36 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         hidden layer plus a donor embedding on the last one). The counterfactual donor never reaches it.
         Counterfactual and DE decodes still use ``w = 0``. The P2.5 comparison tests both values. Saved in
         ``init_params_``; checkpoints without it load with ``"protein"``.
+    residual_kl_weight
+        **EXPERIMENTAL.** Used only with ``n_latent_protein_residual > 0`` (other values raise ``ValueError``).
+        ``beta_w``: multiplies the annealed ``kl_weight`` on the KL of ``w``, so the term is
+        ``kl_weight * residual_kl_weight * KL(q(w | y) || N(0, I))``. Default ``1.0`` leaves training unchanged.
+        With ``beta_w != 1`` the objective is no longer an ELBO; ``elbo_validation`` stays unweighted.
+        Saved in ``init_params_``.
+    residual_free_bits
+        **EXPERIMENTAL.** Used only with ``n_latent_protein_residual > 0``. Free-bits floor ``lambda`` in nats
+        (Kingma et al. 2016, appendix C.8). ``0.0`` (default) is off and leaves training unchanged. With
+        ``lambda > 0`` the KL of each group is clamped below at ``lambda``: the term is
+        ``sum_g max(lambda, stat(KL_g))`` and a clamped group has zero gradient. It removes the penalty
+        below the floor; it does not force ``w`` to be used. Under ``scale_observations`` the clamp uses the
+        unweighted minibatch mean. The logged ``kl_w`` and ``kl_w_dim_<i>`` (per-dimension KL, logged for
+        every ``w``) stay the true, unclamped KL, and ``elbo_validation`` stays the true ELBO while training
+        optimises the floored objective. Saved in ``init_params_``.
+    residual_free_bits_groups
+        **EXPERIMENTAL.** ``"per_dim"`` (default): each dimension of ``w`` is a group. ``"all"``: one group, the
+        summed KL over all dimensions. The default is a placeholder: no package default exists, and the P2.5
+        search tests both values. Saved in ``init_params_``.
+    residual_free_bits_schedule
+        **EXPERIMENTAL.** ``"always"`` (default): the floor applies from epoch 0. ``"after_warmup"``: it applies
+        only once the annealed ``kl_weight`` reaches ``1.0``, the scvi default ``max_kl_weight``. With a
+        ``max_kl_weight`` below ``1.0`` it never applies. The default is a placeholder: no package default
+        exists, and the P2.5 search tests both values. Saved in ``init_params_``.
+    residual_free_bits_statistic
+        **EXPERIMENTAL.** ``"batch_mean"`` (default, Kingma et al. 2016, C.8): a group is clamped when its
+        minibatch-mean KL is below ``lambda``. Each cell of a clamped group then carries the constant
+        ``lambda`` (the clamped total spread equally over cells) and an unclamped group carries its own
+        per-cell KL, so the batch mean of the term is ``sum_g max(lambda, mean_cell KL_g)``. ``"per_cell"``:
+        each cell's group KL is clamped, ``sum_g max(lambda, KL_gc)``. Saved in ``init_params_``.
     init_prior_from_data
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
@@ -419,6 +449,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         n_latent_protein_residual: int = 0,
         protein_residual_heads: Literal["fore_mixing", "all"] = "fore_mixing",
         protein_residual_encoder_input: Literal["protein", "protein_sample"] = "protein",
+        residual_kl_weight: float = 1.0,
+        residual_free_bits: float = 0.0,
+        residual_free_bits_groups: Literal["per_dim", "all"] = "per_dim",
+        residual_free_bits_schedule: Literal["always", "after_warmup"] = "always",
+        residual_free_bits_statistic: Literal["batch_mean", "per_cell"] = "batch_mean",
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -565,6 +600,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_latent_protein_residual=n_latent_protein_residual,
             protein_residual_heads=protein_residual_heads,
             protein_residual_encoder_input=protein_residual_encoder_input,
+            residual_kl_weight=residual_kl_weight,
+            residual_free_bits=residual_free_bits,
+            residual_free_bits_groups=residual_free_bits_groups,
+            residual_free_bits_schedule=residual_free_bits_schedule,
+            residual_free_bits_statistic=residual_free_bits_statistic,
             use_batch_norm=use_batch_norm,
             use_layer_norm=use_layer_norm,
             batch_representation=batch_representation,

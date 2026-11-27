@@ -594,6 +594,20 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   signal. Only `protein_noise_model="totalvi"` is supported. With `gene_likelihood="zinb"` the RNA dropout
   head shares `sigmoid_decoder` with the protein mixing head, so `w` reaches the dropout; this is documented,
   not blocked, and `"nb"` is unaffected.
+- **`residual_kl_weight` and `residual_free_bits*` (EXPERIMENTAL).** Saved constructor arguments that act on `w`
+  and need `n_latent_protein_residual > 0`. Defaults reproduce the current objective exactly.
+  `residual_kl_weight` (`beta_w`, default `1.0`) multiplies the annealed `kl_weight` on the KL of `w`.
+  `residual_free_bits` (`lambda` nats, default `0.0`, off) clamps the KL of each group from below (Kingma et al.
+  2016, appendix C.8), so the term is `sum_g max(lambda, stat(KL_g))`. Below the floor the gradient of that group is
+  zero: the floor removes the penalty and does not force `w` to be used. `residual_free_bits_groups` sets the
+  groups (`"per_dim"`, or `"all"` for one group of the summed KL). `residual_free_bits_statistic` sets `stat`:
+  `"batch_mean"` clamps a group when its minibatch-mean KL is below `lambda`, and each cell then carries the
+  constant `lambda` for that group (the clamped total spread equally over cells); `"per_cell"` clamps each cell's
+  own group KL. `residual_free_bits_schedule="after_warmup"` applies the floor only once `kl_weight` has reached
+  `1.0`. Under `scale_observations` the clamp uses the unweighted batch mean. Logged `kl_w` and
+  `kl_w_dim_<i>` (per-dimension KL) stay the true KL. `elbo_validation` stays the true ELBO, so early stopping
+  tracks it while training optimises the floored objective. The `per_dim`, `always` and `batch_mean`
+  defaults of groups, schedule and statistic are placeholders; the P2.5 search tests both values of each.
 
 Protein scale in inherited methods. The loss fits protein counts with means
 `per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that
