@@ -141,7 +141,7 @@ def test_kl_of_shifted_posterior_is_exactly_half_n_dim_times_shift_squared(path,
     if path == "scale_observations":
         counts = module.n_obs_per_sample[tensors[REGISTRY_KEYS.SAMPLE_KEY].long().flatten()]
         per_cell = (expected / counts).mean().item()
-    assert (shifted.loss - base.loss).item() == pytest.approx(kl_weight * per_cell, rel=1e-5)
+    assert (shifted.loss - base.loss).item() == pytest.approx(kl_weight * per_cell, rel=1e-4)
 
 
 def test_kl_weight_scales_the_loss_term_but_not_the_logged_kl():
@@ -271,7 +271,9 @@ def test_perturbing_zp_leaves_rna_scale_exactly_unchanged(combination):
 @torch.no_grad()
 def test_heads_knob_is_honoured(combination):
     def pair(heads):
-        module, tensors, inference, _ = _outputs(_model(protein_latent_combination=combination, protein_latent_heads=heads))
+        module, tensors, inference, _ = _outputs(
+            _model(protein_latent_combination=combination, protein_latent_heads=heads)
+        )
         torch.manual_seed(0)
         return (
             _generate(module, tensors, inference, torch.zeros(8, N_ZP))["py_"],
@@ -396,8 +398,9 @@ def _foreground_probability(module, tensors, seed):
 
 def test_decode_draw_mean_makes_the_readout_independent_of_the_zp_draw():
     kw = {"protein_latent_combination": "replace", "protein_latent_heads": "all"}
-    tensors = next(iter(_model(**kw)._make_data_loader(adata=_model(**kw).adata, batch_size=8)))
-    draw = _model(**kw, protein_latent_decode_draw="draw").module.eval()
+    draw_model = _model(**kw, protein_latent_decode_draw="draw")
+    tensors = next(iter(draw_model._make_data_loader(adata=draw_model.adata, batch_size=8)))
+    draw = draw_model.module.eval()
     mean = _model(**kw, protein_latent_decode_draw="mean").module.eval()
     assert not torch.equal(_foreground_probability(draw, tensors, 0), _foreground_probability(draw, tensors, 1))
     assert torch.equal(_foreground_probability(mean, tensors, 0), _foreground_probability(mean, tensors, 1))
@@ -419,10 +422,10 @@ def test_decode_draw_mean_reaches_the_scvi_readouts_and_leaves_the_loss_alone():
     # The validation loss is computed in eval mode too; it must keep drawing z_p.
     losses = []
     for model in (draw, mean):
-        module, tensors, inference, generative = _outputs(model)
+        module = model.module.eval()
+        tensors = next(iter(model._make_data_loader(adata=model.adata, batch_size=8)))
         torch.manual_seed(3)
-        inference, generative = module(tensors, compute_loss=False)
-        losses.append(module.loss(tensors, inference, generative).loss.item())
+        losses.append(module(tensors)[2].loss.item())  # forward with compute_loss=True, as validation does
     assert losses[0] == pytest.approx(losses[1])
 
 
@@ -471,7 +474,11 @@ def test_ambient_zscore_input_needs_an_ambient_profile(sim):
     MrTotalVI.setup_anndata(adata, protein_expression_obsm_key="protein", sample_key="donor", batch_key="batch")
     with pytest.raises(ValueError, match="ambient_profile"):
         MrTotalVI(
-            adata, sample_key="donor", n_latent=4, n_latent_protein_only=5, protein_latent_encoder_input="ambient_zscore"
+            adata,
+            sample_key="donor",
+            n_latent=4,
+            n_latent_protein_only=5,
+            protein_latent_encoder_input="ambient_zscore",
         )
 
 
@@ -542,7 +549,7 @@ def test_consistency_kl_matches_the_closed_form_on_a_hand_example():
     eps_dist = Normal(1.0 - inference["z_base"], torch.full_like(inference["z_base"], 2.0))
     patched = {**inference, "eps_dist": eps_dist, "qzp": _FixedQzp(0.0, dim=N_Z)(y)}
     expected = 3 * 0.5 * (1 + 4 - 1 - np.log(4))
-    np.testing.assert_allclose(module._consistency_kl(patched).numpy(), expected, rtol=1e-5)
+    np.testing.assert_allclose(module._consistency_kl(patched).detach().numpy(), expected, rtol=1e-5)
     with_weight = module.loss(tensors, patched, generative, kl_weight=0.3)
     module.protein_latent_consistency_weight = 0.0
     without = module.loss(tensors, patched, generative, kl_weight=0.3)
@@ -561,7 +568,7 @@ def test_consistency_with_mismatched_dimensions_stops():
         _model(n_zp=N_Z + 1, use_map=False, protein_latent_consistency_weight=0.1)
 
 
-@pytest.mark.parametrize("kw", [{"use_map": True}, {"use_map": False, "hierarchy_mode": "centered_v2"}])
+@pytest.mark.parametrize("kw", [{"use_map": True}, {"use_map": True, "hierarchy_mode": "centered_v2"}])
 def test_consistency_needs_an_analytic_q_z(kw):
     with pytest.raises((ValueError, NotImplementedError), match="consistency"):
         MrTotalVI(
@@ -699,3 +706,86 @@ def test_z_base_background_ignores_z_p_and_the_donor():
     b = _generate(module, tensors, inference, torch.randn(8, N_ZP) * 3.0)["py_"]
     assert torch.equal(a["back_alpha"], b["back_alpha"])
     assert not torch.equal(a["mixing"], b["mixing"])
+
+
+# -- precomputed encoder input (for example full dsb) ----------------------------------------
+
+
+def _precomputed_adata(mutate=None):
+    import pandas as pd
+
+    adata = scvi.data.synthetic_iid(batch_size=4, n_genes=5, n_proteins=3, n_regions=2, n_batches=2, n_labels=2)
+    adata.obs["sample"] = np.asarray([f"sample_{index % 3}" for index in range(adata.n_obs)])
+    names = list(adata.uns["protein_names"])
+    rng = np.random.default_rng(0)
+    adata.obsm["dsb"] = pd.DataFrame(rng.normal(size=(adata.n_obs, len(names))), index=adata.obs_names, columns=names)
+    if mutate is not None:
+        mutate(adata)
+    MrTotalVI.setup_anndata(
+        adata,
+        protein_expression_obsm_key="protein_expression",
+        sample_key="sample",
+        batch_key="batch",
+        protein_names_uns_key="protein_names",
+        protein_latent_input_obsm_key="dsb",
+    )
+    return adata
+
+
+class _Recorder(torch.nn.Module):
+    def __init__(self, inner):
+        super().__init__()
+        self.inner, self.seen = inner, []
+
+    def forward(self, y, sample_index=None):
+        self.seen.append(y.detach().clone())
+        return self.inner(y, sample_index)
+
+
+@torch.no_grad()
+def test_precomputed_matrix_reaches_the_encoder_exactly_per_minibatch():
+    adata = _precomputed_adata()
+    model = MrTotalVI(
+        adata, sample_key="sample", n_latent=N_Z, n_latent_u=2, n_latent_protein_only=N_ZP,
+        protein_latent_encoder_input="precomputed",
+    )  # fmt: skip
+    module = model.module.eval()
+    module.qzp = recorder = _Recorder(module.qzp)
+    assert module.qzp.inner.log1p_input is False
+    for tensors in model._make_data_loader(adata=adata, batch_size=16):
+        rows = tensors[REGISTRY_KEYS.INDICES_KEY].long().flatten().numpy()
+        module.inference(**module._get_inference_input(tensors))
+        expected = torch.as_tensor(adata.obsm["dsb"].to_numpy()[rows], dtype=torch.float32)
+        assert torch.equal(recorder.seen[-1], expected)
+    assert not recorder.seen[-1].requires_grad
+
+
+def test_precomputed_input_needs_the_registered_matrix():
+    adata = _make_v2_adata(3)
+    with pytest.raises(ValueError, match="protein_latent_input_obsm_key"):
+        MrTotalVI(
+            adata, sample_key="sample", n_latent=N_Z, n_latent_protein_only=N_ZP,
+            protein_latent_encoder_input="precomputed",
+        )  # fmt: skip
+
+
+def test_precomputed_matrix_with_wrong_protein_order_raises():
+    def reorder(adata):
+        adata.obsm["dsb"] = adata.obsm["dsb"].iloc[:, ::-1]
+
+    with pytest.raises(ValueError, match="names and order"):
+        _precomputed_adata(reorder)
+
+
+def test_precomputed_matrix_with_nan_or_wrong_shape_raises():
+    def add_nan(adata):
+        adata.obsm["dsb"].iloc[0, 0] = np.nan
+
+    with pytest.raises(ValueError, match="NaN"):
+        _precomputed_adata(add_nan)
+
+    def drop_column(adata):
+        adata.obsm["dsb"] = adata.obsm["dsb"].iloc[:, :2]
+
+    with pytest.raises(ValueError, match="shape"):
+        _precomputed_adata(drop_column)

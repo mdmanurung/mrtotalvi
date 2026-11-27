@@ -39,7 +39,7 @@ from ._counterfactual import (
 )
 from ._counterfactual import get_counterfactual_latent as _get_counterfactual_latent
 from ._counterfactual import local_sample_enrichment as _local_sample_enrichment
-from ._module import MrTotalVAE, _check_posterior_options
+from ._module import PROTEIN_LATENT_INPUT_KEY, MrTotalVAE, _check_posterior_options
 from ._stats import (
     _as_indices,
     _differential_expression,
@@ -82,6 +82,31 @@ def _eval_mode(module):
         yield
     finally:
         module.train(was_training)
+
+
+def _validate_protein_latent_input(adata, key: str, counts_key: str, names_uns_key: str | None) -> None:
+    """Check a precomputed protein matrix: DataFrame, counts' names in order, right shape, all finite."""
+    if key not in adata.obsm:
+        raise KeyError(f"{key!r} not found in adata.obsm.")
+    matrix = adata.obsm[key]
+    if not isinstance(matrix, pd.DataFrame):
+        raise ValueError(f"adata.obsm[{key!r}] must be a DataFrame whose columns are the protein names.")
+    names = authoritative_protein_names(
+        adata,
+        protein_expression_obsm_key=counts_key,
+        protein_names_uns_key=names_uns_key,
+        required=True,
+        require_strings=False,
+    )
+    if matrix.shape != (adata.n_obs, len(names)):
+        raise ValueError(f"adata.obsm[{key!r}] has shape {matrix.shape}; expected {(adata.n_obs, len(names))}.")
+    if list(matrix.columns) != list(names):
+        raise ValueError(
+            f"adata.obsm[{key!r}] columns {list(matrix.columns)} differ from the protein names {list(names)} "
+            "(names and order must match)."
+        )
+    if not np.isfinite(matrix.to_numpy(dtype=float)).all():
+        raise ValueError(f"adata.obsm[{key!r}] has NaN or infinite values.")
 
 
 class MrTotalVI(EmbeddingMixin, TOTALVI):
@@ -272,6 +297,71 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         hidden layer plus a donor embedding on the last one). The counterfactual donor never reaches it.
         Counterfactual and DE decodes still use ``w = 0``. The P2.5 comparison tests both values. Saved in
         ``init_params_``; checkpoints without it load with ``"protein"``.
+    n_latent_protein_only
+        **EXPERIMENTAL.** ``0`` (default) is off: no module is built and every output stays byte-identical.
+        ``n > 0`` adds a protein-only latent ``z_p`` of dimension ``n`` (the P2.5 comparison uses 10 and 30)
+        with its own encoder ``q(z_p | y)``. The encoder reads the protein counts only: no RNA, no batch and no
+        covariate. The RNA heads read ``z`` only, so the RNA scale never depends on ``z_p`` (the ZINB dropout
+        trunk is shared with the protein mixing head: documented, not blocked). ``z_p`` is drawn at training
+        time, as ``u`` is, and is not part of the ``u`` hierarchy. The options below start with
+        ``protein_latent_``; each is saved in ``init_params_``. Only ``protein_latent_kl_weight`` has a package
+        default (1.0, as scvi's ``max_kl_weight``); for the others the signature default only makes the
+        signature valid and the P2.5 comparison names the values it tests. Only
+        ``protein_noise_model="totalvi"`` is supported (other values raise ``NotImplementedError``), and
+        ``n_latent_protein_only > 0`` cannot be combined with ``n_latent_protein_residual > 0`` or
+        ``u_invariance_weight > 0`` (both raise ``NotImplementedError``). Each epoch logs ``kl_zp``,
+        ``protein_latent_active_units`` and, with the ``N(0, I)`` prior, ``kl_zp_dim_<d>`` (the per-dimension
+        KL), as ``<name>_<train|validation>``; the loss gains ``kl_div_zp`` in ``kl_local``. ``z_p`` can
+        collapse (``kl_zp`` near 0, no active units) or can absorb the protein signal (large ``kl_zp``), so
+        check both. Checkpoints without it load with ``0``.
+    protein_latent_combination
+        **EXPERIMENTAL.** ``"replace"``: the protein heads read ``z_p`` only, so the protein decode has no
+        path from the RNA. ``"concat"``: they read ``[z, z_p]``. Counterfactual and DE decodes
+        (``get_counterfactual_expression``, ``differential_expression``) decode each cell's *own*
+        ``z_p`` at its posterior mean, so a donor change does not move a protein head that reads only
+        ``z_p``; the posterior mean keeps the two arms of a contrast on the same ``z_p``.
+    protein_latent_heads
+        **EXPERIMENTAL.** ``"fore_mixing"``: the foreground and mixing heads read ``z_p``; the background
+        head reads ``z``. ``"all"``: the background head reads ``z_p`` too.
+    protein_latent_prior
+        **EXPERIMENTAL.** ``"standard"``: ``p(z_p) = N(0, I)``. ``"mog"``: the package's learned
+        mixture of Gaussians with 20 components (as for ``u``), with a Monte-Carlo KL.
+    protein_latent_encoder_input
+        **EXPERIMENTAL.** ``"log1p"``: ``log1p(y)``, as the u-encoder does. ``"ambient_zscore"``: the DSB
+        step-I standardised counts (needs ``ambient_profile``); ``q(u)`` keeps its own
+        ``protein_encoder_input``. ``"precomputed"``: a per-cell matrix you supply (for example full dsb,
+        both steps) through ``setup_anndata(protein_latent_input_obsm_key=...)``. The package validates it
+        (same protein names and order as the counts, finite) and feeds it per minibatch as given, with no
+        transform and no gradient through it; it does not compute dsb.
+    protein_latent_conditioning
+        **EXPERIMENTAL.** ``"blind"``: ``q(z_p | y)`` sees no donor. ``"donor"``: the real donor enters by
+        the mechanism of the u-encoder in ``u_encoder_mode="sample_conditioned"`` (never the counterfactual
+        donor).
+    protein_latent_consistency_weight
+        **EXPERIMENTAL.** ``0`` (default) is off. ``> 0`` adds ``weight * KL(q(z | x, y) || q(z_p | y))``
+        to the loss, closed form and constant (it does not follow the ``kl_weight`` warm-up). It needs
+        ``n_latent_protein_only == n_latent`` (otherwise ``ValueError``; no projection is defined) and an
+        analytic ``q(z | u) = N(z_base + mean(eps), scale(eps))``, so ``use_map=False`` and
+        ``hierarchy_mode="legacy"``. The term is conditional on the draw of ``u``. Both sides get gradient.
+    protein_latent_kl_weight
+        **EXPERIMENTAL.** Multiplies the annealed ``kl_weight`` on the KL of ``z_p`` (default 1.0).
+    protein_latent_free_bits
+        **EXPERIMENTAL.** Free-bits floor in nats (default 0, off), after Kingma et al. 2016: a unit costs
+        ``max(floor, KL)``, so below the floor its gradient is zero. The logged ``kl_div_zp`` stays the true
+        KL. With the ``"mog"`` prior only ``protein_latent_free_bits_granularity="group"`` is defined.
+    protein_latent_free_bits_granularity
+        **EXPERIMENTAL.** ``"per_dim"`` floors each dimension; ``"group"`` floors the summed KL of all
+        dimensions.
+    protein_latent_free_bits_statistic
+        **EXPERIMENTAL.** ``"batch_mean"`` compares the minibatch mean KL with the floor (Kingma 2016);
+        ``"per_cell"`` clamps every cell.
+    protein_latent_free_bits_schedule
+        **EXPERIMENTAL.** ``"constant"``: the floor applies from epoch 0. ``"after_warmup"``: only once the
+        annealed ``kl_weight`` reaches 1.0 (scvi's default ``max_kl_weight``).
+    protein_latent_decode_draw
+        **EXPERIMENTAL.** ``"draw"``: factual readouts decode one draw of ``z_p`` per draw of ``z``, as
+        scvi does. ``"mean"``: they decode the posterior mean of ``q(z_p | y)``. The training and validation
+        loss always draw.
     init_prior_from_data
         If ``True`` and ``u_prior="vamp"``, run k-means on a random subsample
         (≤10 000 cells) of the raw encoder input from the frozen training split
@@ -419,6 +509,19 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         n_latent_protein_residual: int = 0,
         protein_residual_heads: Literal["fore_mixing", "all"] = "fore_mixing",
         protein_residual_encoder_input: Literal["protein", "protein_sample"] = "protein",
+        n_latent_protein_only: int = 0,
+        protein_latent_combination: Literal["replace", "concat"] = "replace",
+        protein_latent_heads: Literal["fore_mixing", "all"] = "fore_mixing",
+        protein_latent_prior: Literal["standard", "mog"] = "standard",
+        protein_latent_encoder_input: Literal["log1p", "ambient_zscore"] = "log1p",
+        protein_latent_conditioning: Literal["blind", "donor"] = "blind",
+        protein_latent_consistency_weight: float = 0.0,
+        protein_latent_kl_weight: float = 1.0,
+        protein_latent_free_bits: float = 0.0,
+        protein_latent_free_bits_granularity: Literal["per_dim", "group"] = "per_dim",
+        protein_latent_free_bits_statistic: Literal["batch_mean", "per_cell"] = "batch_mean",
+        protein_latent_free_bits_schedule: Literal["constant", "after_warmup"] = "constant",
+        protein_latent_decode_draw: Literal["draw", "mean"] = "draw",
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -484,6 +587,29 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             raise NotImplementedError(
                 "n_latent_protein_residual > 0 is only implemented for protein_noise_model='totalvi'; "
                 f"got {protein_noise_model!r}."
+            )
+        if n_latent_protein_only and protein_noise_model != "totalvi":
+            raise NotImplementedError(
+                "n_latent_protein_only > 0 is only implemented for protein_noise_model='totalvi'; "
+                f"got {protein_noise_model!r}."
+            )
+        if (
+            n_latent_protein_only
+            and protein_latent_encoder_input == "precomputed"
+            and PROTEIN_LATENT_INPUT_KEY not in manager.data_registry
+        ):
+            raise ValueError(
+                "protein_latent_encoder_input='precomputed' needs setup_anndata(protein_latent_input_obsm_key=...)."
+            )
+        if n_latent_protein_only and n_latent_protein_residual:
+            raise NotImplementedError(
+                "n_latent_protein_only > 0 cannot be combined with n_latent_protein_residual > 0: both feed "
+                "the protein heads and the choice between them is not made here. Use one of them."
+            )
+        if n_latent_protein_only and protein_latent_consistency_weight > 0 and (use_map or hierarchy_mode != "legacy"):
+            raise NotImplementedError(
+                "protein_latent_consistency_weight > 0 needs an analytic q(z | u): use_map=False and "
+                "hierarchy_mode='legacy'."
             )
         if learn_z_u_prior_scale and use_map:
             warnings.warn(
@@ -565,6 +691,19 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_latent_protein_residual=n_latent_protein_residual,
             protein_residual_heads=protein_residual_heads,
             protein_residual_encoder_input=protein_residual_encoder_input,
+            n_latent_protein_only=n_latent_protein_only,
+            protein_latent_combination=protein_latent_combination,
+            protein_latent_heads=protein_latent_heads,
+            protein_latent_prior=protein_latent_prior,
+            protein_latent_encoder_input=protein_latent_encoder_input,
+            protein_latent_conditioning=protein_latent_conditioning,
+            protein_latent_consistency_weight=protein_latent_consistency_weight,
+            protein_latent_kl_weight=protein_latent_kl_weight,
+            protein_latent_free_bits=protein_latent_free_bits,
+            protein_latent_free_bits_granularity=protein_latent_free_bits_granularity,
+            protein_latent_free_bits_statistic=protein_latent_free_bits_statistic,
+            protein_latent_free_bits_schedule=protein_latent_free_bits_schedule,
+            protein_latent_decode_draw=protein_latent_decode_draw,
             use_batch_norm=use_batch_norm,
             use_layer_norm=use_layer_norm,
             batch_representation=batch_representation,
@@ -1184,6 +1323,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         size_factor_key: str | None = None,
         categorical_covariate_keys: list[str] | None = None,
         continuous_covariate_keys: list[str] | None = None,
+        protein_latent_input_obsm_key: str | None = None,
         **kwargs,
     ):
         """%(summary)s.
@@ -1209,6 +1349,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         %(param_size_factor_key)s
         %(param_cat_cov_keys)s
         %(param_cont_cov_keys)s
+        protein_latent_input_obsm_key
+            Optional key in ``adata.obsm`` for a precomputed per-cell protein matrix (for example full dsb:
+            ambient z-score plus the isotype-based technical component) that ``q(z_p | y)`` reads with
+            ``protein_latent_encoder_input="precomputed"``. It must be a DataFrame with the same protein
+            names in the same order as the counts, finite, with one row per cell. The package feeds it
+            to the encoder per minibatch as given; it computes nothing and passes no gradient through it.
 
         Returns
         -------
@@ -1228,6 +1374,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             required=False,
             require_strings=False,
         )
+        if protein_latent_input_obsm_key is not None:
+            _validate_protein_latent_input(
+                adata, protein_latent_input_obsm_key, protein_expression_obsm_key, protein_names_uns_key
+            )
         # Add integer index column required by compute_local_statistics
         adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
 
@@ -1259,6 +1409,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             # Cell indices for batched counterfactual inference
             fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]
+        if protein_latent_input_obsm_key is not None:
+            anndata_fields.append(fields.ObsmField(PROTEIN_LATENT_INPUT_KEY, protein_latent_input_obsm_key))
         if panel_key is not None:
             # Mirrors TOTALVI: panel field also registered at position 0
             anndata_fields.insert(0, fields.CategoricalObsField("panel", panel_key))
@@ -1292,7 +1444,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     ) -> None:
         names = [str(n) for n in self.adata_manager.get_state_registry(REGISTRY_KEYS.PROTEIN_EXP_KEY).column_names]
         needs_profile = (
-            protein_noise_model != "totalvi" or protein_encoder_input != "raw" or seed_background_prior_from_ambient
+            protein_noise_model != "totalvi"
+            or protein_encoder_input != "raw"
+            or seed_background_prior_from_ambient
+            or (self.module.n_latent_protein_only > 0 and self.module.protein_latent_encoder_input == "ambient_zscore")
         )
         if needs_profile and ambient_profile is None:
             raise ValueError("This protein noise configuration needs `ambient_profile`.")
