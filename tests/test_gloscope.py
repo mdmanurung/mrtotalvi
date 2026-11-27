@@ -137,3 +137,82 @@ def test_model_sample_divergence_and_embedding():
     with pytest.warns(UserWarning):
         masked = model.get_sample_divergence(indices=mask, num_components=(1, 2), r=500, random_state=0)
     np.testing.assert_allclose(masked.values, sub.values)
+
+
+def _three_samples(seed=1, n=300):
+    rng = np.random.default_rng(seed)
+    x = np.vstack([rng.normal(size=(n, 2)), rng.normal(size=(n, 2)) + 0.5, rng.normal(size=(n, 2)) * 1.5])
+    return x, np.repeat(["a", "b", "c"], n)
+
+
+@pytest.mark.parametrize("metric", ["KL", "JS"])
+def test_gmm_draws_fresh_points_per_pair_and_direction(monkeypatch, metric):
+    # Two draws (one per direction) for each of the 3 pairs; no draw is reused between pairs.
+    from mrtotalvi import _gloscope
+
+    real = _gloscope._sample_gmm
+    draws = []
+
+    def counting(model, r, rng):
+        out = real(model, r, rng)
+        draws.append(out)
+        return out
+
+    monkeypatch.setattr(_gloscope, "_sample_gmm", counting)
+    x, ids = _three_samples()
+    sample_divergence(x, ids, dist_metric=metric, num_components=(1,), r=50, random_state=0)
+    assert len(draws) == 6
+    assert not any(np.array_equal(draws[i], draws[j]) for i in range(6) for j in range(i))
+
+
+def test_gmm_reproducible_and_invariant_to_sample_order():
+    x, ids = _three_samples()
+    kw = {"num_components": (1, 2), "r": 500, "random_state": 7}
+    d1, s1 = sample_divergence(x, ids, samples=["a", "b", "c"], **kw)
+    d2, s2 = sample_divergence(x, ids, samples=["c", "a", "b"], **kw)
+    np.testing.assert_array_equal(d1, sample_divergence(x, ids, samples=["a", "b", "c"], **kw)[0])
+    perm = [s1.index(s) for s in s2]
+    np.testing.assert_array_equal(d1[np.ix_(perm, perm)], d2)
+
+
+@pytest.mark.parametrize("metric", ["KL", "JS"])
+def test_gmm_identical_distributions_give_zero(metric):
+    x, ids = _two_gaussians([0.0, 0.0], n=2000)
+    d, _ = sample_divergence(x, ids, dist_metric=metric, num_components=(1,), r=10000, random_state=0)
+    assert d[0, 1] == pytest.approx(0.0, abs=0.02)
+
+
+def test_gmm_kl_matches_closed_form_1d():
+    # N(0, 1) vs N(1, 2^2): KL(p||q) = ln 2 + (1 + 1) / 8 - 1/2; KL(q||p) = -ln 2 + (4 + 1) / 2 - 1/2.
+    rng = np.random.default_rng(0)
+    x = np.concatenate([rng.normal(size=4000), rng.normal(size=4000) * 2 + 1]).reshape(-1, 1)
+    ids = np.repeat(["a", "b"], 4000)
+    d, _ = sample_divergence(x, ids, num_components=(1,), r=10000, random_state=0)
+    expected = np.log(2) + 2 / 8 - 0.5 + (-np.log(2) + 5 / 2 - 0.5)
+    assert d[0, 1] == pytest.approx(expected, rel=0.06)
+
+
+def test_knn_output_unchanged():
+    # Values from the code before per-pair GMM draws; the k-NN path must stay byte-identical.
+    rng = np.random.default_rng(1)
+    x = np.vstack([rng.normal(size=(80, 3)), rng.normal(size=(70, 3)) + 0.5, rng.normal(size=(60, 3)) * 1.5])
+    ids = np.array(["a"] * 80 + ["b"] * 70 + ["c"] * 60)
+    kl = sample_divergence(x, ids, dens="KNN", dist_metric="KL", k=5)[0][np.triu_indices(3, 1)]
+    js = sample_divergence(x, ids, dens="KNN", dist_metric="JS", k=5)[0][np.triu_indices(3, 1)]
+    assert kl.tolist() == [0.8568844875415633, 0.7633190900994535, 0.5810372267817885]
+    assert js.tolist() == [0.15727561603897433, 0.1490265491408627, 0.12496325529913326]
+
+
+def test_gmm_draw_counts_follow_hard_classification():
+    from mrtotalvi._gloscope import _sample_gmm
+
+    rng = np.random.default_rng(0)
+    x = np.vstack([rng.normal(size=(300, 2)), rng.normal(size=(100, 2)) + 20])
+    model = _gmm(x, (2,), random_state=0)
+    np.testing.assert_allclose(model.hard_weights_, np.bincount(model.predict(x), minlength=2) / 400)
+    assert sorted(model.hard_weights_) == [0.25, 0.75]
+    # Counts follow hard_weights_, not weights_: all mass on one component puts every draw there.
+    model.hard_weights_ = np.array([1.0, 0.0])
+    draws = _sample_gmm(model, 200, np.random.default_rng(1))
+    assert draws.shape == (200, 2)
+    assert np.linalg.norm(draws - model.means_[0], axis=1).max() < 8

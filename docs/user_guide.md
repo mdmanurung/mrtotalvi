@@ -206,9 +206,12 @@ emb = model.get_sample_embedding(div, n_components=2)  # DataFrame indexed by sa
 
 `z` holds both cell-state composition and within-state sample shifts, so the divergence reflects
 both. `dens="KNN"` uses k-nearest-neighbour estimators (`k=50`) instead of a mixture, and
-`dist_metric="JS"` gives the Jensen-Shannon divergence. The defaults follow GloScope 2.1.2, with two
-departures: the mixture has full covariances (mclust `VVV`; GloScope uses `VVE`, which
-scikit-learn lacks), and the `r=10000` Monte Carlo draws are made once per sample, not once per pair.
+`dist_metric="JS"` gives the Jensen-Shannon divergence. `dens="KNN"` is the estimator with exact R parity
+(checked against GloScope 1.4.0 and 2.0.1; Mulè, 1e-13). `dens="GMM"` values do not match R GloScope yet. The
+mixture is scikit-learn full covariance (mclust `VVV` with k-means initialisation; GloScope uses `VVE`). As in
+R, the Monte Carlo component counts follow the hard-classification shares of the sample’s cells, and the `r=10000` draws are made fresh for every sample pair and
+direction. Each draw has its own random stream derived from `random_state` and the sorted sample labels, so
+results do not depend on sample order.
 GloScope warns below 500 cells per sample; so does this method.
 
 ## Batch representation
