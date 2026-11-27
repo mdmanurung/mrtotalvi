@@ -297,6 +297,36 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         hidden layer plus a donor embedding on the last one). The counterfactual donor never reaches it.
         Counterfactual and DE decodes still use ``w = 0``. The P2.5 comparison tests both values. Saved in
         ``init_params_``; checkpoints without it load with ``"protein"``.
+    protein_residual_kl_weight
+        **EXPERIMENTAL.** Used only with ``n_latent_protein_residual > 0`` (other values raise ``ValueError``).
+        ``beta_w``: multiplies the annealed ``kl_weight`` on the KL of ``w``, so the term is
+        ``kl_weight * protein_residual_kl_weight * KL(q(w | y) || N(0, I))``. Default ``1.0`` leaves training unchanged.
+        With ``beta_w != 1`` the objective is no longer an ELBO; ``elbo_validation`` stays unweighted.
+        Saved in ``init_params_``.
+    protein_residual_free_bits
+        **EXPERIMENTAL.** Used only with ``n_latent_protein_residual > 0``. Free-bits floor ``lambda`` in nats
+        (Kingma et al. 2016, appendix C.8). ``0.0`` (default) is off and leaves training unchanged. With
+        ``lambda > 0`` the KL of each group is clamped below at ``lambda``: the term is
+        ``sum_g max(lambda, stat(KL_g))`` and a clamped group has zero gradient. It removes the penalty
+        below the floor; it does not force ``w`` to be used. Under ``scale_observations`` the clamp uses the
+        minibatch mean weighted by the donor weights, so threshold and loss use the same weights. The logged ``kl_w`` and ``kl_w_dim_<i>`` (per-dimension KL, logged for
+        every ``w``) stay the true, unclamped KL, and ``elbo_validation`` stays the true ELBO while training
+        optimises the floored objective. Saved in ``init_params_``.
+    protein_residual_free_bits_granularity
+        **EXPERIMENTAL.** ``"per_dim"`` (default): each dimension of ``w`` is a group. ``"group"``: one group, the
+        summed KL over all dimensions. The default is a placeholder: no package default exists, and the P2.5
+        search tests both values. Saved in ``init_params_``.
+    protein_residual_free_bits_schedule
+        **EXPERIMENTAL.** ``"constant"`` (default): the floor applies from epoch 0. ``"after_warmup"``: it applies
+        only once the annealed ``kl_weight`` reaches the plan's ``max_kl_weight`` (default ``1.0``; pass it in
+        ``plan_kwargs``). The default is a placeholder: no package default
+        exists, and the P2.5 search tests both values. Saved in ``init_params_``.
+    protein_residual_free_bits_statistic
+        **EXPERIMENTAL.** ``"batch_mean"`` (default, Kingma et al. 2016, C.8): a group is clamped when its
+        minibatch-mean KL is below ``lambda``. Each cell of a clamped group then carries the constant
+        ``lambda`` (the clamped total spread equally over cells) and an unclamped group carries its own
+        per-cell KL, so the batch mean of the term is ``sum_g max(lambda, mean_cell KL_g)``. ``"per_cell"``:
+        each cell's group KL is clamped, ``sum_g max(lambda, KL_gc)``. Saved in ``init_params_``.
     n_latent_protein_only
         **EXPERIMENTAL.** ``0`` (default) is off: no module is built and every output stays byte-identical.
         ``n > 0`` adds a protein-only latent ``z_p`` of dimension ``n`` (the P2.5 comparison uses 10 and 30)
@@ -360,13 +390,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ``"per_cell"`` clamps every cell.
     protein_latent_free_bits_schedule
         **EXPERIMENTAL.** ``"constant"``: the floor applies from epoch 0. ``"after_warmup"``: only once the
-        annealed ``kl_weight`` reaches 1.0 (scvi's default ``max_kl_weight``).
+        annealed ``kl_weight`` reaches the plan's ``max_kl_weight`` (default 1.0).
     protein_latent_mog_kl_draws
-        **EXPERIMENTAL.** No package default (``None``). With ``protein_latent_prior="mog"`` the KL is a
-        Monte-Carlo estimate, and a free-bits floor clamps that estimate, which biases the cost upward when
-        one draw is clamped. The number of draws per cell averaged before the floor is set here; it is
-        required (``ValueError``) when the MoG prior is combined with ``protein_latent_free_bits > 0`` and
-        unused otherwise. The logged MoG KL is named ``kl_zp_mc_estimate``.
+        **EXPERIMENTAL.** Default 64 (G190). With ``protein_latent_prior="mog"`` the KL is a Monte-Carlo
+        estimate. This many draws per cell are averaged, always (also with free bits 0), before the free-bits
+        floor clamps the estimate; one clamped draw biases the cost upward. Closed-form ``"standard"`` prior
+        ignores it. The logged MoG KL is named ``kl_zp_mc_estimate``.
     protein_latent_decode_draw
         **EXPERIMENTAL.** ``"draw"``: factual readouts decode one draw of ``z_p`` per draw of ``z``, as
         scvi does. ``"mean"``: they decode the posterior mean of ``q(z_p | y)``. The training and validation
@@ -518,6 +547,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         n_latent_protein_residual: int = 0,
         protein_residual_heads: Literal["fore_mixing", "all"] = "fore_mixing",
         protein_residual_encoder_input: Literal["protein", "protein_sample"] = "protein",
+        protein_residual_kl_weight: float = 1.0,
+        protein_residual_free_bits: float = 0.0,
+        protein_residual_free_bits_granularity: Literal["per_dim", "group"] = "per_dim",
+        protein_residual_free_bits_schedule: Literal["constant", "after_warmup"] = "constant",
+        protein_residual_free_bits_statistic: Literal["batch_mean", "per_cell"] = "batch_mean",
         n_latent_protein_only: int = 0,
         protein_latent_combination: Literal["replace", "concat"] = "replace",
         protein_latent_heads: Literal["fore_mixing", "all"] = "all",
@@ -530,7 +564,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         protein_latent_free_bits_granularity: Literal["per_dim", "group"] = "per_dim",
         protein_latent_free_bits_statistic: Literal["batch_mean", "per_cell"] = "batch_mean",
         protein_latent_free_bits_schedule: Literal["constant", "after_warmup"] = "constant",
-        protein_latent_mog_kl_draws: int | None = None,
+        protein_latent_mog_kl_draws: int = 64,
         protein_latent_decode_draw: Literal["draw", "mean"] = "draw",
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
@@ -701,6 +735,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             n_latent_protein_residual=n_latent_protein_residual,
             protein_residual_heads=protein_residual_heads,
             protein_residual_encoder_input=protein_residual_encoder_input,
+            protein_residual_kl_weight=protein_residual_kl_weight,
+            protein_residual_free_bits=protein_residual_free_bits,
+            protein_residual_free_bits_granularity=protein_residual_free_bits_granularity,
+            protein_residual_free_bits_schedule=protein_residual_free_bits_schedule,
+            protein_residual_free_bits_statistic=protein_residual_free_bits_statistic,
             n_latent_protein_only=n_latent_protein_only,
             protein_latent_combination=protein_latent_combination,
             protein_latent_heads=protein_latent_heads,
@@ -1219,6 +1258,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         # Lightning >= 2.6 no longer switches it back at fit start. A second train() call
         # would then run without dropout and skip the u-invariance penalty.
         self.module.train()
+        # "after_warmup" free bits start when kl_weight reaches the plan's cap.
+        self.module.kl_warmup_target = float(plan_kwargs.get("max_kl_weight", 1.0))
         result = super().train(
             max_epochs=max_epochs,
             lr=lr,

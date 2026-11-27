@@ -699,23 +699,18 @@ def test_mog_prior_with_per_dimension_free_bits_is_not_implemented():
         protein_latent_prior="mog",
         protein_latent_free_bits=0.25,
         protein_latent_free_bits_granularity="group",
-        protein_latent_mog_kl_draws=4,
     )
 
 
-def test_mog_free_bits_needs_an_explicit_number_of_kl_draws():
-    # No package default: the user picks how many draws are averaged before the floor.
-    kw = {
-        "protein_latent_prior": "mog",
-        "protein_latent_free_bits": 0.25,
-        "protein_latent_free_bits_granularity": "group",
-    }
-    with pytest.raises(ValueError, match="protein_latent_mog_kl_draws"):
-        _model(**kw)
-    for bad in (0, -1, 2.5, True):
+def test_mog_kl_draws_default_is_64_and_is_validated():
+    # G190: default 64. MoG checkpoints without the argument load, so MoG with free bits builds without it.
+    assert _model(protein_latent_prior="mog").module.protein_latent_mog_kl_draws == 64
+    _model(
+        protein_latent_prior="mog", protein_latent_free_bits=0.25, protein_latent_free_bits_granularity="group"
+    )
+    for bad in (0, -1, 2.5, True, None):
         with pytest.raises(ValueError, match="protein_latent_mog_kl_draws"):
-            _model(**kw, protein_latent_mog_kl_draws=bad)
-    _model(protein_latent_prior="mog")  # without free bits the option is not needed
+            _model(protein_latent_prior="mog", protein_latent_mog_kl_draws=bad)
 
 
 @torch.no_grad()
@@ -741,6 +736,8 @@ def test_mog_free_bits_average_draws_before_clamping():
 
     assert mean_cost(1) > 0.15
     assert mean_cost(256) < 0.135
+    # G190: the default of 64 draws sits close to max(floor, true KL) = 0.125, not the one-draw 0.163.
+    assert mean_cost(64) == pytest.approx(max(0.125, 0.02), abs=0.01)
 
 
 @pytest.mark.parametrize("mode", ["ambient", "ambient_isotype"])
