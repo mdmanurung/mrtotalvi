@@ -104,3 +104,13 @@ def test_non_totalvi_mode_raises(fitted):
             model.get_protein_noise_decomposition(adata, n_samples=2, readout="posterior")
     finally:
         model.module.protein_noise_model = old
+
+
+def test_posterior_readout_with_size_factor_scales_native_only(fitted):
+    # Codex A6: the posterior readout returns native only; size_factor must not index the other components.
+    model, adata = fitted
+    plain = _read(model, adata, readout="posterior")
+    scaled = _read(model, adata, readout="posterior", size_factor="total_adt")
+    assert set(scaled) == {"native"}
+    factor = model._protein_size_factor(adata)
+    np.testing.assert_allclose(scaled["native"].values, plain["native"].values / factor[:, None], rtol=1e-6)

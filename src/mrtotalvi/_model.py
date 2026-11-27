@@ -276,7 +276,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         is. The decoder heads set by ``protein_residual_heads`` read ``[z, w]``; the RNA heads read ``z`` only.
         The loss gains ``kl_div_w`` (in ``kl_local``). Each epoch logs ``kl_w_<train|validation>`` and
         ``protein_residual_active_units_<train|validation>``. Counterfactual and DE decodes read ``w = 0``
-        (``get_counterfactual_expression``, ``differential_expression``), so they decode from ``z`` only.
+        (``get_counterfactual_expression`` and the private legacy DE/LFC path; public ``differential_expression`` raises), so they decode from ``z`` only.
         ``get_protein_noise_decomposition``, ``get_normalized_expression`` and the posterior readout decode
         each cell's own draws of ``q(w)``. Only ``protein_noise_model="totalvi"`` with the default background
         source and encoder input is supported; other settings raise ``NotImplementedError``. Under
@@ -309,7 +309,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         signature valid and the P2.5 comparison names the values it tests. Only
         ``protein_noise_model="totalvi"`` is supported (other values raise ``NotImplementedError``), and
         ``n_latent_protein_only > 0`` cannot be combined with ``n_latent_protein_residual > 0`` or
-        ``u_invariance_weight > 0`` (both raise ``NotImplementedError``). Each epoch logs ``kl_zp``,
+        ``u_invariance_weight > 0`` (both raise ``NotImplementedError``). Each epoch logs ``kl_zp`` (``kl_zp_mc_estimate`` with the MoG prior, a Monte-Carlo estimate),
         ``protein_latent_active_units`` and, with the ``N(0, I)`` prior, ``kl_zp_dim_<d>`` (the per-dimension
         KL), as ``<name>_<train|validation>``; the loss gains ``kl_div_zp`` in ``kl_local``. ``z_p`` can
         collapse (``kl_zp`` near 0, no active units) or can absorb the protein signal (large ``kl_zp``), so
@@ -317,7 +317,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     protein_latent_combination
         **EXPERIMENTAL.** ``"replace"``: the protein heads read ``z_p`` only, so the protein decode has no
         path from the RNA. ``"concat"``: they read ``[z, z_p]``. ``"replace"`` needs ``protein_latent_heads="all"`` (``ValueError`` otherwise). Counterfactual and DE decodes
-        (``get_counterfactual_expression``, ``differential_expression``) decode each cell's *own*
+        (``get_counterfactual_expression`` and the private legacy DE/LFC path; public ``differential_expression`` raises) decode each cell's *own*
         ``z_p`` at its posterior mean, so a donor change does not move a protein head that reads only
         ``z_p``; the posterior mean keeps the two arms of a contrast on the same ``z_p``.
     protein_latent_heads
@@ -339,7 +339,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         donor).
     protein_latent_consistency_weight
         **EXPERIMENTAL.** ``0`` (default) is off. ``> 0`` adds ``weight * KL(q(z | x, y) || q(z_p | y))``
-        to the loss, closed form and annealed with ``kl_weight`` like the other KL terms. It needs
+        to the training loss, closed form and annealed with ``kl_weight`` like the other KL terms. It is not part
+        of ``kl_local`` or the ELBO, so ``elbo_validation`` and early stopping do not change; it is logged as
+        ``kl_zp_consistency``. Its estimand is the conditional KL averaged over ``u``, which adds the conditional
+        mutual information between ``z`` and ``u`` to the marginal KL. It needs
         ``n_latent_protein_only == n_latent`` (otherwise ``ValueError``; no projection is defined) and an
         analytic ``q(z | u) = N(z_base + mean(eps), scale(eps))``, so ``use_map=False`` and
         ``hierarchy_mode="legacy"``. The term is conditional on the draw of ``u``. Both sides get gradient.
@@ -358,6 +361,12 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
     protein_latent_free_bits_schedule
         **EXPERIMENTAL.** ``"constant"``: the floor applies from epoch 0. ``"after_warmup"``: only once the
         annealed ``kl_weight`` reaches 1.0 (scvi's default ``max_kl_weight``).
+    protein_latent_mog_kl_draws
+        **EXPERIMENTAL.** No package default (``None``). With ``protein_latent_prior="mog"`` the KL is a
+        Monte-Carlo estimate, and a free-bits floor clamps that estimate, which biases the cost upward when
+        one draw is clamped. The number of draws per cell averaged before the floor is set here; it is
+        required (``ValueError``) when the MoG prior is combined with ``protein_latent_free_bits > 0`` and
+        unused otherwise. The logged MoG KL is named ``kl_zp_mc_estimate``.
     protein_latent_decode_draw
         **EXPERIMENTAL.** ``"draw"``: factual readouts decode one draw of ``z_p`` per draw of ``z``, as
         scvi does. ``"mean"``: they decode the posterior mean of ``q(z_p | y)``. The training and validation
@@ -521,6 +530,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         protein_latent_free_bits_granularity: Literal["per_dim", "group"] = "per_dim",
         protein_latent_free_bits_statistic: Literal["batch_mean", "per_cell"] = "batch_mean",
         protein_latent_free_bits_schedule: Literal["constant", "after_warmup"] = "constant",
+        protein_latent_mog_kl_draws: int | None = None,
         protein_latent_decode_draw: Literal["draw", "mean"] = "draw",
         init_prior_from_data: bool = False,
         freeze_prior_after_init: bool = False,
@@ -703,6 +713,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             protein_latent_free_bits_granularity=protein_latent_free_bits_granularity,
             protein_latent_free_bits_statistic=protein_latent_free_bits_statistic,
             protein_latent_free_bits_schedule=protein_latent_free_bits_schedule,
+            protein_latent_mog_kl_draws=protein_latent_mog_kl_draws,
             protein_latent_decode_draw=protein_latent_decode_draw,
             use_batch_norm=use_batch_norm,
             use_layer_norm=use_layer_norm,
@@ -1732,6 +1743,8 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
                     f"size_factor='total_adt': {int((factor == 0).sum())} requested cells have a raw protein total of 0."
                 )
             for key in ("native", "ambient", "nonspecific", "observed"):
+                if key not in result:  # the posterior readout returns ``native`` only
+                    continue
                 result[key] = result[key].div(factor, axis=0)
         return result
 
