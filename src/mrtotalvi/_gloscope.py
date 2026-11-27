@@ -58,10 +58,12 @@ relative tolerance 1e-5.
 
 This is a clean-room implementation. It does NOT reproduce R mclust. The merge tree differs
 from R's: on Mule sample d233 the partitions agree with R's ``hclass`` at an adjusted Rand
-index of about 0.5 to 0.7. The earlier Ward-based start picked a larger component count than R
-(G=20 in 74 of 100 fits, against 4 of 100) with a higher log-likelihood and a divergence
-Pearson of about 0.70 with R (bench report R098); see the CHANGELOG for the figures of this
-start. The free-parameter count and BIC formula match mclust.
+index of 0.45 to 0.68 for 5 to 20 groups. On Mule (20 samples, 5 seeds) the port picks G=15 in
+81 of 100 fits and G=10 in 19, against G=5/10/15/20 in 34/46/16/4 for R, and reaches a higher
+log-likelihood in 96 of 100 fits. Its divergences correlate with R's at Pearson 0.76 (median of 5
+seeds; R against R: 0.93) and Spearman 0.87 (R against R: 0.95); the chosen G agrees with R's
+in 4 of 20 samples (R against R: 11.5). It fails the strict reproducibility gate (bench report
+R098, figure ``vve_port_vs_mclust_v2.png``). The free-parameter count and BIC formula match mclust.
 """
 
 from __future__ import annotations

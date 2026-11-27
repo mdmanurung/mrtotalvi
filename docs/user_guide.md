@@ -214,9 +214,10 @@ direction. Each draw has its own random stream derived from `random_state` and t
 results do not depend on sample order.
 `gmm_model="vve"` fits the GloScope model (varying volume and shape, one shared orientation) with a clean-room
 numpy and scipy implementation, written from the papers and the mclust help pages (no mclust source, no GPL code).
-It does **not** reproduce R mclust. EM starts from Ward clustering on a seeded 2000-cell subset, not mclust's
-model-based clustering. On Mulè it picks larger component counts (G=20 in 74 of 100 fits, against 4 of 100 for R) and
-reaches a higher log-likelihood. Its divergences correlate with R at Pearson about 0.70. Draws per pair and the
+It does **not** reproduce R mclust. EM starts from a clean-room model-based agglomerative clustering with
+unconstrained covariances on a seeded 2000-cell subset, and has no iteration cap. On Mulè it picks G=15 in 81 of 100
+fits and G=10 in 19 (R picks 5, 10, 15 or 20 in 34, 46, 16 and 4), and reaches a higher log-likelihood in 96 of 100.
+Its divergences correlate with R at Pearson 0.76 (R against R: 0.93). Draws per pair and the
 hard-classification proportions are the same as for `"full"`.
 GloScope warns below 500 cells per sample; so does this method.
 

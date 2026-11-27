@@ -6,9 +6,10 @@
 
 - `get_sample_divergence(gmm_model="vve")`: opt-in clean-room VVE Gaussian mixture (varying volume and shape, one
   shared orientation), GloScope's model. Written from Browne and McNicholas (2014), Fraley and Raftery (2002) and
-  Scrucca et al. (2016) with numpy and scipy only; no mclust source, no GPL code. It does not reproduce R mclust: on
-  Mulè it picks larger `G` (G=20 in 74 of 100 fits, against 4 of 100 for R) and reaches a higher log-likelihood; the
-  divergence correlates with R at Pearson about 0.70. The default `gmm_model="full"` is byte-identical to before.
+  Scrucca et al. (2016) with numpy and scipy only; no mclust source, no GPL code. EM starts from a clean-room model-based
+  VVV agglomerative clustering (SVD, 2000-cell subset) and has no iteration cap (as mclust 6.1.4). It does not
+  reproduce R mclust: on Mulè it picks G=15 in 81 of 100 fits and G=10 in 19 (R: G=5/10/15/20 in 34/46/16/4), reaches a
+  higher log-likelihood in 96 of 100, and its divergence correlates with R at Pearson 0.76 (R against R: 0.93). The default `gmm_model="full"` is byte-identical to before.
   Both keep per-pair draws and hard-classification proportions.
 
 - `n_latent_protein_residual` and `protein_residual_heads` (EXPERIMENTAL, default `0`, which is off and leaves every
