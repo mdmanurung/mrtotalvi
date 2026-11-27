@@ -1653,7 +1653,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         ----------
         size_factor
             ``None`` (default) leaves the output unchanged. ``"total_adt"`` divides
-            ``native``, ``ambient``, ``nonspecific`` and ``observed`` by each cell's size
+            ``native``, ``ambient``, ``nonspecific`` and ``observed`` (those the readout returns) by each cell's size
             factor: the cell's raw protein total (all registered proteins, isotype controls
             included, measured proteins only) over the median of that total across all
             cells of ``adata``, not only ``indices``. ``foreground_probability`` is
