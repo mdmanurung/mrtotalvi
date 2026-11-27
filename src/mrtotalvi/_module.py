@@ -1737,11 +1737,6 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             isinstance(mog_kl_draws, bool) or not isinstance(mog_kl_draws, int) or mog_kl_draws < 1
         ):
             raise ValueError(f"protein_latent_mog_kl_draws must be a whole number >= 1 or None; got {mog_kl_draws!r}.")
-        if prior == "mog" and free_bits > 0 and mog_kl_draws is None:
-            raise ValueError(
-                "protein_latent_prior='mog' with protein_latent_free_bits > 0 clamps a Monte Carlo KL estimate; "
-                "set protein_latent_mog_kl_draws (the number of draws averaged before the floor, no package default)."
-            )
         self.n_latent_protein_only = int(n)
         self.protein_latent_combination = combination
         self.protein_latent_heads = heads
@@ -1786,6 +1781,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             raise NotImplementedError(
                 "protein_latent_free_bits > 0 with protein_latent_prior='mog' has no per-dimension KL; "
                 "use protein_latent_free_bits_granularity='group'."
+            )
+        if prior == "mog" and free_bits > 0 and mog_kl_draws is None:
+            raise ValueError(
+                "protein_latent_prior='mog' with protein_latent_free_bits > 0 clamps a Monte Carlo KL estimate; "
+                "set protein_latent_mog_kl_draws (the number of draws averaged before the floor, no package default)."
             )
 
     def _zscore_protein(self, y: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
