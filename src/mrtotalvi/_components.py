@@ -1245,9 +1245,20 @@ class ProteinResidualEncoder(nn.Module):
     added to the last hidden layer before the output network.
     """
 
-    def __init__(self, n_proteins: int, n_latent: int, n_hidden: int = 128, n_layers: int = 1, n_sample: int = 0):
+    def __init__(
+        self,
+        n_proteins: int,
+        n_latent: int,
+        n_hidden: int = 128,
+        n_layers: int = 1,
+        n_sample: int = 0,
+        log1p_input: bool = True,
+    ):
         super().__init__()
         self.n_sample = int(n_sample)
+        # ``False`` feeds the input as given, for an input the caller has already transformed (the
+        # protein-only latent z_p with ``protein_latent_encoder_input="ambient_zscore"``).
+        self.log1p_input = bool(log1p_input)
         # Layers are registered in the order fc1, norm1, fc2, norm2 so the sample-blind default keeps its
         # parameter order (and so its state-dict hash) from before the donor option existed.
         self.fc1 = nn.Linear(n_proteins, n_hidden)
@@ -1266,7 +1277,7 @@ class ProteinResidualEncoder(nn.Module):
 
     @auto_move_data
     def forward(self, y: torch.Tensor, sample_index: torch.Tensor | None = None) -> Normal:
-        x = self.fc1(torch.log1p(y))
+        x = self.fc1(torch.log1p(y) if self.log1p_input else y)
         if self.n_sample > 0:
             x = _gelu(self.cond_norm1(x, sample_index))
             x = _gelu(self.cond_norm2(self.fc2(x), sample_index))
@@ -1300,6 +1311,12 @@ class DecoderTOTALVIResidual(DecoderTOTALVI):
     ``w`` is not a forward argument, because the call site in scvi's ``TOTALVAE.generative`` is
     fixed. The owning module sets ``w`` with :meth:`set_residual` around that call. With no ``w``
     set the decoder reads ``w = 0``.
+
+    With ``replace_n_z`` set (the protein-only latent ``z_p``, ``protein_latent_combination="replace"``)
+    a selected head reads ``z_p`` *in place of* the first ``replace_n_z`` columns of its input (the
+    columns of ``z``), keeping the covariate and batch-embedding columns that follow. Its first layer
+    is then ``n_input - replace_n_z + n_residual`` wide. ``require_residual=True`` makes a decode
+    without ``z_p`` raise: ``z_p = 0`` is the prior mean and would erase the cell's identity.
     """
 
     def __init__(
@@ -1309,6 +1326,8 @@ class DecoderTOTALVIResidual(DecoderTOTALVI):
         n_output_proteins: int,
         n_residual: int,
         heads: str = "fore_mixing",
+        replace_n_z: int | None = None,
+        require_residual: bool = False,
         **kwargs,
     ):
         super().__init__(n_input, n_output_genes, n_output_proteins, **kwargs)
@@ -1316,10 +1335,13 @@ class DecoderTOTALVIResidual(DecoderTOTALVI):
             raise ValueError(f"heads must be one of {sorted(PROTEIN_RESIDUAL_HEADS)}.")
         self.n_residual = int(n_residual)
         self.w_heads = PROTEIN_RESIDUAL_HEADS[heads]
+        self.replace_n_z = None if replace_n_z is None else int(replace_n_z)
+        self.require_residual = bool(require_residual)
         self._w: torch.Tensor | None = None
         # A second decoder with the wider input donates the layers that read w, so the layer
         # arguments are not restated here.
-        wide = DecoderTOTALVI(n_input + self.n_residual, n_output_genes, n_output_proteins, **kwargs)
+        head_width = n_input + self.n_residual - (self.replace_n_z or 0)
+        wide = DecoderTOTALVI(head_width, n_output_genes, n_output_proteins, **kwargs)
         for head in self.w_heads:
             for name in PROTEIN_HEAD_LAYERS[head]:
                 setattr(self, name, getattr(wide, name))
@@ -1333,9 +1355,13 @@ class DecoderTOTALVIResidual(DecoderTOTALVI):
             return z
         w = self._w
         if w is None:
+            if self.require_residual:
+                raise RuntimeError("This decode needs the protein-only latent z_p; none was passed.")
             w = z.new_zeros(*z.shape[:-1], self.n_residual)
         while w.dim() < z.dim():
             w = w.unsqueeze(0).expand(z.shape[0], *w.shape)
+        if self.replace_n_z is not None:
+            return torch.cat([w, z[..., self.replace_n_z :]], dim=-1)
         return torch.cat([z, w], dim=-1)
 
     def forward(self, z: torch.Tensor, library_gene: torch.Tensor, *cat_list: int):

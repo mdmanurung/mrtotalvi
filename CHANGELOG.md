@@ -4,6 +4,22 @@
 
 ### Added
 
+- `n_latent_protein_only` (EXPERIMENTAL, default `0`, which is off and leaves every output byte-identical): a saved
+  protein-only latent `z_p` with its own encoder `q(z_p | y)` that reads the protein counts only (no RNA, batch or
+  covariate). Twelve saved `protein_latent_*` options set the combination (`"replace"`: the protein heads read `z_p`
+  only; `"concat"`: `[z, z_p]`), the heads that read it (`"fore_mixing"` or `"all"`; `"replace"` needs `"all"` and raises `ValueError` otherwise), the prior (`N(0, I)` or the
+  package's MoG with 20 components), the encoder input (`log1p(y)`, the DSB z-score, which needs `ambient_profile`, or a `"precomputed"` per-cell matrix such as full dsb, registered with `setup_anndata(protein_latent_input_obsm_key=...)`, validated for names, order and NaN, and fed as given without gradient),
+  donor conditioning (blind or the u-encoder's sample-conditioned mechanism), an optional consistency term
+  `KL(q(z | x, y) || q(z_p | y))` with an annealed weight (0 is off; it needs `n_latent_protein_only == n_latent`, `use_map=False`
+  and `hierarchy_mode="legacy"`), the KL weight and a free-bits floor (granularity, statistic and schedule; shared
+  helper `mrtotalvi._kl_free_bits`), and whether factual readouts decode a draw or the posterior mean of `z_p`.
+  Only the KL weight has a package default (1.0). The RNA heads read `z` only. Counterfactual and DE decodes use each cell's own `z_p` at
+  its posterior mean, so in `"replace"` mode a donor change does not move a protein head that reads only `z_p`.
+  `protein_background_source="z_base"` works when the background head does not read `z_p` (`"concat"` with `"fore_mixing"`). The loss
+  gains `kl_div_zp`, and each epoch logs `kl_zp`, `protein_latent_active_units` and `kl_zp_dim_<d>` (the
+  per-dimension KL, `N(0, I)` prior only). Only `protein_noise_model="totalvi"` is supported; the options cannot be
+  combined with `n_latent_protein_residual` or `u_invariance_weight` (both raise `NotImplementedError`).
+
 - `n_latent_protein_residual` and `protein_residual_heads` (EXPERIMENTAL, default `0`, which is off and leaves every
   output byte-identical): a saved protein residual latent `w` next to `z`. `q(w | y)` reads the protein counts only
   (`log1p`, no batch or covariate input; sample-blind by default), `p(w) = N(0, I)` with KL weight 1 annealed with `kl_weight` like
@@ -16,11 +32,11 @@
   to `q(w | y)` by the u-encoder's sample-conditioned mechanism; no package default, P2.5 tests both. Under
   `gene_likelihood="zinb"` `w` reaches the RNA dropout through the shared mixing trunk; the RNA scale is unchanged.
 
-- `residual_kl_weight`, `residual_free_bits`, `residual_free_bits_groups`, `residual_free_bits_schedule` and
-  `residual_free_bits_statistic` (EXPERIMENTAL, defaults `1.0`, `0.0`, `"per_dim"`, `"always"`, `"batch_mean"`, which
+- `protein_residual_kl_weight`, `protein_residual_free_bits`, `protein_residual_free_bits_granularity`, `protein_residual_free_bits_schedule` and
+  `protein_residual_free_bits_statistic` (EXPERIMENTAL, defaults `1.0`, `0.0`, `"per_dim"`, `"constant"`, `"batch_mean"`, which
   leave training byte-identical): saved KL knobs on the protein residual latent `w`. They need
-  `n_latent_protein_residual > 0` and raise `ValueError` otherwise. `residual_kl_weight` (`beta_w`) multiplies the
-  annealed `kl_weight` on `KL(q(w | y) || N(0, I))`. `residual_free_bits` is a free-bits floor in nats (Kingma et al.
+  `n_latent_protein_residual > 0` and raise `ValueError` otherwise. `protein_residual_kl_weight` (`beta_w`) multiplies the
+  annealed `kl_weight` on `KL(q(w | y) || N(0, I))`. `protein_residual_free_bits` is a free-bits floor in nats (Kingma et al.
   2016, appendix C.8): the term is `sum_g max(lambda, stat(KL_g))`, with groups per dimension or all dimensions
   together, and `stat` the minibatch mean (a clamped group adds the constant `lambda` to every cell and has zero
   gradient) or each cell's own KL. `"after_warmup"` floors only once `kl_weight` reaches `1.0`. The floor clamps the
