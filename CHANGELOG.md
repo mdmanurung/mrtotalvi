@@ -4,6 +4,13 @@
 
 ### Added
 
+- `get_sample_divergence(gmm_model="vve")`: opt-in clean-room VVE Gaussian mixture (varying volume and shape, one
+  shared orientation), GloScope's model. Written from Browne and McNicholas (2014), Fraley and Raftery (2002) and
+  Scrucca et al. (2016) with numpy and scipy only; no mclust source, no GPL code. It does not reproduce R mclust: on
+  Mulè it picks larger `G` (G=20 in 74 of 100 fits, against 4 of 100 for R) and reaches a higher log-likelihood; the
+  divergence correlates with R at Pearson about 0.70. The default `gmm_model="full"` is byte-identical to before.
+  Both keep per-pair draws and hard-classification proportions.
+
 - `n_latent_protein_residual` and `protein_residual_heads` (EXPERIMENTAL, default `0`, which is off and leaves every
   output byte-identical): a saved protein residual latent `w` next to `z`. `q(w | y)` reads the protein counts only
   (`log1p`, no batch or covariate input; sample-blind by default), `p(w) = N(0, I)` with KL weight 1 annealed with `kl_weight` like

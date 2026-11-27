@@ -207,11 +207,17 @@ emb = model.get_sample_embedding(div, n_components=2)  # DataFrame indexed by sa
 `z` holds both cell-state composition and within-state sample shifts, so the divergence reflects
 both. `dens="KNN"` uses k-nearest-neighbour estimators (`k=50`) instead of a mixture, and
 `dist_metric="JS"` gives the Jensen-Shannon divergence. `dens="KNN"` is the estimator with exact R parity
-(checked against GloScope 1.4.0 and 2.0.1; Mulè, 1e-13). `dens="GMM"` values do not match R GloScope yet. The
-mixture is scikit-learn full covariance (mclust `VVV` with k-means initialisation; GloScope uses `VVE`). As in
+(checked against GloScope 1.4.0 and 2.0.1; Mulè, 1e-13). `dens="GMM"` values do not match R GloScope. The
+default mixture (`gmm_model="full"`) is scikit-learn full covariance (mclust `VVV` with k-means initialisation; GloScope uses `VVE`). As in
 R, the Monte Carlo component counts follow the hard-classification shares of the sample’s cells, and the `r=10000` draws are made fresh for every sample pair and
 direction. Each draw has its own random stream derived from `random_state` and the sorted sample labels, so
 results do not depend on sample order.
+`gmm_model="vve"` fits the GloScope model (varying volume and shape, one shared orientation) with a clean-room
+numpy and scipy implementation, written from the papers and the mclust help pages (no mclust source, no GPL code).
+It does **not** reproduce R mclust. EM starts from Ward clustering on a seeded 2000-cell subset, not mclust's
+model-based clustering. On Mulè it picks larger component counts (G=20 in 74 of 100 fits, against 4 of 100 for R) and
+reaches a higher log-likelihood. Its divergences correlate with R at Pearson about 0.70. Draws per pair and the
+hard-classification proportions are the same as for `"full"`.
 GloScope warns below 500 cells per sample; so does this method.
 
 ## Batch representation

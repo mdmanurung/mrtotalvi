@@ -2980,6 +2980,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         k: int = 50,
         random_state: int | None = None,
         batch_size: int | None = None,
+        gmm_model: Literal["full", "vve"] = "full",
     ) -> xr.DataArray:
         """GloScope divergence between the cell distributions of every pair of samples.
 
@@ -2988,9 +2989,10 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
         reflects both cell-state composition and within-state sample shifts. This ports
         GloScope (Wang et al., Genome Biol 2024, doi:10.1186/s13059-024-03398-1); parity was
         checked against GloScope 1.4.0 and 2.0.1. ``dens="KNN"`` is the estimator with exact R
-        parity (verified on Mule to 1e-13). ``dens="GMM"`` does not match R GloScope yet: the
-        mixture is scikit-learn ``GaussianMixture`` with full covariance (mclust ``VVV`` with
-        k-means initialisation, not GloScope's ``VVE``). As in R, the Monte Carlo component
+        parity (verified on Mule to 1e-13). ``dens="GMM"`` does not match R GloScope. The default
+        mixture (``gmm_model="full"``) is scikit-learn ``GaussianMixture`` with full covariance
+        (mclust ``VVV`` with k-means initialisation, not GloScope's ``VVE``). ``gmm_model="vve"``
+        is a clean-room VVE mixture (not R mclust; see ``mrtotalvi._gloscope``). As in R, the Monte Carlo component
         counts follow the hard-classification shares of the sample's cells, and fresh draws
         are made for every sample pair and direction.
 
@@ -3020,6 +3022,11 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             on the order of samples or on pair scheduling.
         batch_size
             Minibatch size for encoding.
+        gmm_model
+            Covariance model of the GMM. ``"full"`` (default): full covariances. ``"vve"``: varying
+            volume and shape with one shared orientation, as GloScope's VVE, by a clean-room
+            implementation. On Mule it picks larger component counts than R mclust and its
+            divergences correlate with R at Pearson about 0.70.
 
         Returns
         -------
@@ -3051,6 +3058,7 @@ class MrTotalVI(EmbeddingMixin, TOTALVI):
             num_components=num_components,
             k=k,
             random_state=random_state,
+            gmm_model=gmm_model,
         )
         return xr.DataArray(
             values,

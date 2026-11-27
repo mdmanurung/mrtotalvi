@@ -216,3 +216,117 @@ def test_gmm_draw_counts_follow_hard_classification():
     draws = _sample_gmm(model, 200, np.random.default_rng(1))
     assert draws.shape == (200, 2)
     assert np.linalg.norm(draws - model.means_[0], axis=1).max() < 8
+
+
+# --- gmm_model="vve" (clean-room mclust-style VVE; see the _gloscope module docstring) ----------------------------
+
+
+def test_gmm_full_output_unchanged_at_pr26_head():
+    # Values from PR #26 head (fix/gloscope-gmm-per-pair-draws); gmm_model="full" must stay byte-identical.
+    rng = np.random.default_rng(1)
+    x = np.vstack([rng.normal(size=(300, 3)), rng.normal(size=(300, 3)) + 0.5, rng.normal(size=(300, 3)) * 1.5])
+    ids = np.repeat(["a", "b", "c"], 300)
+    kw = {"num_components": (1, 2), "r": 500, "random_state": 7}
+    for extra in ({}, {"gmm_model": "full"}):
+        kl = sample_divergence(x, ids, dist_metric="KL", **kw, **extra)[0][np.triu_indices(3, 1)]
+        js = sample_divergence(x, ids, dist_metric="JS", **kw, **extra)[0][np.triu_indices(3, 1)]
+        assert kl.tolist() == [0.9089759441017774, 0.981376736704729, 1.3078886305991257]
+        assert js.tolist() == [0.08932075493133412, 0.09909814315661541, 0.1135503141409279]
+
+
+def test_gmm_model_rejects_unknown():
+    x, ids = _three_samples()
+    with pytest.raises(ValueError, match="gmm_model"):
+        sample_divergence(x, ids, gmm_model="vvv")
+
+
+def _vve_truth(theta=np.pi / 6):
+    rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    omega = np.array([[9.0, 1.0], [2.0, 0.5]])  # different volume (9 vs 1) and shape (9 vs 4)
+    return rot, omega, np.array([[0.0, 0.0], [5.0, -3.0]])
+
+
+def _vve_data(n=20000, seed=0):
+    rot, omega, mean = _vve_truth()
+    rng = np.random.default_rng(seed)
+    xs = [mean[k] + (rng.standard_normal((n, 2)) * np.sqrt(omega[k])) @ rot.T for k in range(2)]
+    return np.vstack(xs), np.repeat([0, 1], n)
+
+
+def test_vve_mstep_recovers_common_orientation_with_different_volume_and_shape():
+    from mrtotalvi._gloscope import _vve_mstep
+
+    x, lab = _vve_data()
+    z = (lab[:, None] == np.arange(2)).astype(float)
+    pro, mean, rot_hat, omega_hat = _vve_mstep(x, z, None)
+    rot, omega, mean_true = _vve_truth()
+    np.testing.assert_allclose(pro, [0.5, 0.5])
+    np.testing.assert_allclose(mean, mean_true, atol=0.1)
+    for k in range(2):
+        sigma_true = rot @ np.diag(omega[k]) @ rot.T
+        sigma_hat = rot_hat @ np.diag(omega_hat[k]) @ rot_hat.T
+        np.testing.assert_allclose(sigma_hat, sigma_true, rtol=0.05, atol=0.05)
+    # Volume and shape differ between the components.
+    assert omega_hat[0].prod() / omega_hat[1].prod() == pytest.approx(9.0, rel=0.1)
+
+
+# Golden numbers: R mclust 6.1.4 (VVE, Mule, bench R098), from
+# /exports/para-lipg-hpc/mdmanurung/mrtotalvi_bench/gloscope_parity_20261127/vve_port/tables/r_chosen.tsv (df, bic, loglik, n)
+# and vve_port/tests/test_vve.py (d256, G=5). Rows: (G, d, df, loglik, n, bic).
+_R_VVE = [
+    (5, 30, 739, 174176.132832086, 4788, 342090.077162898),
+    (10, 30, 1044, 121902.68784237, 2940, 235467.819570553),
+    (15, 30, 1349, 95430.8431817739, 2124, 180526.921303742),
+    (5, 30, 739, 83865.6232955284, 2375, 161987.182333586),
+]
+
+
+@pytest.mark.parametrize(("g", "d", "df", "loglik", "n", "bic"), _R_VVE)
+def test_vve_free_parameters_and_bic_match_mclust(g, d, df, loglik, n, bic):
+    from mrtotalvi._gloscope import _vve_bic, _vve_n_params
+
+    assert _vve_n_params(g, d) == df
+    assert _vve_bic(loglik, n, g, d) == pytest.approx(bic, abs=1e-4)
+
+
+def test_vve_loglik_monotone_over_em_iterations():
+    from mrtotalvi._gloscope import _vve_fit
+
+    rng = np.random.default_rng(3)
+    x = np.vstack([rng.normal(size=(400, 3)), rng.normal(size=(300, 3)) * [2, 1, 0.5] + 3])
+    z0 = rng.dirichlet(np.ones(3), size=len(x))  # soft random start, many iterations
+    fit = _vve_fit(x, z0, tol=1e-10, max_iter=200)
+    trace = np.asarray(fit["loglik_trace"])
+    assert len(trace) > 5
+    assert (np.diff(trace) >= -1e-7 * (1 + np.abs(trace[1:]))).all()
+
+
+def test_vve_is_reproducible_and_order_invariant():
+    x, ids = _three_samples()
+    kw = {"gmm_model": "vve", "num_components": (1, 2, 3), "r": 500, "random_state": 7}
+    d1, s1 = sample_divergence(x, ids, **kw)
+    d2, s2 = sample_divergence(x, ids, samples=["c", "a", "b"], **kw)
+    np.testing.assert_array_equal(d1, sample_divergence(x, ids, **kw)[0])
+    perm = [s1.index(s) for s in s2]
+    np.testing.assert_array_equal(d1[np.ix_(perm, perm)], d2)
+    assert np.isfinite(d1).all()
+    assert not np.array_equal(d1, sample_divergence(x, ids, **{**kw, "random_state": 8})[0])
+
+
+@pytest.mark.parametrize("metric", ["KL", "JS"])
+def test_vve_matches_full_on_shared_orientation_data(metric):
+    # Data whose true model is VVE: the VVE and full divergences agree.
+    rot, omega, mean = _vve_truth()
+    rng = np.random.default_rng(5)
+
+    def draw(shift, n=3000):
+        return np.vstack(
+            [mean[k] + shift + (rng.standard_normal((n, 2)) * np.sqrt(omega[k])) @ rot.T for k in range(2)]
+        )
+
+    x = np.vstack([draw(0.0), draw(1.0)])
+    ids = np.repeat(["a", "b"], 6000)
+    kw = {"num_components": (2,), "r": 20000, "random_state": 0, "dist_metric": metric}
+    full = sample_divergence(x, ids, gmm_model="full", **kw)[0][0, 1]
+    vve = sample_divergence(x, ids, gmm_model="vve", **kw)[0][0, 1]
+    assert vve == pytest.approx(full, rel=0.1)
