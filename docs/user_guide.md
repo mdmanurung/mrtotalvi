@@ -594,6 +594,41 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   signal. Only `protein_noise_model="totalvi"` is supported. With `gene_likelihood="zinb"` the RNA dropout
   head shares `sigmoid_decoder` with the protein mixing head, so `w` reaches the dropout; this is documented,
   not blocked, and `"nb"` is unaffected.
+- **`n_latent_protein_only` and the `protein_latent_*` options (EXPERIMENTAL).** Saved constructor arguments.
+  The default `n_latent_protein_only=0` is off and changes nothing. A value `n > 0` adds a protein-only latent
+  `z_p` of `n` dimensions (the P2.5 comparison uses 10 and 30) with its own encoder `q(z_p | y)`, which sees the
+  protein counts only: no RNA, no batch, no covariate. The RNA heads read `z` only, so the RNA scale never depends
+  on `z_p`. `protein_latent_combination="replace"` makes the protein heads read `z_p` instead of `z`, so the
+  protein decode has no path from the RNA; `"concat"` gives them `[z, z_p]`. `protein_latent_heads` picks the
+  heads that read `z_p` (`"fore_mixing"` or `"all"`). `protein_latent_prior` is `"standard"` (`N(0, I)`) or `"mog"`
+  (the package's learned 20-component mixture, Monte-Carlo KL). `protein_latent_encoder_input` is `"log1p"` or
+  `"ambient_zscore"` (DSB z-score, needs `ambient_profile`; `q(u)` keeps its own `protein_encoder_input`) or `"precomputed"` (a per-cell matrix you compute, for example full dsb with both steps, passed as `setup_anndata(protein_latent_input_obsm_key=...)`: a DataFrame with the counts' protein names in the same order and no NaN; the package feeds it per minibatch as given, with no gradient, and never computes dsb).
+  `protein_latent_conditioning="donor"` adds the real donor to `q(z_p | y)` by the u-encoder's mechanism.
+  `protein_background_source="z_base"` is allowed when the background head ignores `z_p`
+  (`"concat"` with `protein_latent_heads="fore_mixing"`). Only the KL weight has a package default (1.0, scvi's `max_kl_weight`); for the rest the signature
+  defaults only make it valid, and the P2.5 comparison names the values it tests.
+  The KL of `z_p` is weighted by `protein_latent_kl_weight` times the annealed `kl_weight`. A free-bits floor
+  (`protein_latent_free_bits`, in nats; 0 is off) makes a dimension, or all dimensions as one group, cost
+  `max(floor, KL)`; `..._granularity` is `"per_dim"` or `"group"`, `..._statistic` is the minibatch mean or the
+  per-cell clamp, and `..._schedule` is `"constant"` or `"after_warmup"` (once `kl_weight` reaches 1.0). The logged
+  `kl_div_zp` stays the true KL. With the MoG prior only `"group"` is defined. `protein_latent_consistency_weight > 0`
+  adds that weight times `KL(q(z | x, y) || q(z_p | y))`: closed form, conditional on the draw of `u`, annealed
+  with `kl_weight` like the other KL terms. It needs `n_latent_protein_only == n_latent` (no projection between different sizes is
+  defined), `use_map=False` and `hierarchy_mode="legacy"`.
+  Counterfactual and DE decodes decode each cell's own `z_p` at its posterior mean (own batch and donor, never a
+  counterfactual one), so in `"replace"` mode a donor change leaves every protein output unchanged (up to float32
+  rounding). `"replace"` needs `protein_latent_heads="all"` (the background head reads `z_p` too) and raises
+  `ValueError` otherwise; `"concat"` keeps both head options. The posterior mean is used for CF/DE whatever
+  `protein_latent_decode_draw` says.
+  `protein_latent_decode_draw` sets what factual readouts (`get_normalized_expression`, the protein noise
+  decomposition, the posterior readout) decode: one draw of `z_p` per draw of `z` (`"draw"`, scvi's behaviour) or
+  its posterior mean (`"mean"`). Training and validation losses always draw. Each epoch logs `kl_zp`,
+  `protein_latent_active_units` and, with the `N(0, I)` prior, `kl_zp_dim_<d>` (`<name>_train` and
+  `<name>_validation`): a `kl_zp` near 0 with no active units means `z_p` collapsed, a large `kl_zp` means it
+  absorbs the protein signal. Only `protein_noise_model="totalvi"` is supported. The options cannot be combined
+  with `n_latent_protein_residual` or `u_invariance_weight > 0` (both raise `NotImplementedError`). Under
+  `gene_likelihood="zinb"` the RNA dropout head shares `sigmoid_decoder` with the protein mixing head, so `z_p`
+  reaches the dropout; this is documented, not blocked, and `"nb"` is unaffected.
 
 Protein scale in inherited methods. The loss fits protein counts with means
 `per_batch_efficiency * rate_{back,fore}`. `posterior_predictive_sample` now applies that

@@ -1198,6 +1198,10 @@ def _differential_expression(
                     # Build kwargs for compute_h_from_x_eps from inference inputs;
                     # batch_index is overridden per counterfactual batch below.
                     h_kwargs = dict(inf_inputs)
+                    if "qzp" in base_out:
+                        # The cell's own z_p (own batch and donor), at its posterior mean: the same
+                        # z_p decodes both arms of every contrast.
+                        h_kwargs["zp"] = base_out["qzp"].loc
                     # _get_inference_input does not return extra_eps or cf_sample,
                     # so h_kwargs can be passed directly to compute_h_from_x_eps.
 

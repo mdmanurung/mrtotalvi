@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import math
 
@@ -33,10 +34,14 @@ from ._components import (
 from ._components import (
     kl_u as _kl_u,
 )
+from ._kl_free_bits import check_free_bits_options, free_bits_active, kl_with_free_bits
 
 # Active-unit cut-off of Burda et al. (2016, ICLR): a latent dimension is active when the
 # variance of its posterior mean across cells exceeds 0.01.
 RESIDUAL_ACTIVE_THRESHOLD = 0.01
+
+# Registry key of the per-cell matrix q(z_p | y) reads with protein_latent_encoder_input="precomputed".
+PROTEIN_LATENT_INPUT_KEY = "protein_latent_input"
 
 
 def residual_collapse_metrics(eps: torch.Tensor, z: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -168,6 +173,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         :class:`~mrtotalvi.MrTotalVI`.
     protein_residual_encoder_input
         ``"protein"`` (default) or ``"protein_sample"``. See :class:`~mrtotalvi.MrTotalVI`.
+    n_latent_protein_only
+        **EXPERIMENTAL.** ``0`` (default) is off and leaves every output unchanged. ``n > 0`` adds the
+        protein-only latent ``z_p`` with encoder ``q(z_p | y)``. See :class:`~mrtotalvi.MrTotalVI`, which
+        also documents the ``protein_latent_*`` options.
     **kwargs
         All remaining keyword arguments forwarded verbatim to
         :class:`~scvi.module._totalvae.TOTALVAE`.
@@ -209,6 +218,19 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         n_latent_protein_residual: int = 0,
         protein_residual_heads: str = "fore_mixing",
         protein_residual_encoder_input: str = "protein",
+        n_latent_protein_only: int = 0,
+        protein_latent_combination: str = "replace",
+        protein_latent_heads: str = "all",
+        protein_latent_prior: str = "standard",
+        protein_latent_encoder_input: str = "log1p",
+        protein_latent_conditioning: str = "blind",
+        protein_latent_consistency_weight: float = 0.0,
+        protein_latent_kl_weight: float = 1.0,
+        protein_latent_free_bits: float = 0.0,
+        protein_latent_free_bits_granularity: str = "per_dim",
+        protein_latent_free_bits_statistic: str = "batch_mean",
+        protein_latent_free_bits_schedule: str = "constant",
+        protein_latent_decode_draw: str = "draw",
         batch_representation: str = "one-hot",
         batch_embedding_kwargs: dict | None = None,
         u_invariance_weight: float = 0.0,
@@ -266,6 +288,23 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         self.n_latent_protein_residual = int(n_latent_protein_residual)
         self.protein_residual_heads = protein_residual_heads
         self.protein_residual_encoder_input = protein_residual_encoder_input
+        # Protein-only latent z_p (EXPERIMENTAL); read by ``_build_decoder`` below.
+        self._set_protein_latent_options(
+            n_latent_protein_only,
+            protein_latent_combination,
+            protein_latent_heads,
+            protein_latent_prior,
+            protein_latent_encoder_input,
+            protein_latent_conditioning,
+            protein_latent_consistency_weight,
+            protein_latent_kl_weight,
+            protein_latent_free_bits,
+            protein_latent_free_bits_granularity,
+            protein_latent_free_bits_statistic,
+            protein_latent_free_bits_schedule,
+            protein_latent_decode_draw,
+            u_invariance_weight=u_invariance_weight,
+        )
 
         # Store hyperparams so _setup_hierarchy can use them if called deferred
         self._n_sample = n_sample
@@ -356,6 +395,29 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 n_hidden=self._decoder_arg("n_hidden", kwargs),
             )
 
+        # Opt-in protein-only latent z_p (EXPERIMENTAL). Off builds nothing.
+        if self.n_latent_protein_only > 0:
+            if batch_representation != "embedding":
+                self.decoder = self._build_decoder(None, kwargs)
+            self.qzp = ProteinResidualEncoder(
+                n_input_proteins,
+                self.n_latent_protein_only,
+                n_hidden=self._decoder_arg("n_hidden", kwargs),
+                log1p_input=self.protein_latent_encoder_input == "log1p",
+            )
+            if self.protein_latent_prior == "mog":
+                # The package's MoG prior (k=20, learned means, scales and weights), on its own holder
+                # so z_p's parameters do not share names with the u prior.
+                self.pzp = nn.Module()
+                init_u_prior(
+                    self.pzp,
+                    self.n_latent_protein_only,
+                    u_prior_mixture=True,
+                    u_prior_mixture_k=20,
+                    u_prior_type="mog",
+                    u_prior_supervision="none",
+                )
+
         if n_sample > 0:
             self._setup_hierarchy(
                 n_sample,
@@ -417,6 +479,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if self.n_latent_protein_residual > 0:
             decoder_class = DecoderTOTALVIResidual
             extra = {"n_residual": self.n_latent_protein_residual, "heads": self.protein_residual_heads}
+        elif self.n_latent_protein_only > 0:
+            decoder_class = DecoderTOTALVIResidual
+            extra = {
+                "n_residual": self.n_latent_protein_only,
+                "heads": self.protein_latent_heads,
+                # z_p takes the place of z in the heads it feeds (replace) or follows it (concat).
+                "replace_n_z": _arg("n_latent") if self.protein_latent_combination == "replace" else None,
+                "require_residual": True,
+            }
         else:
             decoder_class = DecoderTOTALVI
         return decoder_class(
@@ -545,6 +616,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 self.n_latent_protein_residual,
                 n_hidden=self.qw.fc1.out_features,
                 n_sample=n_sample,
+            )
+
+        if self.n_latent_protein_only > 0 and self.protein_latent_conditioning == "donor":
+            self.qzp = ProteinResidualEncoder(
+                self.n_input_proteins,
+                self.n_latent_protein_only,
+                n_hidden=self.qzp.fc1.out_features,
+                n_sample=n_sample,
+                log1p_input=self.protein_latent_encoder_input == "log1p",
             )
 
         self.qz = EncoderUZ(
@@ -695,6 +775,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         """
         base = super()._get_inference_input(tensors)
         base["sample_index"] = tensors[REGISTRY_KEYS.SAMPLE_KEY]
+        if self.n_latent_protein_only > 0 and self.protein_latent_encoder_input == "precomputed":
+            # The supplied per-cell matrix (for example full dsb); the package does not transform it.
+            base["protein_latent_input"] = tensors[PROTEIN_LATENT_INPUT_KEY]
         return base
 
     def _all_sample_residuals(
@@ -781,6 +864,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         sample_index: torch.Tensor | None = None,
         cf_sample: torch.Tensor | None = None,
         target_chunk_size: int | None = None,
+        protein_latent_input: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor | dict]:
         """Compute inference quantities with the hierarchical u→z decomposition.
 
@@ -830,6 +914,18 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             qw = self.qw(y, sample_index)
             out["qw"] = qw
             out["w"] = qw.rsample((n_samples,)) if n_samples > 1 else qw.rsample()
+
+        if self.n_latent_protein_only > 0:
+            # q(z_p | y): protein counts only (plus the real donor when donor-conditioned, never the
+            # counterfactual donor). One draw per Monte-Carlo draw of z. Readouts with
+            # protein_latent_decode_draw="mean" decode the posterior mean instead.
+            qzp = self._protein_latent_dist(y, batch_index, sample_index, protein_latent_input)
+            out["qzp"] = qzp
+            if self._zp_mean_decode and not self.training:
+                zp = qzp.loc if n_samples == 1 else qzp.loc.unsqueeze(0).expand(n_samples, *qzp.loc.shape)
+            else:
+                zp = qzp.rsample((n_samples,)) if n_samples > 1 else qzp.rsample()
+            out["zp"] = zp
 
         if not hasattr(self, "qz"):
             # Hierarchy not yet built (n_sample=0 placeholder). Return TotalVI outputs.
@@ -1164,6 +1260,15 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                     kl_local={**loss_out.kl_local, "kl_div_w": kl_w},
                     extra_metrics={**loss_out.extra_metrics, **self._residual_metrics(inference_outputs, kl_w)},
                 )
+            zp_terms = self._zp_loss(inference_outputs, kl_weight)
+            if zp_terms is not None:
+                term, zp_local, zp_metrics = zp_terms
+                return LossOutput(
+                    loss=loss_out.loss + term.mean(),
+                    reconstruction_loss=loss_out.reconstruction_loss,
+                    kl_local={**loss_out.kl_local, **zp_local},
+                    extra_metrics={**loss_out.extra_metrics, **zp_metrics},
+                )
             return loss_out
 
         label_index = tensors[REGISTRY_KEYS.LABELS_KEY]
@@ -1208,6 +1313,11 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         if kl_w is not None:
             kl_local["kl_div_w"] = kl_w
         kl_w_term = 0.0 if kl_w is None else kl_weight * kl_w
+        # Protein-only latent z_p: weighted KL with the free-bits floor, plus the optional consistency KL.
+        zp_terms = self._zp_loss(inference_outputs, kl_weight)
+        if zp_terms is not None:
+            kl_w_term = kl_w_term + zp_terms[0]
+            kl_local.update(zp_terms[1])
 
         if self._scale_observations and self.n_obs_per_sample is not None:
             # Weight each cell's ELBO by 1/n_cells_in_that_sample so high-cell-count
@@ -1250,6 +1360,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
 
         if kl_w is not None:
             loss_out.extra_metrics.update(self._residual_metrics(inference_outputs, kl_w))
+        if zp_terms is not None:
+            loss_out.extra_metrics.update(zp_terms[2])
 
         if self.u_invariance_weight > 0 and self.training:
             u_pen = self.u_invariance_penalty(tensors, inference_outputs)
@@ -1434,6 +1546,17 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 f"protein_noise_model={protein_noise_model!r}, protein_background_source="
                 f"{protein_background_source!r}, protein_encoder_input={protein_encoder_input!r}."
             )
+        if self.n_latent_protein_only > 0:
+            if protein_noise_model != "totalvi":
+                raise NotImplementedError(
+                    "n_latent_protein_only > 0 is only implemented for protein_noise_model='totalvi'; "
+                    f"got {protein_noise_model!r}."
+                )
+            if protein_background_source == "z_base" and self.protein_latent_heads == "all":
+                raise ValueError(
+                    "protein_background_source='z_base' needs a background head that does not read z_p: "
+                    "use protein_latent_heads='fore_mixing'."
+                )
         if non_default and self.u_invariance_weight > 0:
             raise ValueError("u_invariance_weight > 0 is only supported with the default protein model.")
         if protein_encoder_input == "ambient_zscore" and self.u_prior_type == "vamp":
@@ -1513,9 +1636,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 P, n_isotypes=n_iso, n_nuisance=int(n_nuisance), h_input=nuisance_h_input, n_batch=self.n_batch
             )
 
-        if protein_encoder_input == "ambient_zscore":
+        zp_zscore = self.n_latent_protein_only > 0 and self.protein_latent_encoder_input == "ambient_zscore"
+        if protein_encoder_input == "ambient_zscore" or zp_zscore:
             if dsb_log_mean is None or dsb_log_sd is None:
-                raise ValueError("protein_encoder_input='ambient_zscore' needs DSB log mean and SD.")
+                raise ValueError("an 'ambient_zscore' protein encoder input needs DSB log mean and SD.")
             mean = np.atleast_2d(np.asarray(dsb_log_mean, dtype=np.float32))
             sd = np.atleast_2d(np.asarray(dsb_log_sd, dtype=np.float32))
             if mean.shape != sd.shape or mean.shape[1] != P:
@@ -1532,7 +1656,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                     "droplets, so their z-scores would be undefined or extreme."
                 )
             self.register_buffer("dsb_log_sd", torch.as_tensor(sd))
-            self.qu.protein_input_pretransformed = True
+            # Only q(u) reads the pre-transformed input through ``protein_input_pretransformed``;
+            # q(z_p | y) z-scores in ``_protein_latent_dist``.
+            self.qu.protein_input_pretransformed = protein_encoder_input == "ambient_zscore"
 
     def _context_rows(self, table: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
         if table.shape[0] == 1 or batch_index is None:
@@ -1563,9 +1689,209 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
     def _qu_protein_input(self, y: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
         if getattr(self, "protein_encoder_input", "raw") != "ambient_zscore":
             return y
+        return self._zscore_protein(y, batch_index)
+
+    def _set_protein_latent_options(
+        self,
+        n_latent_protein_only,
+        combination,
+        heads,
+        prior,
+        encoder_input,
+        conditioning,
+        consistency_weight,
+        kl_weight,
+        free_bits,
+        granularity,
+        statistic,
+        schedule,
+        decode_draw,
+        *,
+        u_invariance_weight,
+    ) -> None:
+        """Validate and store the ``protein_latent_*`` options (EXPERIMENTAL, see :class:`~mrtotalvi.MrTotalVI`)."""
+        n = n_latent_protein_only
+        if isinstance(n, bool) or int(n) != n or n < 0:
+            raise ValueError(f"n_latent_protein_only must be a whole number >= 0; got {n!r}.")
+        for value, allowed, name in (
+            (combination, {"replace", "concat"}, "protein_latent_combination"),
+            (heads, set(PROTEIN_RESIDUAL_HEADS), "protein_latent_heads"),
+            (prior, {"standard", "mog"}, "protein_latent_prior"),
+            (encoder_input, {"log1p", "ambient_zscore", "precomputed"}, "protein_latent_encoder_input"),
+            (conditioning, {"blind", "donor"}, "protein_latent_conditioning"),
+            (decode_draw, {"draw", "mean"}, "protein_latent_decode_draw"),
+        ):
+            if value not in allowed:
+                raise ValueError(f"{name} must be one of {sorted(allowed)}; got {value!r}.")
+        if not (isinstance(consistency_weight, (int, float)) and math.isfinite(consistency_weight)) or (
+            consistency_weight < 0
+        ):
+            raise ValueError(
+                f"protein_latent_consistency_weight must be a finite number >= 0; got {consistency_weight!r}."
+            )
+        check_free_bits_options(kl_weight, free_bits, granularity, statistic, schedule, "protein_latent")
+        self.n_latent_protein_only = int(n)
+        self.protein_latent_combination = combination
+        self.protein_latent_heads = heads
+        self.protein_latent_prior = prior
+        self.protein_latent_encoder_input = encoder_input
+        self.protein_latent_conditioning = conditioning
+        self.protein_latent_consistency_weight = float(consistency_weight)
+        self.protein_latent_kl_weight = float(kl_weight)
+        self.protein_latent_free_bits = float(free_bits)
+        self.protein_latent_free_bits_granularity = granularity
+        self.protein_latent_free_bits_statistic = statistic
+        self.protein_latent_free_bits_schedule = schedule
+        self.protein_latent_decode_draw = decode_draw
+        # Set by readouts that decode the posterior mean of z_p (see ``_zp_mean_decode_if_set``).
+        self._zp_mean_decode = False
+        if self.n_latent_protein_only == 0:
+            return
+        if self.n_latent_protein_residual > 0:
+            raise NotImplementedError(
+                "n_latent_protein_only > 0 cannot be combined with n_latent_protein_residual > 0: both feed "
+                "the protein heads and the choice between them is not made here. Use one of them."
+            )
+        if combination == "replace" and heads != "all":
+            raise ValueError(
+                "protein_latent_combination='replace' needs protein_latent_heads='all': the background head "
+                "reads z_p too (G181). Use protein_latent_combination='concat' for 'fore_mixing'."
+            )
+        if u_invariance_weight > 0:
+            raise NotImplementedError(
+                "u_invariance_weight > 0 is not implemented with n_latent_protein_only > 0: its counterfactual "
+                "decode would need a z_p."
+            )
+        if self.protein_latent_consistency_weight > 0:
+            if self.n_latent_protein_only != self.n_latent:
+                raise ValueError(
+                    "protein_latent_consistency_weight > 0 compares q(z | x, y) with q(z_p | y) dimension by "
+                    f"dimension, so n_latent_protein_only must equal n_latent ({self.n_latent}); got "
+                    f"{self.n_latent_protein_only}. No projection between the two is defined."
+                )
+        if prior == "mog" and self.protein_latent_free_bits > 0 and granularity == "per_dim":
+            raise NotImplementedError(
+                "protein_latent_free_bits > 0 with protein_latent_prior='mog' has no per-dimension KL; "
+                "use protein_latent_free_bits_granularity='group'."
+            )
+
+    def _zscore_protein(self, y: torch.Tensor, batch_index: torch.Tensor | None) -> torch.Tensor:
+        """DSB step-I standardised protein counts, with the empty-droplet statistics of the batch."""
         mean = self._context_rows(self.dsb_log_mean, batch_index)
         sd = self._context_rows(self.dsb_log_sd, batch_index)
         return (torch.log(y + 10.0) - mean) / sd
+
+    def _protein_latent_dist(
+        self, y: torch.Tensor, batch_index: torch.Tensor | None, sample_index, latent_input: torch.Tensor | None = None
+    ) -> Normal:
+        """``q(z_p | y)``; ``sample_index`` is read only by a donor-conditioned encoder.
+
+        With ``protein_latent_encoder_input="precomputed"`` the encoder reads ``latent_input`` (the
+        supplied per-cell matrix, no gradient) instead of ``y``.
+        """
+        if self.protein_latent_encoder_input == "ambient_zscore":
+            y = self._zscore_protein(y, batch_index)
+        elif self.protein_latent_encoder_input == "precomputed":
+            if latent_input is None:
+                raise RuntimeError("protein_latent_encoder_input='precomputed' needs the registered matrix.")
+            y = latent_input.detach().to(y.dtype)
+        return self.qzp(y, sample_index)
+
+    @contextlib.contextmanager
+    def _zp_mean_decode_if_set(self):
+        """Decode the posterior mean of ``z_p`` inside the block when ``protein_latent_decode_draw="mean"``."""
+        if self.n_latent_protein_only == 0 or self.protein_latent_decode_draw != "mean":
+            yield
+            return
+        previous, self._zp_mean_decode = self._zp_mean_decode, True
+        try:
+            yield
+        finally:
+            self._zp_mean_decode = previous
+
+    def forward(self, *args, **kwargs):
+        """Readouts (``compute_loss=False``) honour ``protein_latent_decode_draw``; the loss always draws."""
+        if kwargs.get("compute_loss", True):
+            return super().forward(*args, **kwargs)
+        with self._zp_mean_decode_if_set():
+            return super().forward(*args, **kwargs)
+
+    def _kl_zp(self, inference_outputs) -> torch.Tensor | None:
+        """``KL(q(z_p | y) || p(z_p))`` per cell, shape ``(batch,)``; ``None`` when ``z_p`` is off.
+
+        Closed form for ``N(0, I)``; a Monte-Carlo estimate on the draws of ``z_p`` for the MoG prior.
+        """
+        qzp = inference_outputs.get("qzp")
+        if qzp is None:
+            return None
+        if self.protein_latent_prior == "mog":
+            return _kl_u(self.pzp, qzp, inference_outputs["zp"], None)
+        return self._kl_zp_dims(qzp).sum(dim=-1)
+
+    @staticmethod
+    def _kl_zp_dims(qzp: Normal) -> torch.Tensor:
+        """Per-dimension ``KL(q(z_p | y) || N(0, 1))``, shape ``(batch, n_latent_protein_only)``."""
+        return kl_divergence(qzp, Normal(torch.zeros_like(qzp.loc), torch.ones_like(qzp.scale)))
+
+    def _consistency_kl(self, inference_outputs) -> torch.Tensor | None:
+        """``KL(q(z | u, x, y) || q(z_p | y))`` per cell, closed form; ``None`` when off.
+
+        ``q(z | u)`` is ``N(z_base + mean(eps), scale(eps))`` given the draw of ``u``, so the term is
+        conditional on ``u`` and needs ``use_map=False`` with the legacy hierarchy. Both sides
+        receive gradient.
+        """
+        if self.protein_latent_consistency_weight == 0.0 or "qzp" not in inference_outputs:
+            return None
+        eps_dist = inference_outputs.get("eps_dist")
+        if eps_dist is None:
+            raise RuntimeError("protein_latent_consistency_weight > 0 needs q(eps) (use_map=False, legacy hierarchy).")
+        qz = Normal(inference_outputs["z_base"] + eps_dist.loc, eps_dist.scale)
+        kl = kl_divergence(qz, inference_outputs["qzp"]).sum(dim=-1)
+        return kl.mean(dim=0) if kl.ndim > 1 else kl
+
+    def _zp_loss(self, inference_outputs, kl_weight: float):
+        """Loss term, ``kl_local`` entries and logged metrics of ``z_p``; ``None`` when it is off.
+
+        The term per cell is ``kl_weight * beta * cost + consistency_weight * KL_consistency``, where
+        ``cost`` is the KL with the free-bits floor (:func:`~mrtotalvi._kl_free_bits.kl_with_free_bits`).
+        ``kl_div_zp`` keeps the true KL, so logs and ``elbo_validation`` stay comparable. The
+        consistency weight is annealed with ``kl_weight`` like the other KL terms (G180).
+        """
+        qzp = inference_outputs.get("qzp")
+        if qzp is None:
+            return None
+        floor = (
+            self.protein_latent_free_bits
+            if free_bits_active(self.protein_latent_free_bits_schedule, kl_weight)
+            else 0.0
+        )
+        if self.protein_latent_prior == "mog":
+            kl, dims = self._kl_zp(inference_outputs), None
+            cost = kl_with_free_bits(kl.unsqueeze(-1), floor, "group", self.protein_latent_free_bits_statistic)
+        else:
+            dims = self._kl_zp_dims(qzp)
+            kl = dims.sum(dim=-1)
+            cost = kl_with_free_bits(
+                dims, floor, self.protein_latent_free_bits_granularity, self.protein_latent_free_bits_statistic
+            )
+        term = kl_weight * self.protein_latent_kl_weight * cost
+        kl_local = {"kl_div_zp": kl}
+        metrics = {"kl_zp": kl.detach().mean()}
+        loc = qzp.loc.detach()
+        # The variance across one cell is 0, which would bias the epoch mean low.
+        if loc.shape[0] >= 2:
+            metrics["protein_latent_active_units"] = (
+                (loc.var(dim=0, unbiased=False) > RESIDUAL_ACTIVE_THRESHOLD).sum().to(loc.dtype)
+            )
+        if dims is not None:
+            for index, value in enumerate(dims.detach().mean(dim=0)):
+                metrics[f"kl_zp_dim_{index:02d}"] = value
+        consistency = self._consistency_kl(inference_outputs)
+        if consistency is not None:
+            term = term + kl_weight * self.protein_latent_consistency_weight * consistency
+            kl_local["kl_div_zp_consistency"] = consistency
+            metrics["kl_zp_consistency"] = consistency.detach().mean()
+        return term, kl_local, metrics
 
     def _kl_w(self, inference_outputs) -> torch.Tensor | None:
         """``KL(q(w | y) || N(0, I))`` per cell, shape ``(batch,)``; ``None`` when ``w`` is off."""
@@ -1624,14 +1950,30 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             # The cell's own draw of q(w): factual decodes read it. Counterfactual and DE decodes
             # never pass it, so they read w = 0.
             base["w"] = inference_outputs.get("w")
+        if self.n_latent_protein_only > 0:
+            # The cell's own draw of q(z_p). A decode without it raises: z_p = 0 is not "no information".
+            base["zp"] = inference_outputs.get("zp")
         return base
 
     def _residual_decoder(self) -> DecoderTOTALVIResidual | None:
-        """The decoder that reads ``w``, or ``None`` when the residual latent is off."""
-        if self.n_latent_protein_residual == 0:
+        """The decoder whose protein heads read ``w`` or ``z_p``, or ``None`` when both are off."""
+        if self.n_latent_protein_residual == 0 and self.n_latent_protein_only == 0:
             return None
         decoder = self.decoder
         return decoder.decoder if isinstance(decoder, BatchEmbeddingDecoderAdapter) else decoder
+
+    @contextlib.contextmanager
+    def _decoder_latent(self, value: torch.Tensor | None):
+        """Hand ``w`` or ``z_p`` to the decoder inside the block (the call site in scvi is fixed)."""
+        core = self._residual_decoder()
+        if core is None:
+            yield
+            return
+        core.set_residual(value)
+        try:
+            yield
+        finally:
+            core.set_residual(None)
 
     def _snapshot_background_bn(self):
         """Copy the BatchNorm buffers of the protein background decoder."""
@@ -1685,27 +2027,23 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         log_c=None,
         h=None,
         w=None,
+        zp=None,
     ):
         """TOTALVAE generative step, extended by the opt-in ADR-0011 protein model.
 
         ``w`` is the protein residual latent (only with ``n_latent_protein_residual > 0``). ``None``
-        decodes at ``w = 0``, which is what counterfactual and DE decodes use.
+        decodes at ``w = 0``, which is what counterfactual and DE decodes use. ``zp`` is the
+        protein-only latent (only with ``n_latent_protein_only > 0``); the decode needs it.
         """
         mode = getattr(self, "protein_noise_model", "totalvi")
         source = getattr(self, "protein_background_source", "z")
         # With source "z_base" the z pass's background BatchNorm update is dropped, so that head
         # advances once, on z_base (see ``_background_head``).
         bn_state = self._snapshot_background_bn() if source == "z_base" and self.training else None
-        core = self._residual_decoder()
-        if core is not None:
-            core.set_residual(w)
-        try:
+        with self._decoder_latent(w if w is not None else zp):
             out = super().generative(
                 z, library_gene, batch_index, label, cont_covs, cat_covs, size_factor, transform_batch
             )
-        finally:
-            if core is not None:
-                core.set_residual(None)
         if bn_state is not None:
             for bn, saved in bn_state:
                 for name, value in saved.items():
@@ -1764,7 +2102,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         # ``tensors``; only inference() moves its inputs, so move them all here.
         tensors = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
         inf_in = self._get_inference_input(tensors)
-        inf_out = self.inference(**inf_in, n_samples=n_samples)
+        with self._zp_mean_decode_if_set():
+            inf_out = self.inference(**inf_in, n_samples=n_samples)
         gen_in = self._get_generative_input(tensors, inf_out)
         gen_out = self.generative(**gen_in)
         py_ = gen_out["py_"]
@@ -1811,7 +2150,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
                 f"got {self.protein_noise_model!r}."
             )
         tensors = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in tensors.items()}
-        inf_out = self.inference(**self._get_inference_input(tensors), n_samples=n_samples)
+        with self._zp_mean_decode_if_set():
+            inf_out = self.inference(**self._get_inference_input(tensors), n_samples=n_samples)
         gen_out = self.generative(**self._get_generative_input(tensors, inf_out))
         py_, eff = gen_out["py_"], gen_out["per_batch_efficiency"]
         y = tensors[REGISTRY_KEYS.PROTEIN_EXP_KEY]
@@ -1823,7 +2163,6 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         res, _, _ = _posterior_native(y, m1, py_["fore_scale"], py_["r"], py_["mixing"], split)
         return res.mean(dim=0) if res.ndim == 3 else res
 
-    @torch.inference_mode()
     def _deterministic_decoder_parameters(
         self,
         z: torch.Tensor,
@@ -1831,8 +2170,26 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         batch_index: torch.Tensor,
         cont_covs: torch.Tensor | None = None,
         cat_covs: torch.Tensor | None = None,
+        zp: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Decode RNA and protein means without using stochastic ``rate_back``."""
+        """Decode RNA and protein means without using stochastic ``rate_back``.
+
+        ``zp`` is the cell's own protein-only latent, required with ``n_latent_protein_only > 0``
+        (G165: counterfactual and DE decodes keep the cell's own ``z_p``; callers pass its posterior
+        mean). With ``w`` the heads read ``w = 0`` (G90).
+        """
+        with self._decoder_latent(zp):
+            return self._deterministic_decode(z, library_size, batch_index, cont_covs, cat_covs)
+
+    @torch.inference_mode()
+    def _deterministic_decode(
+        self,
+        z: torch.Tensor,
+        library_size: torch.Tensor,
+        batch_index: torch.Tensor,
+        cont_covs: torch.Tensor | None = None,
+        cat_covs: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         self._require_default_protein_model("Deterministic counterfactual decoding")
         if cont_covs is None:
             decoder_input = z
@@ -1997,6 +2354,8 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         cf_sample: torch.Tensor | None = None,
         u_anchor: torch.Tensor | None = None,
         _lfc_aux: dict | None = None,
+        zp: torch.Tensor | None = None,
+        protein_latent_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return ``concat([px_scale, py_scale_det])`` at ``z = z_base + extra_eps``.
 
@@ -2035,6 +2394,10 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         cf_sample
             Counterfactual sample override for the eps encoder.  ``None``
             uses ``sample_index`` (real donor).
+        zp
+            Posterior mean of the cell's own ``z_p``, with ``n_latent_protein_only > 0``. ``None``
+            encodes ``y`` here with the passed ``batch_index``, which differs from the cell's batch
+            when that is a counterfactual batch and ``ambient_zscore`` uses per-batch statistics.
 
         Returns
         -------
@@ -2089,6 +2452,9 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
         z_base, _, _ = self.qz(u, sample_index_cf)
         z = z_base + extra_eps  # counterfactual latent
 
+        if self.n_latent_protein_only > 0 and zp is None:
+            zp = self._protein_latent_dist(y, batch_index, sample_index, protein_latent_input).loc
+
         gen_out = self.generative(
             z=z,
             library_gene=library_gene,
@@ -2096,6 +2462,7 @@ class MrTotalVAE(EmbeddingModuleMixin, TOTALVAE):
             label=label,
             cont_covs=cont_covs,
             cat_covs=cat_covs,
+            zp=zp,
         )
 
         px_ = gen_out["px_"]

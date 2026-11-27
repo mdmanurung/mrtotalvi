@@ -242,6 +242,30 @@ def _encode_u_params(model, adata, indices: np.ndarray, batch_size: int):
     return tuple(values[inverse] for values in params)
 
 
+def _encode_protein_latent_mean(model, adata, indices: np.ndarray, batch_size: int) -> np.ndarray:
+    """Posterior mean of each cell's own ``z_p``, ``(cells, n_latent_protein_only)``, in request order.
+
+    The batch and donor are the cell's own, never a counterfactual one (G165).
+    """
+    loader_indices, inverse = _loader_order(adata, indices)
+    loader = model._make_data_loader(adata=adata, indices=loader_indices, batch_size=batch_size)
+    locs = []
+    was_training = model.module.training
+    model.module.eval()
+    try:
+        with torch.inference_mode():
+            for tensors in loader:
+                inputs = model.module._get_inference_input(tensors)
+                qzp = model.module._protein_latent_dist(
+                    inputs["y"], inputs.get("batch_index"), inputs["sample_index"], inputs.get("protein_latent_input")
+                )
+                locs.append(qzp.loc.detach().cpu())
+    finally:
+        model.module.train(was_training)
+    loc = torch.cat(locs).numpy().astype(np.float32, copy=False)
+    return loc if inverse is None else loc[inverse]
+
+
 def _collect_observed_context(model, adata, indices: np.ndarray, batch_size: int):
     loader_indices, inverse = _loader_order(adata, indices)
     loader = model._make_data_loader(
@@ -1576,6 +1600,13 @@ def get_counterfactual_expression(
     )
 
     flat_z = z_values.reshape(-1, model.module.n_latent)
+    flat_zp = None
+    if model.module.n_latent_protein_only > 0:
+        # Rows are (draw, cell, target); every row of a cell decodes that cell's own z_p.
+        zp_cells = _encode_protein_latent_mean(model, adata, query_indices, batch_size)
+        flat_zp = np.broadcast_to(zp_cells[None, :, None, :], (*draw_cell_target, zp_cells.shape[1])).reshape(
+            -1, zp_cells.shape[1]
+        )
     device = model.module.device
     was_training = model.module.training
     model.module.eval()
@@ -1642,6 +1673,11 @@ def get_counterfactual_expression(
                     cat_covs=(
                         torch.as_tensor(cat_covs[rows], dtype=torch.long, device=device)
                         if cat_covs is not None
+                        else None
+                    ),
+                    zp=(
+                        torch.as_tensor(flat_zp[rows], dtype=torch.float32, device=device)
+                        if flat_zp is not None
                         else None
                     ),
                 )
