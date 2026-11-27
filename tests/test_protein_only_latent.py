@@ -325,7 +325,8 @@ def test_counterfactual_protein_decode_is_invariant_to_donor_in_replace_mode():
     for key in out.data_vars:
         if key.startswith("protein_") and key != "protein_available":
             values = out[key].to_numpy()
-            np.testing.assert_array_equal(values, np.broadcast_to(values[:, :, :1], values.shape))
+            # float32 rounding only: CI BLAS differs by 1 ulp (rel 1e-7) across row batches; a donor effect is >1e-2.
+            np.testing.assert_allclose(values, np.broadcast_to(values[:, :, :1], values.shape), rtol=1e-5)
     rna = out["rna_scale"].to_numpy()
     assert not np.array_equal(rna, np.broadcast_to(rna[:, :, :1], rna.shape))  # donors still move RNA
 
