@@ -528,7 +528,7 @@ def test_mog_prior_has_twenty_components_and_trains():
 
 @torch.no_grad()
 def test_mog_with_one_live_component_matches_the_closed_form_kl():
-    model = _model(protein_latent_prior="mog")
+    model = _model(protein_latent_prior="mog", protein_latent_mog_kl_draws=1)  # the 20000 draws below are the estimate
     module, tensors, inference, _ = _outputs(model)
     prior = module.pzp
     prior.u_prior_means.zero_()
@@ -705,9 +705,7 @@ def test_mog_prior_with_per_dimension_free_bits_is_not_implemented():
 def test_mog_kl_draws_default_is_64_and_is_validated():
     # G190: default 64. MoG checkpoints without the argument load, so MoG with free bits builds without it.
     assert _model(protein_latent_prior="mog").module.protein_latent_mog_kl_draws == 64
-    _model(
-        protein_latent_prior="mog", protein_latent_free_bits=0.25, protein_latent_free_bits_granularity="group"
-    )
+    _model(protein_latent_prior="mog", protein_latent_free_bits=0.25, protein_latent_free_bits_granularity="group")
     for bad in (0, -1, 2.5, True, None):
         with pytest.raises(ValueError, match="protein_latent_mog_kl_draws"):
             _model(protein_latent_prior="mog", protein_latent_mog_kl_draws=bad)
