@@ -594,6 +594,21 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   signal. Only `protein_noise_model="totalvi"` is supported. With `gene_likelihood="zinb"` the RNA dropout
   head shares `sigmoid_decoder` with the protein mixing head, so `w` reaches the dropout; this is documented,
   not blocked, and `"nb"` is unaffected.
+- **`protein_residual_kl_weight` and `protein_residual_free_bits*` (EXPERIMENTAL).** Saved constructor arguments that act on `w`
+  and need `n_latent_protein_residual > 0`. Defaults reproduce the current objective exactly.
+  `protein_residual_kl_weight` (`beta_w`, default `1.0`) multiplies the annealed `kl_weight` on the KL of `w`.
+  `protein_residual_free_bits` (`lambda` nats, default `0.0`, off) clamps the KL of each group from below (Kingma et al.
+  2016, appendix C.8), so the term is `sum_g max(lambda, stat(KL_g))`. Below the floor the gradient of that group is
+  zero: the floor removes the penalty and does not force `w` to be used. `protein_residual_free_bits_granularity` sets the
+  groups (`"per_dim"`, or `"group"` for one group of the summed KL). `protein_residual_free_bits_statistic` sets `stat`:
+  `"batch_mean"` clamps a group when its minibatch-mean KL is below `lambda`, and each cell then carries the
+  constant `lambda` for that group (the clamped total spread equally over cells); `"per_cell"` clamps each cell's
+  own group KL. `protein_residual_free_bits_schedule="after_warmup"` applies the floor only once `kl_weight` has reached
+  the plan's `max_kl_weight` (default `1.0`; set from `plan_kwargs` in `train()`). Under `scale_observations` the
+  clamp uses the batch mean weighted by the donor weights, so the loss stays continuous at the floor. Logged `kl_w` and
+  `kl_w_dim_<i>` (per-dimension KL) stay the true KL. `elbo_validation` stays the true ELBO, so early stopping
+  tracks it while training optimises the floored objective. The `per_dim`, `always` and `batch_mean`
+  defaults of groups, schedule and statistic are placeholders; the P2.5 search tests both values of each.
 - **`n_latent_protein_only` and the `protein_latent_*` options (EXPERIMENTAL).** Saved constructor arguments.
   The default `n_latent_protein_only=0` is off and changes nothing. A value `n > 0` adds a protein-only latent
   `z_p` of `n` dimensions (the P2.5 comparison uses 10 and 30) with its own encoder `q(z_p | y)`, which sees the
@@ -610,7 +625,7 @@ differently. Two defaults act on the `u`/`eps` hierarchy, and
   The KL of `z_p` is weighted by `protein_latent_kl_weight` times the annealed `kl_weight`. A free-bits floor
   (`protein_latent_free_bits`, in nats; 0 is off) makes a dimension, or all dimensions as one group, cost
   `max(floor, KL)`; `..._granularity` is `"per_dim"` or `"group"`, `..._statistic` is the minibatch mean or the
-  per-cell clamp, and `..._schedule` is `"constant"` or `"after_warmup"` (once `kl_weight` reaches 1.0). The logged
+  per-cell clamp, and `..._schedule` is `"constant"` or `"after_warmup"` (once `kl_weight` reaches the plan's `max_kl_weight`). The logged
   `kl_div_zp` stays the true KL. With the MoG prior only `"group"` is defined. `protein_latent_consistency_weight > 0`
   adds that weight times `KL(q(z | x, y) || q(z_p | y))`: closed form, conditional on the draw of `u`, annealed
   with `kl_weight` like the other KL terms. It needs `n_latent_protein_only == n_latent` (no projection between different sizes is

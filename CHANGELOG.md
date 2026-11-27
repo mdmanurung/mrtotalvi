@@ -32,6 +32,24 @@
   to `q(w | y)` by the u-encoder's sample-conditioned mechanism; no package default, P2.5 tests both. Under
   `gene_likelihood="zinb"` `w` reaches the RNA dropout through the shared mixing trunk; the RNA scale is unchanged.
 
+- `protein_residual_kl_weight`, `protein_residual_free_bits`, `protein_residual_free_bits_granularity`, `protein_residual_free_bits_schedule` and
+  `protein_residual_free_bits_statistic` (EXPERIMENTAL, defaults `1.0`, `0.0`, `"per_dim"`, `"constant"`, `"batch_mean"`, which
+  leave training byte-identical): saved KL knobs on the protein residual latent `w`. They need
+  `n_latent_protein_residual > 0` and raise `ValueError` otherwise. `protein_residual_kl_weight` (`beta_w`) multiplies the
+  annealed `kl_weight` on `KL(q(w | y) || N(0, I))`. `protein_residual_free_bits` is a free-bits floor in nats (Kingma et al.
+  2016, appendix C.8): the term is `sum_g max(lambda, stat(KL_g))`, with groups per dimension or all dimensions
+  together, and `stat` the minibatch mean (a clamped group adds the constant `lambda` to every cell and has zero
+  gradient) or each cell's own KL. `"after_warmup"` floors only once `kl_weight` reaches the plan's `max_kl_weight` (default `1.0`, read
+  from `plan_kwargs` in `train()`, so caps below or above 1 work). Under `scale_observations` the `batch_mean`
+  threshold uses the donor-weighted batch mean, the weights the loss applies, so the loss has no jump at the floor
+  (an unweighted threshold let a rising KL lower the weighted cost). The shared helper
+  `_kl_free_bits.kl_with_free_bits` carries both changes, so they apply to `protein_latent_free_bits*` (`z_p`)
+  too: their behaviour changes with `scale_observations=True` or a `max_kl_weight` other than 1. Defaults
+  (`free_bits=0`) are unchanged. Logged `kl_w` stays the true KL, and each epoch now also logs
+  `kl_w_dim_<i>`, the true per-dimension KL. With `beta_w != 1` or a floor the objective is no longer an ELBO;
+  `elbo_validation` stays the true ELBO. The groups and schedule defaults are placeholders: the P2.5 search tests
+  both values of each.
+
 - `protein_likelihood_weight` (EXPERIMENTAL, default `1.0`, which leaves training unchanged): a saved
   constructor argument that multiplies the protein reconstruction term and the protein background terms
   (background KL, efficiency prior, mixing regulariser) by `w`. scvi-tools scales the reconstruction only. Both
