@@ -37,6 +37,10 @@ numpy and scipy only. Sources:
   hc subset option, the VVE estimator, and the BIC convention (larger is better).
 - Scrucca and Raftery (2015), Adv Data Anal Classif 9:447-460: the scaled SVD transform.
 
+As in R GloScope, Monte Carlo draws split the ``r`` points over components by the
+hard-classification proportions of the sample's cells, while log-densities use the fitted
+mixing weights (G143). This holds for both ``gmm_model`` values.
+
 This is a clean-room implementation. It does NOT reproduce R mclust. mclust starts EM from
 model-based hierarchical clustering (VVV criterion). That criterion is not in the
 documentation, so this code starts from Ward clustering of the scaled-SVD data on a seeded
@@ -158,6 +162,9 @@ def _vve_fit(x, z0, tol=_VVE_TOL, max_iter=_VVE_MAX_ITER):
             break
         ll_old = ll
         pro, mean, rot, omega = _vve_mstep(x, z, rot)
+    else:
+        # Stopped at the cap right after an M-step: refresh loglik and z for the returned parameters.
+        z, ll = _vve_estep(x, pro, mean, rot, omega)
     return {"pro": pro, "mean": mean, "rot": rot, "omega": omega, "loglik": ll, "z": z, "loglik_trace": trace}
 
 

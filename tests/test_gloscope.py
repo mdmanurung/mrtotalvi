@@ -330,3 +330,16 @@ def test_vve_matches_full_on_shared_orientation_data(metric):
     full = sample_divergence(x, ids, gmm_model="full", **kw)[0][0, 1]
     vve = sample_divergence(x, ids, gmm_model="vve", **kw)[0][0, 1]
     assert vve == pytest.approx(full, rel=0.1)
+
+
+def test_vve_fit_at_iteration_cap_reports_loglik_of_returned_parameters():
+    # Regression: stopping at max_iter left loglik and z from before the last M-step.
+    from mrtotalvi._gloscope import _vve_estep, _vve_fit
+
+    rng = np.random.default_rng(3)
+    x = np.vstack([rng.normal(size=(400, 3)), rng.normal(size=(300, 3)) * [2, 1, 0.5] + 3])
+    z0 = rng.dirichlet(np.ones(3), size=len(x))
+    fit = _vve_fit(x, z0, tol=1e-12, max_iter=1)
+    z, ll = _vve_estep(x, fit["pro"], fit["mean"], fit["rot"], fit["omega"])
+    assert fit["loglik"] == pytest.approx(ll, abs=1e-9)
+    np.testing.assert_allclose(fit["z"], z)
